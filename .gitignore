@@ -1,0 +1,36 @@
+# macOS junk
+.DS_Store
+
+# Secrets and Keys
+.env
+*.local
+*.key
+*.pub
+
+# Binaries & Large Archives
+bin/
+main
+sentra-agent*
+*.zip
+*.tar.gz
+*.dump
+
+# Supabase - exclude edge functions and CSV metadata
+supabase/
+Supabase*.csv
+03_BINARY*
+
+# Logs
+*.log
+
+# Backups
+*.bak
+
+# Internal Docs
+01_RISEOTB*
+sentra-bug-audit.md
+
+# Optional Components
+launcher/
+security/
+e2e/

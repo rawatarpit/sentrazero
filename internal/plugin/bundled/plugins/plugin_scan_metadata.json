@@ -1,0 +1,28 @@
+{
+  "name": "plugin_scan_metadata",
+  "version": "1.0.0",
+  "filename": "scan_metadata.py",
+  "checksum": "bundled",
+  "trusted": true,
+  "signature": "",
+  "signature_key_id": "bundled",
+  "category": "scan",
+  "runtime_type": "python",
+  "runtime_dependencies": {},
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "input_path": {"type": "string"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "file_count": {"type": "integer"},
+      "total_size_bytes": {"type": "integer"},
+      "file_types": {"type": "object"},
+      "headers": {"type": "array"},
+      "columns": {"type": "array"}
+    }
+  }
+}
