@@ -51,7 +51,10 @@ func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonK
 		httpclient.WithTimeout(30*time.Second),
 	)
 
-	resp, err := httpc.Get(ctx, FunctionListPlugins)
+	// ✅ FIX 1: pass org_id as query param
+	url := fmt.Sprintf("%s?org_id=%s", FunctionListPlugins, orgID)
+
+	resp, err := httpc.Get(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -62,13 +65,14 @@ func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonK
 		return nil, fmt.Errorf("plugin fetch failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var result PluginListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// ✅ FIX 2: response is ARRAY, not object
+	var plugins []DBPlugin
+	if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	log.Printf("[plugin] Fetched %d plugins from API for org %s", len(result.Plugins), orgID)
-	return result.Plugins, nil
+	log.Printf("[plugin] Fetched %d plugins from API for org %s", len(plugins), orgID)
+	return plugins, nil
 }
 
 func ShouldRunPlugin(deviceID string, rolloutPercentage int) bool {
