@@ -148,16 +148,29 @@ func RunSSEClient(
 	backoff := 1 * time.Second
 	const maxBackoff = 30 * time.Second
 
-	rand.Seed(time.Now().UnixNano())
-
 	log.Printf("[sse] connecting to agent_stream")
 
 	// Start low-latency polling client as primary
 	// This uses REST API polling which is more reliable than SSE
 	go RunPollingClient(ctx, device, cfg, device.Token)
 
-	// Give realtime a chance to connect first
-	time.Sleep(500 * time.Millisecond)
+	// Wait for polling client to be ready (with timeout)
+	pollCtx, pollCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pollCancel()
+	for {
+		select {
+		case <-pollCtx.Done():
+			log.Printf("[sse] warning: polling client may not be ready")
+			break
+		default:
+			if pollingClient != nil && pollingClient.IsRunning() {
+				log.Printf("[sse] polling client ready")
+				goto PollingReady
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+PollingReady:
 
 	// If realtime is connected, reduce SSE polling frequency
 	// SSE becomes a fallback mechanism
@@ -232,7 +245,7 @@ func connectAndConsume(
 	req.Header.Set("Authorization", "Bearer "+cfg.BackendAnonKey)
 	req.Header.Set("x-agent-token", device.Token)
 
-	client := &http.Client{Timeout: 0}
+	client := &http.Client{Timeout: 120 * time.Second}
 
 	resp, err := client.Do(req)
 	if err != nil {

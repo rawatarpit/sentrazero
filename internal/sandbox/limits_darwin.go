@@ -28,7 +28,17 @@ func Apply(ctx context.Context, cmd *exec.Cmd, limits Limits) error {
 		Setpgid: true,
 	}
 
+	initWatcherRegistry()
+
+	ctx, cancel := context.WithCancel(ctx)
+	w := &contextWatcher{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	registerWatcher(w)
+
 	go func() {
+		defer unregisterWatcher(w)
 		<-ctx.Done()
 		_ = killProcessGroup(cmd)
 	}()

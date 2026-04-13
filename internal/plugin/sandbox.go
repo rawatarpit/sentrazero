@@ -44,7 +44,10 @@ func RunSandboxedPlugin(
 ) (*SandboxResult, error) {
 
 	start := time.Now()
-	plb, _ := json.Marshal(payload)
+	plb, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+	}
 
 	timeout := 5 * time.Minute
 	if manifest.Resources.TimeoutSeconds > 0 {

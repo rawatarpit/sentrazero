@@ -207,11 +207,16 @@ func executeJobSafe(id int, req jobRequest) {
 				"error":  err.Error(),
 			})
 			atomic.AddInt64(&totalFailed, 1)
-			_ = execClient.ReportJobFailure(
+			if repErr := execClient.ReportJobFailure(
 				context.Background(),
 				req.jobID,
 				fmt.Errorf("lease verification failed: %w", err),
-			)
+			); repErr != nil {
+				obs.Warn("failed to report job failure to backend", obs.Field{
+					"job_id": req.jobID,
+					"error":  repErr.Error(),
+				})
+			}
 			return
 		}
 		if !leaseStatus.IsValid {
@@ -221,11 +226,16 @@ func executeJobSafe(id int, req jobRequest) {
 				"job_status": leaseStatus.Status,
 			})
 			atomic.AddInt64(&totalFailed, 1)
-			_ = execClient.ReportJobFailure(
+			if repErr := execClient.ReportJobFailure(
 				context.Background(),
 				req.jobID,
 				fmt.Errorf("lease invalid - job claimed by another agent"),
-			)
+			); repErr != nil {
+				obs.Warn("failed to report job failure to backend", obs.Field{
+					"job_id": req.jobID,
+					"error":  repErr.Error(),
+				})
+			}
 			return
 		}
 	}
@@ -248,10 +258,17 @@ func executeJobSafe(id int, req jobRequest) {
 
 	// ---- Record plugin execution start ----
 	var pluginExecID string
+	var pluginExecErr error
 	if execClient != nil && req.orgID != "" && req.jobID != "" {
-		pluginExecID, _ = execClient.RecordPluginExecutionStart(
+		pluginExecID, pluginExecErr = execClient.RecordPluginExecutionStart(
 			ctx, req.orgID, req.jobType, req.jobID, "",
 		)
+		if pluginExecErr != nil {
+			obs.Warn("failed to record plugin execution start", obs.Field{
+				"job_id": req.jobID,
+				"error":  pluginExecErr.Error(),
+			})
+		}
 	}
 
 	// ---- Execute job payload ----
@@ -269,7 +286,12 @@ func executeJobSafe(id int, req jobRequest) {
 			status = "failed"
 			errMsg = err.Error()
 		}
-		_ = execClient.RecordPluginExecutionEnd(ctx, pluginExecID, status, errMsg)
+		if endErr := execClient.RecordPluginExecutionEnd(ctx, pluginExecID, status, errMsg); endErr != nil {
+			obs.Warn("failed to record plugin execution end", obs.Field{
+				"execution_id": pluginExecID,
+				"error":        endErr.Error(),
+			})
+		}
 	}
 
 	// ---- Stop heartbeat ----
@@ -284,11 +306,16 @@ func executeJobSafe(id int, req jobRequest) {
 		atomic.AddInt64(&totalFailed, 1)
 
 		if execClient != nil && req.jobID != "" {
-			_ = execClient.ReportJobFailure(
+			if repErr := execClient.ReportJobFailure(
 				context.Background(),
 				req.jobID,
 				err,
-			)
+			); repErr != nil {
+				obs.Warn("failed to report job failure", obs.Field{
+					"job_id": req.jobID,
+					"error":  repErr.Error(),
+				})
+			}
 
 			result := execClient.CompleteJob(ctx, req.jobID, "failed", duration.Milliseconds(), nil)
 			if result.IsStaleExecution() {
@@ -328,13 +355,23 @@ func executeJobSafe(id int, req jobRequest) {
 				"already_done":  result.IsAlreadyDone,
 				"duration_ms":   duration.Milliseconds(),
 			})
-			_ = execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil)
+			if repErr := execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil); repErr != nil {
+				obs.Warn("failed to report job completion after stale execution", obs.Field{
+					"job_id": req.jobID,
+					"error":  repErr.Error(),
+				})
+			}
 		} else if result.Err != nil {
 			obs.Error("job completed but DB update failed", obs.Field{
 				"job_id": req.jobID,
 				"error":  result.Err.Error(),
 			})
-			_ = execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil)
+			if repErr := execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil); repErr != nil {
+				obs.Warn("failed to report job completion after DB failure", obs.Field{
+					"job_id": req.jobID,
+					"error":  repErr.Error(),
+				})
+			}
 		} else {
 			obs.Info("job completed and persisted", obs.Field{
 				"job_id":      req.jobID,
@@ -591,7 +628,14 @@ func IsJobProcessingPaused() bool {
 func ActiveJobsCount() int {
 	activeJobsMutex.Lock()
 	defer activeJobsMutex.Unlock()
-	return len(activeJobs) + len(runningJobs)
+	count := 0
+	for range activeJobs {
+		count++
+	}
+	for range runningJobs {
+		count++
+	}
+	return count
 }
 
 func IsJobActive(jobID string) bool {
@@ -647,13 +691,23 @@ func ReportInFlightFailures(client interface{}) {
 	for jobID := range activeJobs {
 		log.Printf("[dispatcher] Reporting active job failed: %s", jobID)
 		if execClient != nil {
-			_ = execClient.ReportJobFailure(context.Background(), jobID, errors.New("agent shutdown during graceful drain"))
+			if repErr := execClient.ReportJobFailure(context.Background(), jobID, errors.New("agent shutdown during graceful drain")); repErr != nil {
+				obs.Warn("failed to report in-flight job failure", obs.Field{
+					"job_id": jobID,
+					"error":  repErr.Error(),
+				})
+			}
 		}
 	}
 	for jobID := range runningJobs {
 		log.Printf("[dispatcher] Reporting in-flight job failed: %s", jobID)
 		if execClient != nil {
-			_ = execClient.ReportJobFailure(context.Background(), jobID, errors.New("agent shutdown during graceful drain"))
+			if repErr := execClient.ReportJobFailure(context.Background(), jobID, errors.New("agent shutdown during graceful drain")); repErr != nil {
+				obs.Warn("failed to report in-flight job failure", obs.Field{
+					"job_id": jobID,
+					"error":  repErr.Error(),
+				})
+			}
 		}
 	}
 }

@@ -15,7 +15,7 @@ type ExecutionClient interface {
 
 var (
 	hbMu sync.Mutex
-	hbs  = map[string]context.CancelFunc{}
+	hbs  = make(map[string]context.CancelFunc)
 )
 
 // StartExecutionHeartbeat starts periodic job execution heartbeat.

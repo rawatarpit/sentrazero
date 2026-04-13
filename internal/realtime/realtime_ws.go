@@ -230,11 +230,12 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 		return
 	}
 
-	if _, exists := pollingClient.sentJobs.Load(jobID); exists {
-		return
+	if pollingClient != nil {
+		if _, exists := pollingClient.sentJobs.Load(jobID); exists {
+			return
+		}
+		pollingClient.sentJobs.Store(jobID, time.Now())
 	}
-
-	pollingClient.sentJobs.Store(jobID, time.Now())
 
 	jobType, _ := newRecord["job_type"].(string)
 	payloadJSON, _ := json.Marshal(newRecord["payload"])
