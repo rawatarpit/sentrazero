@@ -86,7 +86,7 @@ func main() {
 			id.OrgID,
 		)
 
-		err := validateClient.SendDeviceHeartbeat(ctx, backend.DeviceHeartbeat{
+		_, err := validateClient.SendDeviceHeartbeat(ctx, backend.DeviceHeartbeat{
 			DeviceID: id.DeviceID,
 		})
 

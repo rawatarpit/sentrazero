@@ -263,36 +263,54 @@ func (ep *EnvironmentPool) runEviction() {
 
 	evicted := 0
 	var freedBytes int64
+
+	type evictionCandidate struct {
+		key  string
+		path string
+		size int64
+		env  *CachedEnvironment
+	}
+
+	var candidates []evictionCandidate
+
 	for key, env := range ep.environments {
 		env.mu.Lock()
 		if env.State == EnvStateWarm || env.State == EnvStateReady {
 			if now.Sub(env.LastUsed) > ttl {
 				envSize := calculateDirSize(env.Path)
 				env.State = EnvStateCleaning
-				ep.mu.Unlock()
-
-				go func(k string, p string, size int64) {
-					if err := os.RemoveAll(p); err != nil {
-						obs.Warn("environment_eviction_failed", obs.Field{
-							"env_key": k,
-							"error":   err.Error(),
-						})
-					}
-					ep.mu.Lock()
-					delete(ep.environments, k)
-					ep.currentDiskBytes -= size
-					if ep.currentDiskBytes < 0 {
-						ep.currentDiskBytes = 0
-					}
-					ep.mu.Unlock()
-				}(key, env.Path, envSize)
-
+				candidates = append(candidates, evictionCandidate{key: key, path: env.Path, size: envSize, env: env})
 				evicted++
 				freedBytes += envSize
-				continue
 			}
 		}
 		env.mu.Unlock()
+	}
+
+	for _, cand := range candidates {
+		go func(k string, p string, size int64, env *CachedEnvironment) {
+			ep.mu.Lock()
+			env.mu.Lock()
+			if env.State != EnvStateCleaning {
+				env.mu.Unlock()
+				ep.mu.Unlock()
+				return
+			}
+			env.mu.Unlock()
+
+			if err := os.RemoveAll(p); err != nil {
+				obs.Warn("environment_eviction_failed", obs.Field{
+					"env_key": k,
+					"error":   err.Error(),
+				})
+			}
+			delete(ep.environments, k)
+			ep.currentDiskBytes -= size
+			if ep.currentDiskBytes < 0 {
+				ep.currentDiskBytes = 0
+			}
+			ep.mu.Unlock()
+		}(cand.key, cand.path, cand.size, cand.env)
 	}
 
 	if evicted > 0 {
@@ -495,10 +513,10 @@ func (ep *EnvironmentPool) ReleaseEnvironment(env *CachedEnvironment, keepWarm b
 
 	ep.mu.Lock()
 	env.mu.Lock()
-	defer ep.mu.Unlock()
 
 	if env.State == EnvStateCleaning {
 		env.mu.Unlock()
+		ep.mu.Unlock()
 		return
 	}
 
@@ -511,6 +529,7 @@ func (ep *EnvironmentPool) ReleaseEnvironment(env *CachedEnvironment, keepWarm b
 
 	ep.currentDiskBytes += envSize
 	env.mu.Unlock()
+	ep.mu.Unlock()
 }
 
 func (ep *EnvironmentPool) IsValidEnvironment(envPath string) bool {

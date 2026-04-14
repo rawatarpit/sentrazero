@@ -165,7 +165,21 @@ func IsKeyValid(key *SignatureKey) bool {
 	return true
 }
 
-func VerifyPluginSignature(ctx context.Context, pluginPath, signatureB64, keyID string) error {
+func loadManifest(manifestPath string) (*Manifest, error) {
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	return &manifest, nil
+}
+
+func VerifyPluginSignature(ctx context.Context, manifestPath, signatureB64, keyID string) error {
 	if signatureB64 == "" {
 		return fmt.Errorf("plugin signature is required but not provided")
 	}
@@ -195,12 +209,16 @@ func VerifyPluginSignature(ctx context.Context, pluginPath, signatureB64, keyID 
 		return fmt.Errorf("invalid signature size: expected %d, got %d", ed25519.SignatureSize, len(signature))
 	}
 
-	pluginData, err := os.ReadFile(pluginPath)
+	manifest, err := loadManifest(manifestPath)
 	if err != nil {
-		return fmt.Errorf("failed to read plugin for signature verification: %w", err)
+		return fmt.Errorf("failed to load manifest for signature verification: %w", err)
 	}
 
-	if !ed25519.Verify(key.PublicKey, pluginData, signature) {
+	signingData := fmt.Sprintf("%s|%s|%s|%s", manifest.Name, manifest.Version, manifest.Filename, manifest.Checksum)
+	msgBytes := []byte(signingData)
+	hash := sha256.Sum256(msgBytes)
+
+	if !ed25519.Verify(key.PublicKey, hash[:], signature) {
 		return fmt.Errorf("plugin signature verification failed")
 	}
 
@@ -243,7 +261,8 @@ func VerifyPluginIntegrity(ctx context.Context, manifest Manifest, pluginDir str
 		return fmt.Errorf("signature and signature_key_id are required but not provided")
 	}
 
-	if err := VerifyPluginSignature(ctx, binaryPath, manifest.Signature, manifest.SignatureKeyID); err != nil {
+	manifestPath := filepath.Join(pluginDir, manifest.Name+".json")
+	if err := VerifyPluginSignature(ctx, manifestPath, manifest.Signature, manifest.SignatureKeyID); err != nil {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 	manifest.SignatureVerified = true

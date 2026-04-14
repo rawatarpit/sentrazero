@@ -102,7 +102,7 @@ func Validate(parentCtx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("startup: plugin directory not accessible: %w", err)
 	}
 
-	if pluginDir != "" && runtime.Compiler == "gc" {
+	if os.Getenv("SENTRA_NATIVE_PLUGINS_REQUIRED") == "1" {
 		if runtime.GOOS != "windows" && !CGOEnabled {
 			return fmt.Errorf("startup: native plugins require CGO_ENABLED=1")
 		}

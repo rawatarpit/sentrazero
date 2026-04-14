@@ -349,9 +349,6 @@ func (pr *PythonRuntime) Cleanup(ctx context.Context, envPath string) error {
 	for _, f := range tempFiles {
 		os.Remove(filepath.Join(envPath, f))
 	}
-	if pr.venvPath != "" {
-		os.RemoveAll(pr.venvPath)
-	}
 	return nil
 }
 

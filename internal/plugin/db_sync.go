@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"sentra-agent/internal/auth"
@@ -152,7 +153,14 @@ func SyncPluginsFromAPI(ctx context.Context) error {
 			}
 		}
 
-		pluginDir := filepath.Join(dir, p.Name, p.OS+"-"+p.Arch)
+		pluginOS := p.OS
+		pluginArch := p.Arch
+		if pluginOS == "" || pluginArch == "" {
+			pluginOS = runtime.GOOS
+			pluginArch = runtime.GOARCH
+		}
+
+		pluginDir := filepath.Join(dir, p.Name, pluginOS+"-"+pluginArch)
 		if err := os.MkdirAll(pluginDir, 0700); err != nil {
 			log.Printf("⚠️ Failed to create plugin directory for %s: %v", p.Name, err)
 			continue

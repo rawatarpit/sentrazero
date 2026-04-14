@@ -14,38 +14,70 @@ Sentra is a **decentralized compute network** that transforms idle developer mac
 
 | Feature | Benefit |
 |---------|---------|
-| **Plug-and-play** | Single binary, claim code activation - no config files |
+| **Zero-Config Setup** | Single binary, claim code activation - no env vars needed |
 | **Auto-scaling** | Jobs automatically distributed to available devices |
 | **Plugin-based** | Extend functionality via dynamically loaded plugins |
 | **Warm pools** | Pre-warmed runtime environments for fast job startup |
 | **Graceful shutdown** | Drain in-flight jobs before termination |
+| **Redis-powered** | Multi-agent coordination with Redis Streams |
 
 ## Quick Start
 
+### Prerequisites
+
+- PostgreSQL database with Supabase (for metadata and jobs)
+- Redis (optional, for multi-agent coordination)
+- Python 3.8+ or Node.js 18+ (if using runtime plugins)
+
+### Start the Agent
+
 ```bash
-# Run with claim code
+# Run with claim code (recommended - zero setup required)
 ./bin/sentra-agent --claim-code YOUR_CLAIM_CODE
 
-# Or run without - agent will prompt for claim code
+# Or agent will prompt for claim code if not provided
 ./bin/sentra-agent
 ```
 
-## Configuration
+That's it! The agent will:
+1. Claim itself to your organization using the claim code
+2. Fetch configuration from the backend automatically
+3. Connect to Redis (if configured)
+4. Start processing jobs
 
-### Environment Variables
+### Docker Deployment
+
+```bash
+docker run -d \
+  --name sentra-agent \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  sentra/agent:latest \
+  --claim-code YOUR_CLAIM_CODE
+```
+
+## Zero-Config Architecture
+
+The agent is designed to run with **zero environment variables**:
+
+```
+User runs: ./sentra-agent --claim-code ABC123
+
+Agent does automatically:
+1. Call claim_device API → gets device_id, token, backend_url
+2. Call health_policy API → gets max_workers, redis_url
+3. Saves config to ~/.sentra/config.json
+4. Starts polling for jobs
+```
+
+### Optional Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BACKEND_URL` | Yes | - | Supabase project URL |
-| `BACKEND_ANON_KEY` | No | - | Anonymous key for API access |
-| `ORG_ID` | No | - | Organization ID (auto-set on claim) |
-| `MAX_CONCURRENCY` | No | CPU/2 | Max concurrent jobs |
-| `AGENT_NAME` | No | hostname | Device display name |
-| `SENTRA_MOUNT_PATH` | No | ~/sentra/data | Local storage path |
-| `SENTRA_TOKEN_PATH` | No | ~/.sentra/tokens/{device_id}.token | Token storage path template |
-| `SENTRA_USE_KEYRING` | No | auto | Use keyring for token storage (true/false/auto) |
-| `SENTRA_REALTIME_MODE` | No | realtime | realtime, sse, or both |
-| `SENTRA_SHUTDOWN_GRACE_PERIOD` | No | 30s | Grace period on shutdown |
+| `SENTRA_CLAIM_CODE` | No* | - | Claim code (*required on first run) |
+| `SENTRA_BACKEND_URL` | No | auto-detect | Supabase project URL |
+| `SENTRA_REDIS_URL` | No | - | Redis URL for job queue |
+
+*The claim code can also be provided via CLI flag `--claim-code` or the agent will prompt for it.
 
 ### CLI Flags
 
@@ -59,8 +91,8 @@ Sentra is a **decentralized compute network** that transforms idle developer mac
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Supabase Backend                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Devices    │  │  Agent Jobs  │  │   Executions/Pipeline│  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+│  │   Devices    │  │  Agent Jobs  │  │   Executions/Pipeline │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────���  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │   Datasets   │  │   Plugins    │  │   Storage Config      │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
@@ -69,32 +101,35 @@ Sentra is a **decentralized compute network** that transforms idle developer mac
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                                │
+                               ▼ (Redis Streams for multi-agent)
+┌─────────────────────────────────────────────────────────────────┐
+│                        Redis (Optional)                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+│  │ Job Queue   │  │ Worker State│  │  Results Cache        │  │
+│  │ (Streams)  │  │  (Hash)     │  │  (TTL keys)          │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                               │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Sentra Agent (Go)                          │
+│                      Sentra Agent (Go)                        │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────┐  │
-│  │   Config  │  │   Auth    │  │ Dispatcher│  │ Plugin  │  │
-│  │          │  │           │  │          │  │ System  │  │
+│  │  Config  │  │   Auth    │  │ Dispatcher│  │ Plugin  │  │
+│  │         │  │           │  │          │  │ System  │  │
 │  └────────────┘  └────────────┘  └────────────┘  └─────────┘  │
+│  ┌────────────────────┐  ┌──────────────────────────────┐   │
+│  │  Redis Client       │  │   Bootstrap (Zero-Config)         │   │
+│  └────────────────────┘  └──────────────────────────────┘   │
 │                                                                 │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────┐  │
-│  │ Heartbeat  │  │  Realtime  │  │  Backend   │  │ Startup │  │
+│  │ Heartbeat  │  │  Realtime  │  │  Backend  │  │ Startup │  │
 │  │            │  │            │  │           │  │         │  │
-│  └────────────┘  └────────────┘  └────────────┘  └─────────┘  │
+│  └────────────┘  └────────────┘  └────���───────┘  └─────────┘  │
 │                                                                  │
 │  ┌─────────────────────┐  ┌──────────────────────────────┐    │
 │  │  Runtime Manager    │  │   Environment Pool (v2)      │    │
 │  │  (Python/Node)     │  │   (Warm pools for fast start)   │    │
 │  └─────────────────────┘  └──────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Plugin Execution Layer                        │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌────────────────┐    │
-│  │  v2 Runtime     │  │   Docker        │  │   Native       │    │
-│  │  (Python/Node)  │  │   Sandbox      │  │   (CGO)        │    │
-│  └─────────────────┘  └─────────────────┘  └────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -106,6 +141,7 @@ The dispatcher manages job execution across worker pools:
 
 - **Worker Pool**: Configurable concurrent workers (default: CPU/2)
 - **Job Queue**: FIFO processing with lease-based assignment
+- **Redis Queue**: Optional Redis Streams for multi-agent coordination
 - **Retry Logic**: Automatic retry with configurable backoff
 - **Graceful Shutdown**: Waits for in-flight jobs before termination
 
@@ -123,14 +159,16 @@ Plugins are dynamically loaded executable code:
 
 - **Plugin Manager**: Download, verify, and cache plugins
 - **Signature Verification**: Ed25519 signature validation
-- **Bundled Plugins**: Built-in scan_metadata plugin for dataset scanning
+- **Bundled Plugins**: Built-in scan_metadata and merge_metadata plugins
 
-### Storage Backend
+### Redis Integration
 
-Supports multiple storage modes:
+For multi-agent deployments, Redis provides:
 
-- **Shared Mount**: Local filesystem (default, `~/sentra/data`)
-- **Object Storage**: S3-compatible remote storage
+- **Job Queue**: Redis Streams with consumer groups
+- **Worker State**: Real-time worker status tracking
+- **Results Cache**: Fast access to job results
+- **Pub/Sub**: Real-time notifications
 
 ## Job Types
 
@@ -140,7 +178,6 @@ Supports multiple storage modes:
 | `process` | Process individual data chunks |
 | `process_dataset` | Full dataset processing pipeline |
 | `merge_dataset` | Merge processed chunks into final output |
-| `ingest_dataset` | Ingest raw data into storage |
 
 ## Job Lifecycle
 
@@ -148,7 +185,7 @@ Supports multiple storage modes:
 ┌─────────────┐
 │   pending   │  ← Jobs enter here from dispatch
 └──────┬──────┘
-       │ claim_jobs_for_device()
+       │ worker claims job
        ▼
 ┌─────────────┐
 │  assigned   │  ← Lease acquired
@@ -172,7 +209,7 @@ Supports multiple storage modes:
 
 ## Security
 
-- **Device Authentication**: Token-based with HMAC storage
+- **Device Authentication**: Token-based with secure keyring storage
 - **Plugin Signing**: Ed25519 signature verification
 - **Sandbox Isolation**: Docker-based execution with network isolation
 - **Row-Level Security**: Database-level org isolation
@@ -185,37 +222,40 @@ sentra-agent/
 │   ├── main.go              # Agent entry point
 │   ├── sentra/main.go      # CLI tool
 │   ├── agent/
-│   │   ├── executor/       # Plugin execution (v1, v2)
-│   │   │   ├── executor.go # v1 executor
-│   │   │   └── v2/         # v2 executor with runtime manager
-│   │   ├── runtime/        # Runtime environments
-│   │   │   ├── runtime.go  # v1 runtime
-│   │   │   └── v2/         # v2 runtime with pool management
-│   │   └── sandbox/        # Sandbox management
+│   │   ├��─ executor/      # Plugin execution (v1, v2)
+│   │   │   ├── executor.go
+│   │   │   └── v2/
+│   │   ├── runtime/      # Runtime environments
+│   │   │   ├── runtime.go
+│   │   │   └── v2/
+│   │   └── sandbox/      # Sandbox management
 ├── internal/
-│   ├── auth/               # Identity & device claiming
-│   ├── backend/            # Supabase client
-│   ├── config/              # Configuration loading
-│   ├── dataset/            # Dataset operations (merge, lock)
-│   ├── dispatcher/          # Job execution & worker pool
-│   ├── healthcheck/        # Health endpoint server
-│   ├── heartbeat/          # Device health reporting
-│   ├── httpclient/         # HTTP client
-│   ├── models/             # Data models
-│   ├── obs/                # Observability (logging, tracing)
-│   ├── plugin/             # Plugin lifecycle
-│   │   └── bundled/        # Bundled plugins
-│   ├── realtime/           # SSE/WebSocket listeners
-│   ├── reporter/           # Job reporting
-│   ├── sandbox/           # Resource limits
-│   ├── sanitize/           # Error sanitization
-│   ├── startup/           # Bootstrap & validation
-│   ├── storage/           # Storage backend
-│   ├── sysinfo/            # System information
-│   └── system/            # Environment detection
-├── Dockerfile              # Container build
-├── Makefile                # Build automation
-└── bin/                   # Built binaries
+│   ├── auth/             # Identity & device claiming
+│   ├── backend/          # Supabase client
+│   ├── bootstrap/       # Zero-config bootstrap
+│   ├── config/          # Configuration loading
+│   ├── dataset/        # Dataset operations
+│   ├── dispatcher/     # Job execution & worker pool
+│   ├── healthcheck/    # Health endpoint
+│   ├── heartbeat/      # Device health reporting
+│   ├── httpclient/     # HTTP client
+│   ├── models/        # Data models
+│   ├── obs/           # Observability
+│   ├── plugin/        # Plugin lifecycle
+│   │   └── bundled/  # Bundled plugins
+│   ├── redis/         # Redis client (NEW)
+│   ├── realtime/      # SSE/WebSocket
+│   ├── reporter/     # Job reporting
+│   ├── sandbox/      # Resource limits
+│   ├── startup:      # Bootstrap & validation
+│   ├── storage:      # Storage backend
+│   ├── sysinfo:      # System info
+│   └── system:       # Environment detection
+├── supabase/
+│   └── migrations/   # Database migrations
+├── Dockerfile
+├── Makefile
+└── bin/             # Built binaries
 ```
 
 ## Build
@@ -281,20 +321,20 @@ environments_evicted{count=3,remaining=7,freed_bytes=...}
 
 ### Device Won't Claim
 
-- Ensure `BACKEND_URL` is correct
+- Ensure claim code is valid
 - Check network connectivity to Supabase
 - Verify organization exists
 
 ### Jobs Not Being Assigned
 
-- Check device status in dashboard: `SELECT * FROM devices WHERE id = '<device_id>'`
+- Check device status: `SELECT * FROM devices WHERE id = '<device_id>'`
 - Verify heartbeat is being received
-- Check `system_health_heartbeat` cron is running
+- Check cron job is running in Supabase
 
 ### Plugin Verification Fails
 
 - Ensure plugin is signed with organization's Ed25519 key
-- Check signature key is registered: `SELECT * FROM org_plugin_signing_keys`
+- Check signature key is registered
 - Trusted plugins bypass verification
 
 ### Environment Pool Exhausted
@@ -302,6 +342,26 @@ environments_evicted{count=3,remaining=7,freed_bytes=...}
 - Increase `ENVIRONMENT_MAX_COUNT`
 - Decrease `ENVIRONMENT_WARM_TIMEOUT`
 - Add disk space if hitting disk limit
+
+## Bug Fixes Applied
+
+This release includes fixes for the following issues:
+
+| Bug ID | Description |
+|--------|-------------|
+| C1 | Plugin signature verification now uses metadata hash |
+| C2 | Added user_orgs view for RLS policies |
+| C3 | Fixed EnvironmentPool race condition |
+| C4 | PythonRuntime.Cleanup() no longer deletes warm pool paths |
+| H1 | Added bundled merge_metadata.py plugin |
+| H2 | Fixed plugin OS/arch path fallback |
+| H3 | Worker count now updates from heartbeat |
+| H5 | Fixed ActiveJobsCount() double-counting |
+| H6 | Added advisory lock to auto_progress_after_scan |
+| M1 | Fixed ReleaseEnvironment() lock order |
+| M8 | Added cleanup_stuck_jobs cron function |
+| L1 | CGO check now guarded by env var |
+| L2 | Added fallback path warning |
 
 ## License
 

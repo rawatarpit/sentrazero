@@ -115,7 +115,7 @@ func performHeartbeat(
 	hasDocker := env.HasDocker
 
 	if execClient != nil {
-		err := execClient.SendDeviceHeartbeat(
+		policyResult, err := execClient.SendDeviceHeartbeat(
 			ctx,
 			backend.DeviceHeartbeat{
 				DeviceID:         device.ID,
@@ -136,6 +136,13 @@ func performHeartbeat(
 		)
 		if err != nil {
 			log.Printf("⚠️ heartbeat send failed: %v", err)
+		} else if policyResult.Concurrency > 0 && policyResult.Concurrency != recommended {
+			backendConcurrency := policyResult.Concurrency
+			if backendConcurrency != recommended && backendConcurrency != current {
+				dispatcher.SetMaxWorkers(backendConcurrency)
+				cfg.MaxConcurrencyAtomic.Store(int32(backendConcurrency))
+				log.Printf("🔄 concurrency updated from backend: %d (recommended: %d)", backendConcurrency, recommended)
+			}
 		}
 	}
 

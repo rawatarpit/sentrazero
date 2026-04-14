@@ -216,23 +216,23 @@ type HealthPolicyResult struct {
 	Error       string  `json:"error,omitempty"`
 }
 
-func (c *ExecutionClient) SendDeviceHeartbeat(ctx context.Context, hb DeviceHeartbeat) error {
+func (c *ExecutionClient) SendDeviceHeartbeat(ctx context.Context, hb DeviceHeartbeat) (HealthPolicyResult, error) {
 	body, err := json.Marshal(hb)
 	if err != nil {
-		return err
+		return HealthPolicyResult{}, err
 	}
 
 	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/agent_health_policy", body, func(r *http.Request) {
 		r.Header.Set("x-device-id", c.deviceID)
 	})
 	if err != nil {
-		return err
+		return HealthPolicyResult{}, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return HealthPolicyResult{}, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	log.Printf("[EXEC-CLIENT] agent_health_policy → HTTP %d | body: %s", resp.StatusCode, string(respBody))
@@ -241,22 +241,22 @@ func (c *ExecutionClient) SendDeviceHeartbeat(ctx context.Context, hb DeviceHear
 		var apiResp APIResponse
 		if json.Unmarshal(respBody, &apiResp) == nil {
 			if apiResp.Error != "" {
-				return fmt.Errorf("agent_health_policy error: %s", apiResp.Error)
+				return HealthPolicyResult{}, fmt.Errorf("agent_health_policy error: %s", apiResp.Error)
 			}
 		}
-		return fmt.Errorf("agent_health_policy failed: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return HealthPolicyResult{}, fmt.Errorf("agent_health_policy failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result HealthPolicyResult
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("invalid JSON from agent_health_policy: %w | body=%s", err, string(respBody))
+		return HealthPolicyResult{}, fmt.Errorf("invalid JSON from agent_health_policy: %w | body=%s", err, string(respBody))
 	}
 
 	if !result.Ok && result.Error != "" {
-		return fmt.Errorf("agent_health_policy rejected: %s", result.Error)
+		return HealthPolicyResult{}, fmt.Errorf("agent_health_policy rejected: %s", result.Error)
 	}
 
-	return nil
+	return result, nil
 }
 
 type RelayJobEvent struct {

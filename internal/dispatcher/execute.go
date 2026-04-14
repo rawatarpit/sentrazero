@@ -277,6 +277,7 @@ func loadBundledPluginCode(filename string) (string, error) {
 	}
 	if _, err := os.Stat(bundledDir); os.IsNotExist(err) {
 		bundledDir = filepath.Join(os.Getenv("HOME"), ".sentra", "bundled", "plugins")
+		obs.Warn("loadBundledPluginCode using fallback path", obs.Field{"path": bundledDir})
 	}
 	pluginPath := filepath.Join(bundledDir, filename)
 	data, err := os.ReadFile(pluginPath)

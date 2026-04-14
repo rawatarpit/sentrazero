@@ -32,7 +32,7 @@ var (
 	muResize       sync.Mutex
 	shutdownOnce   sync.Once
 	shutdownSignal = make(chan struct{})
-	resizeSignal   = make(chan struct{}, 1)
+	resizeSignal   = make(chan struct{}, 0)
 
 	execClient *backend.ExecutionClient
 
@@ -628,13 +628,7 @@ func IsJobProcessingPaused() bool {
 func ActiveJobsCount() int {
 	activeJobsMutex.Lock()
 	defer activeJobsMutex.Unlock()
-	count := 0
-	for range activeJobs {
-		count++
-	}
-	for range runningJobs {
-		count++
-	}
+	count := len(runningJobs)
 	return count
 }
 
