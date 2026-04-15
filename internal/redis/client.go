@@ -95,7 +95,7 @@ func (c *Client) DequeueJob(ctx context.Context, consumer string, block time.Dur
 	streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    "sentra:workers",
 		Consumer: consumer,
-		Streams:  "sentra:jobs",
+		Streams:  []string{"sentra:jobs", "0"},
 		Count:    1,
 		Block:    block,
 	}).Result()

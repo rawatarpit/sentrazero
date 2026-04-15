@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
-	"sentra-agent/internal/auth"
 	"sentra-agent/internal/obs"
 )
 
@@ -52,8 +52,7 @@ const (
 )
 
 func FetchConfig(ctx context.Context, claimCode, deviceName string) (*Config, error) {
-	log := obs.FromContext(ctx)
-	log.Info("fetching config from claim code", obs.Field{"claim_code": claimCode[:8] + "..."})
+	obs.Info("fetching config from claim code", obs.Field{"claim_code": claimCode[:8] + "..."})
 
 	backendURL, anonKey := detectBackendFromEnv()
 	if backendURL == "" {
@@ -82,7 +81,7 @@ func FetchConfig(ctx context.Context, claimCode, deviceName string) (*Config, er
 
 	policy, err := fetchHealthPolicy(ctx, client, cfg)
 	if err != nil {
-		log.Warn("health policy fetch failed, using defaults", obs.Field{"error": err.Error()})
+		obs.Warn("health policy fetch failed, using defaults", obs.Field{"error": err.Error()})
 		cfg.MaxWorkers = 4
 	} else {
 		cfg.MaxWorkers = policy.MaxWorkers
@@ -90,13 +89,13 @@ func FetchConfig(ctx context.Context, claimCode, deviceName string) (*Config, er
 	}
 
 	if err := saveConfig(cfg); err != nil {
-		log.Warn("failed to save config", obs.Field{"error": err.Error()})
+		obs.Warn("failed to save config", obs.Field{"error": err.Error()})
 	}
 
 	return cfg, nil
 }
 
-func claimDevice(ctx context.Context, client *http.Client, backendURL, claimCode, deviceName string) (*ClaimResponse, error) {
+func claimDevice(ctx context.Context, client *http.Client, backendURL, anonKey, claimCode, deviceName string) (*ClaimResponse, error) {
 	body := fmt.Sprintf(`{"claim_code":"%s","device_name":"%s","environment_type":"linux","capabilities":["python","docker"]}`,
 		claimCode, deviceName)
 
@@ -105,6 +104,7 @@ func claimDevice(ctx context.Context, client *http.Client, backendURL, claimCode
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", anonKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
