@@ -260,10 +260,12 @@ func executeJobSafe(id int, req jobRequest) {
 	// ---- Record plugin execution start ----
 	var pluginExecID string
 	var pluginExecErr error
-	if execClient != nil && req.orgID != "" && req.jobID != "" {
+	if execClient != nil && req.orgID != "" && req.jobID != "" && req.jobType != "scan_dataset" {
 		pluginExecID, pluginExecErr = execClient.RecordPluginExecutionStart(
-			ctx, req.orgID, req.jobType, req.jobID, "",
+			ctx, req.orgID, req.jobID, req.jobID, "",
 		)
+		_ = pluginExecID
+		_ = pluginExecErr
 		if pluginExecErr != nil {
 			obs.Warn("failed to record plugin execution start", obs.Field{
 				"job_id": req.jobID,

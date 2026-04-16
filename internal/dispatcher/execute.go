@@ -219,48 +219,22 @@ func ExecuteJob(
 		}
 	}
 
-	const bundledPluginID = "bundled:plugin_scan_metadata"
-
-	if meta.JobType == "scan_dataset" && fullJob.PluginCode == "" && fullJob.PluginID == "" {
-		obs.Info("injecting bundled plugin for scan_dataset job", obs.Field{
+	// Route scan_dataset through built-in handler (no v2 executor needed)
+	if meta.JobType == "scan_dataset" {
+		obs.Info("routing scan_dataset to built-in handler", obs.Field{
 			"job_type":   meta.JobType,
 			"dataset_id": meta.DatasetID,
 		})
-		fullJob.PluginID = bundledPluginID
-		fullJob.Trusted = true
-		execJob.PluginID = bundledPluginID
-		execJob.Trusted = true
-
-		bundledCode, err := loadBundledPluginCode("scan_metadata.py")
-		if err != nil {
-			obs.Warn("failed to load bundled plugin code", obs.Field{
-				"plugin_id": bundledPluginID,
-				"error":     err.Error(),
-			})
-		} else {
-			execJob.PluginCode = bundledCode
-		}
+		return executeScanDataset(ctx, payload)
 	}
 
-	// Route merge_dataset through v2 executor (fixes bug 2.1)
-	// NOTE: merge_dataset requires bundled merge plugin - if plugin_code is empty,
-	// the job will fail at execution. For bundled merge support, add plugin to:
-	// internal/plugin/bundled/plugins/merge_metadata.py
-	const bundledMergePluginID = "bundled:plugin_merge_metadata"
-
-	if meta.JobType == "merge_dataset" && fullJob.PluginCode == "" && fullJob.PluginID == "" {
-		obs.Info("merge_dataset has no plugin - attempting v2 executor", obs.Field{
+	// Route merge_dataset through built-in handler (no v2 executor needed)
+	if meta.JobType == "merge_dataset" {
+		obs.Info("routing merge_dataset to built-in handler", obs.Field{
 			"job_type":   meta.JobType,
 			"dataset_id": meta.DatasetID,
 		})
-		fullJob.PluginID = bundledMergePluginID
-		execJob.PluginID = bundledMergePluginID
-
-		bundledCode, err := loadBundledPluginCode("merge_metadata.py")
-		if err != nil {
-			return fmt.Errorf("merge_dataset: bundled merge plugin not found: %w", err)
-		}
-		execJob.PluginCode = bundledCode
+		return executeMergeDataset(ctx, payload)
 	}
 
 	result, err := executorInstance.ExecuteJob(ctx, execJob)
@@ -271,22 +245,4 @@ func ExecuteJob(
 		return fmt.Errorf("%s: %s", result.ErrorClassification, result.Error)
 	}
 	return nil
-}
-
-func loadBundledPluginCode(filename string) (string, error) {
-	bundledDir := os.Getenv("SENTRA_PLUGIN_BUNDLE_PATH")
-	if bundledDir == "" {
-		execPath, _ := os.Executable()
-		bundledDir = filepath.Join(filepath.Dir(execPath), "bundled", "plugins")
-	}
-	if _, err := os.Stat(bundledDir); os.IsNotExist(err) {
-		bundledDir = filepath.Join(os.Getenv("HOME"), ".sentra", "bundled", "plugins")
-		obs.Warn("loadBundledPluginCode using fallback path", obs.Field{"path": bundledDir})
-	}
-	pluginPath := filepath.Join(bundledDir, filename)
-	data, err := os.ReadFile(pluginPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read bundled plugin: %w", err)
-	}
-	return string(data), nil
 }
