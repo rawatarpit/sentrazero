@@ -117,7 +117,12 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("storage backend not initialized")
 	}
 
-	remotePath := storage.GetRemotePath(job.DatasetID, 0, "source")
+	var remotePath string
+	if job.SourcePath != "" {
+		remotePath = job.SourcePath
+	} else {
+		remotePath = storage.GetRemotePath(job.DatasetID, 0, "source")
+	}
 
 	obs.Info("executeScanDataset: listing remote objects", obs.Field{
 		"remote_path": remotePath,
