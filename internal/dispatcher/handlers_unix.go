@@ -108,26 +108,35 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	obs.Info("executeScanDataset: storage config", obs.Field{
-		"storage_mode": storageMode,
-		"dataset_id":   job.DatasetID,
-		"backend_type": fmt.Sprintf("%T", GetStorageBackend()),
+		"storage_mode":      storageMode,
+		"dataset_id":        job.DatasetID,
+		"storage_config_id": job.StorageConfigID,
+		"backend_type":      fmt.Sprintf("%T", GetStorageBackend()),
 	})
 
 	var backend storage.StorageBackend
-	var err error
 
-	if storageMode == "s3" || storageMode == "aws_s3" || storageMode == "gcs" || storageMode == "azure_blob" {
-		storage.InvalidateBackend()
-		backend, err = storage.GetBackend()
+	if job.StorageConfigID != "" && (storageMode == "s3" || storageMode == "aws_s3" || storageMode == "gcs" || storageMode == "azure_blob") {
+		cfg, err := storage.GetConfigByID(job.StorageConfigID)
 		if err != nil {
-			obs.Warn("executeScanDataset: failed to get cloud storage backend", obs.Field{
-				"error":         err.Error(),
-				".storage_mode": storageMode,
+			obs.Warn("executeScanDataset: failed to get storage config by ID", obs.Field{
+				"error":             err.Error(),
+				"storage_config_id": job.StorageConfigID,
 			})
 		} else {
-			obs.Info("executeScanDataset: using cloud storage backend", obs.Field{
-				"backend_type": fmt.Sprintf("%T", backend),
-			})
+			newBackend, err := storage.NewBackend(cfg)
+			if err != nil {
+				obs.Warn("executeScanDataset: failed to create backend from config", obs.Field{
+					"error":             err.Error(),
+					"storage_config_id": job.StorageConfigID,
+				})
+			} else {
+				backend = newBackend
+				obs.Info("executeScanDataset: created backend from storage_config_id", obs.Field{
+					"backend_type":      fmt.Sprintf("%T", backend),
+					"storage_config_id": job.StorageConfigID,
+				})
+			}
 		}
 	}
 

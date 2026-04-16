@@ -90,6 +90,24 @@ func fetchConfig() (*StorageConfig, error) {
 	return client.FetchConfig()
 }
 
+func GetConfigByID(storageConfigID string) (*StorageConfig, error) {
+	if storageConfigID == "" {
+		return GetConfig()
+	}
+	orgID := os.Getenv("ORG_ID")
+	deviceID := os.Getenv("DEVICE_ID")
+	token := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	anonKey := os.Getenv("SUPABASE_ANON_KEY")
+	baseURL := os.Getenv("SUPABASE_URL")
+
+	if baseURL == "" || orgID == "" {
+		return nil, fmt.Errorf("SUPABASE_URL or ORG_ID not configured")
+	}
+
+	client := NewStorageClient(orgID, deviceID, token, anonKey, baseURL)
+	return client.FetchConfigByID(storageConfigID)
+}
+
 type SharedMountBackend struct {
 	mountBasePath string
 }
@@ -464,6 +482,43 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 	cfgMu.Unlock()
 
 	return cfg, nil
+}
+
+func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig, error) {
+	type Response struct {
+		StorageMode   string      `json:"storage_mode"`
+		Provider      string      `json:"provider"`
+		BucketName    string      `json:"bucket_name"`
+		Region        string      `json:"region"`
+		Endpoint      string      `json:"endpoint"`
+		MountBasePath string      `json:"mount_base_path"`
+		Credentials   interface{} `json:"credentials"`
+	}
+
+	body := map[string]string{
+		"org_id":            c.OrgID,
+		"storage_config_id": storageConfigID,
+	}
+
+	resp, err := c.doRequest("POST", "/functions/v1/get_storage_config", body)
+	if err != nil {
+		return nil, err
+	}
+
+	var result Response
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+
+	return &StorageConfig{
+		StorageMode:   result.StorageMode,
+		Provider:      result.Provider,
+		BucketName:    result.BucketName,
+		Region:        result.Region,
+		Endpoint:      result.Endpoint,
+		MountBasePath: result.MountBasePath,
+		Credentials:   result.Credentials,
+	}, nil
 }
 
 func (c *StorageClient) doRequest(method, path string, payload interface{}) ([]byte, error) {
