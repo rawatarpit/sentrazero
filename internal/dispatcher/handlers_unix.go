@@ -107,24 +107,35 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		storageMode = "shared_mount"
 	}
 
-	obs.Info("executeScanDataset: using storage backend", obs.Field{
+	obs.Info("executeScanDataset: storage config", obs.Field{
 		"storage_mode": storageMode,
 		"dataset_id":   job.DatasetID,
+		"backend_type": fmt.Sprintf("%T", GetStorageBackend()),
 	})
 
-	backend := GetStorageBackend()
-	if backend == nil {
-		return errors.New("storage backend not initialized")
+	var backend storage.StorageBackend
+	var err error
+
+	if storageMode == "s3" || storageMode == "aws_s3" || storageMode == "gcs" || storageMode == "azure_blob" {
+		storage.InvalidateBackend()
+		backend, err = storage.GetBackend()
+		if err != nil {
+			obs.Warn("executeScanDataset: failed to get cloud storage backend", obs.Field{
+				"error":         err.Error(),
+				".storage_mode": storageMode,
+			})
+		} else {
+			obs.Info("executeScanDataset: using cloud storage backend", obs.Field{
+				"backend_type": fmt.Sprintf("%T", backend),
+			})
+		}
 	}
 
-	if storageMode == "s3" || storageMode == "aws_s3" {
-		storage.InvalidateBackend()
-		if freshBackend, err := storage.GetBackend(); err == nil && freshBackend != nil {
-			obs.Info("executeScanDataset: using fresh S3 backend", obs.Field{
-				"backend_type": fmt.Sprintf("%T", freshBackend),
-			})
-			backend = freshBackend
-		}
+	if backend == nil {
+		backend = GetStorageBackend()
+	}
+	if backend == nil {
+		return errors.New("storage backend not initialized")
 	}
 
 	var remotePath string
