@@ -86,14 +86,31 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return fmt.Errorf("invalid payload: %w", err)
 	}
 
+	obs.Info("executeScanDataset received job", obs.Field{
+		"job_id":       job.ID,
+		"dataset_id":   job.DatasetID,
+		"storage_mode": job.StorageMode,
+		"storage_type": job.StorageType,
+		"source_path":  job.SourcePath,
+		"input_path":   job.InputPath,
+	})
+
 	if job.DatasetID == "" {
 		return errors.New("missing dataset_id")
 	}
 
 	storageMode := job.StorageMode
 	if storageMode == "" {
+		storageMode = job.StorageType
+	}
+	if storageMode == "" {
 		storageMode = "shared_mount"
 	}
+
+	obs.Info("executeScanDataset: using storage backend", obs.Field{
+		"storage_mode": storageMode,
+		"dataset_id":   job.DatasetID,
+	})
 
 	backend := GetStorageBackend()
 	if backend == nil {
@@ -101,6 +118,10 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	remotePath := storage.GetRemotePath(job.DatasetID, 0, "source")
+
+	obs.Info("executeScanDataset: listing remote objects", obs.Field{
+		"remote_path": remotePath,
+	})
 
 	objects, err := backend.ListObjects(ctx, remotePath)
 	if err != nil {

@@ -19,6 +19,7 @@ type Job struct {
 	Rows            int             `json:"rows,omitempty"`
 	Checksum        string          `json:"checksum,omitempty"`
 	StorageMode     string          `json:"storage_mode,omitempty"`
+	StorageType     string          `json:"storage_type,omitempty"`
 	PluginName      string          `json:"plugin_name,omitempty"`
 	PluginID        string          `json:"plugin_id,omitempty"`
 	RetryAttempt    int             `json:"retry_attempt,omitempty"`
