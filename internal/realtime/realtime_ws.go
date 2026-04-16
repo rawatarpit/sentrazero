@@ -126,6 +126,8 @@ func runWSConnection(ctx context.Context, device auth.Device, cfg *config.Config
 		return fmt.Errorf("phx_join failed: %w", err)
 	}
 
+	// Subscribe to jobs assigned to this device
+	// Pending jobs are handled by the polling client (started alongside WebSocket)
 	topic := fmt.Sprintf("realtime:public:agent_jobs:agent_id=eq.%s", device.ID)
 	channelJoin := WSPayload{
 		Ref:   channelRef,
@@ -215,12 +217,68 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 		return
 	}
 
+	status, _ := newRecord["status"].(string)
+
+	// Handle pending jobs - these come through when job has no agent_id yet
+	// The job is waiting to be claimed, so we claim it now
+	if status == "pending" {
+		jobID, _ := newRecord["id"].(string)
+		if jobID == "" {
+			return
+		}
+
+		// Skip if already seen (dedup)
+		if pollingClient != nil {
+			if _, exists := pollingClient.sentJobs.Load(jobID); exists {
+				return
+			}
+			pollingClient.sentJobs.Store(jobID, time.Now())
+		}
+
+		jobType, _ := newRecord["job_type"].(string)
+		payloadJSON, _ := json.Marshal(newRecord["payload"])
+
+		log.Printf("[ws] pending job received: %s (type: %s)", jobID, jobType)
+
+		obs.Info(
+			"pending job received via websocket",
+			obs.Field{
+				"job_id":   jobID,
+				"job_type": jobType,
+				"source":   "websocket_pending",
+			},
+		)
+
+		traceID := obs.NewTraceID()
+		var executionStepID string
+		if len(payloadJSON) > 0 {
+			var p struct {
+				ExecutionStepID string `json:"execution_step_id"`
+			}
+			if err := json.Unmarshal(payloadJSON, &p); err == nil {
+				executionStepID = p.ExecutionStepID
+			}
+		}
+
+		if err := dispatcher.SubmitJobWithMeta(
+			jobType,
+			payloadJSON,
+			jobID,
+			"",
+			traceID,
+			executionStepID,
+		); err != nil {
+			log.Printf("[ws] dispatch failed for pending job %s: %v", jobID, err)
+		}
+		return
+	}
+
+	// Handle assigned/running jobs (original logic)
 	agentID, ok := newRecord["agent_id"].(string)
 	if !ok || agentID != device.ID {
 		return
 	}
 
-	status, _ := newRecord["status"].(string)
 	if status != "assigned" && status != "running" {
 		return
 	}

@@ -349,6 +349,19 @@ func main() {
 		)
 	} else {
 		log.Println("[realtime] Using WebSocket for job notifications (preferred)")
+		// Start polling client alongside WebSocket to handle pending jobs
+		// WebSocket only receives jobs already assigned to this device
+		// Polling picks up new pending jobs
+		go realtime.RunPollingClient(
+			ctx,
+			auth.Device{
+				ID:    cfg.DeviceID,
+				OrgID: cfg.OrgID,
+				Token: cfg.Token,
+			},
+			cfg,
+			cfg.Token,
+		)
 		go realtime.RunRealtimeWS(ctx, auth.Device{
 			ID:    cfg.DeviceID,
 			OrgID: cfg.OrgID,
