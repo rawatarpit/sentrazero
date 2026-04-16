@@ -117,6 +117,16 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("storage backend not initialized")
 	}
 
+	if storageMode == "s3" || storageMode == "aws_s3" {
+		storage.InvalidateBackend()
+		if freshBackend, err := storage.GetBackend(); err == nil && freshBackend != nil {
+			obs.Info("executeScanDataset: using fresh S3 backend", obs.Field{
+				"backend_type": fmt.Sprintf("%T", freshBackend),
+			})
+			backend = freshBackend
+		}
+	}
+
 	var remotePath string
 	if job.SourcePath != "" {
 		remotePath = job.SourcePath
