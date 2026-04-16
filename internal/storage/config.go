@@ -66,7 +66,21 @@ var (
 	cfgErr     error
 	cfgMu      sync.RWMutex
 	httpClient = &http.Client{Timeout: 10 * time.Second}
+
+	globalOrgID    string
+	globalDeviceID string
+	globalToken    string
+	globalAnonKey  string
+	globalBaseURL  string
 )
+
+func SetGlobalAPICredentials(orgID, deviceID, token, anonKey, baseURL string) {
+	globalOrgID = orgID
+	globalDeviceID = deviceID
+	globalToken = token
+	globalAnonKey = anonKey
+	globalBaseURL = baseURL
+}
 
 func GetConfig() (*StorageConfig, error) {
 	cfgOnce.Do(func() {
@@ -94,11 +108,20 @@ func GetConfigByID(storageConfigID string) (*StorageConfig, error) {
 	if storageConfigID == "" {
 		return GetConfig()
 	}
-	orgID := os.Getenv("ORG_ID")
-	deviceID := os.Getenv("DEVICE_ID")
-	token := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
-	anonKey := os.Getenv("SUPABASE_ANON_KEY")
-	baseURL := os.Getenv("SUPABASE_URL")
+
+	orgID := globalOrgID
+	deviceID := globalDeviceID
+	token := globalToken
+	anonKey := globalAnonKey
+	baseURL := globalBaseURL
+
+	if baseURL == "" || orgID == "" {
+		orgID = os.Getenv("ORG_ID")
+		deviceID = os.Getenv("DEVICE_ID")
+		token = os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+		anonKey = os.Getenv("SUPABASE_ANON_KEY")
+		baseURL = os.Getenv("SUPABASE_URL")
+	}
 
 	if baseURL == "" || orgID == "" {
 		return nil, fmt.Errorf("SUPABASE_URL or ORG_ID not configured")

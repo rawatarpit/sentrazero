@@ -252,6 +252,14 @@ func main() {
 	// Storage
 	// ---------------------------------------------------------------------
 
+	storage.SetGlobalAPICredentials(
+		cfg.OrgID,
+		cfg.DeviceID,
+		cfg.Token,
+		cfg.BackendAnonKey,
+		cfg.BackendURL,
+	)
+
 	storageClient := storage.NewStorageClient(
 		cfg.OrgID,
 		cfg.DeviceID,
