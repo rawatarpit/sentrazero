@@ -19,12 +19,21 @@ import (
 )
 
 type RealtimeJobPayload struct {
-	ID              string          `json:"id"`
-	JobType         string          `json:"job_type"`
-	Payload         json.RawMessage `json:"payload"`
-	Status          string          `json:"status"`
-	ExecutionStepID string          `json:"execution_step_id"`
-	OrgID           string          `json:"org_id"`
+	ID               string          `json:"id"`
+	JobType          string          `json:"job_type"`
+	Payload          json.RawMessage `json:"payload"`
+	Status           string          `json:"status"`
+	ExecutionStepID  string          `json:"execution_step_id"`
+	ExecutionID      string          `json:"execution_id"`
+	OrgID            string          `json:"org_id"`
+	DatasetID        string          `json:"dataset_id"`
+	ChunkIndex       int             `json:"chunk_index"`
+	RunID            string          `json:"run_id"`
+	AttemptNumber    int             `json:"attempt_number"`
+	RuntimeType      string          `json:"runtime_type"`
+	RuntimeDeps      json.RawMessage `json:"runtime_dependencies"`
+	ExecutionMode    string          `json:"execution_mode"`
+	ExecutionTimeout int             `json:"execution_timeout_seconds"`
 }
 
 type PollingClient struct {
@@ -175,23 +184,14 @@ func (p *PollingClient) fetchNewJobs() {
 
 		traceID := obs.NewTraceID()
 
-		var executionStepID string
-		if len(job.Payload) > 0 {
-			var payload struct {
-				ExecutionStepID string `json:"execution_step_id"`
-			}
-			if err := json.Unmarshal(job.Payload, &payload); err == nil {
-				executionStepID = payload.ExecutionStepID
-			}
-		}
-
 		if err := dispatcher.SubmitJobWithMeta(
 			job.JobType,
 			job.Payload,
 			job.ID,
-			"",
+			job.OrgID,
 			traceID,
-			executionStepID,
+			job.ExecutionStepID,
+			job.ExecutionID,
 		); err != nil {
 
 			log.Printf("[realtime] dispatch failed for job %s: %v", job.ID, err)

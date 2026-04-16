@@ -476,10 +476,10 @@ func (c *ExecutionClient) RecordPluginExecutionEnd(ctx context.Context, executio
 // CompleteJob calls the complete_job Edge Function to update job status in DB
 // This validates lease at completion time to prevent expired lease holders from overwriting
 type execCompleteJobRequest struct {
-	JobID      string          `json:"job_id"`
-	Status     string          `json:"status"`
-	DurationMs int64           `json:"duration_ms,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
+	ExecutionID string          `json:"execution_id"`
+	Status      string          `json:"status"`
+	DurationMs  int64           `json:"duration_ms,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
 }
 
 type execCompleteJobResponse struct {
@@ -535,11 +535,11 @@ const (
 	ErrCodeInternalError     ErrorCode = "INTERNAL_ERROR"
 )
 
-func (c *ExecutionClient) CompleteJob(ctx context.Context, jobID string, status string, durationMs int64, resultData any) *CompleteJobResult {
+func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, status string, durationMs int64, resultData any) *CompleteJobResult {
 	reqBody := execCompleteJobRequest{
-		JobID:      jobID,
-		Status:     status,
-		DurationMs: durationMs,
+		ExecutionID: executionID,
+		Status:      status,
+		DurationMs:  durationMs,
 	}
 
 	if resultData != nil {

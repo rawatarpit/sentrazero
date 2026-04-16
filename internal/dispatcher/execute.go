@@ -28,7 +28,7 @@ type JobMeta struct {
 // Metadata extraction & validation
 // ---------------------------------------------------------------------
 
-func extractJobMeta(payload json.RawMessage) (*JobMeta, error) {
+func extractJobMeta(payload json.RawMessage, envelopeJobType ...string) (*JobMeta, error) {
 
 	var meta JobMeta
 
@@ -37,7 +37,11 @@ func extractJobMeta(payload json.RawMessage) (*JobMeta, error) {
 	}
 
 	if meta.JobType == "" {
-		return nil, errors.New("job_type is required")
+		if len(envelopeJobType) > 0 && envelopeJobType[0] != "" {
+			meta.JobType = envelopeJobType[0]
+		} else {
+			return nil, errors.New("job_type is required")
+		}
 	}
 
 	// Normalize job types
@@ -114,7 +118,7 @@ func ExecuteJob(
 	// Validate & extract metadata
 	// -------------------------------------------------------------
 
-	meta, err := extractJobMeta(payload)
+	meta, err := extractJobMeta(payload, jobType)
 	if err != nil {
 		return err
 	}

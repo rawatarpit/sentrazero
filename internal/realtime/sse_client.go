@@ -399,6 +399,7 @@ func handleJobEvent(ctx context.Context, data string) {
 		"",
 		traceID,
 		executionStepID,
+		"",
 	); err != nil {
 		log.Printf("[sse] dispatch failed for job %s: %v", job.ID, err)
 	}

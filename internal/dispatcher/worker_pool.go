@@ -68,6 +68,7 @@ type jobRequest struct {
 	orgID           string
 	traceID         string
 	executionStepID string
+	executionID     string
 }
 
 // ---------------------------------------------------------------------
@@ -317,7 +318,7 @@ func executeJobSafe(id int, req jobRequest) {
 				})
 			}
 
-			result := execClient.CompleteJob(ctx, req.jobID, "failed", duration.Milliseconds(), nil)
+			result := execClient.CompleteJob(ctx, req.executionID, "failed", duration.Milliseconds(), nil)
 			if result.IsStaleExecution() {
 				obs.Warn("job failure reported but completion rejected - stale execution", obs.Field{
 					"job_id":        req.jobID,
@@ -345,8 +346,8 @@ func executeJobSafe(id int, req jobRequest) {
 	// ---- Success path ----
 	atomic.AddInt64(&totalProcessed, 1)
 
-	if execClient != nil && req.jobID != "" {
-		result := execClient.CompleteJob(ctx, req.jobID, "completed", duration.Milliseconds(), nil)
+	if execClient != nil && req.executionID != "" {
+		result := execClient.CompleteJob(ctx, req.executionID, "completed", duration.Milliseconds(), nil)
 
 		if result.IsStaleExecution() {
 			obs.Warn("job execution succeeded but completion rejected - stale execution", obs.Field{
@@ -403,6 +404,7 @@ func SubmitJobWithMeta(
 	orgID string,
 	traceID string,
 	executionStepID string,
+	executionID string,
 ) error {
 	if jobQueue == nil {
 		return errors.New("dispatcher: pool not initialized")
@@ -448,6 +450,7 @@ func SubmitJobWithMeta(
 		orgID:           orgID,
 		traceID:         traceID,
 		executionStepID: executionStepID,
+		executionID:     executionID,
 	}
 
 	queueLen := len(jobQueue)

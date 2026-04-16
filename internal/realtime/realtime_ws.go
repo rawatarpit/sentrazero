@@ -267,6 +267,7 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 			"",
 			traceID,
 			executionStepID,
+			"",
 		); err != nil {
 			log.Printf("[ws] dispatch failed for pending job %s: %v", jobID, err)
 		}
@@ -328,6 +329,7 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 		"",
 		traceID,
 		executionStepID,
+		"",
 	); err != nil {
 		log.Printf("[ws] dispatch failed for job %s: %v", jobID, err)
 	}
