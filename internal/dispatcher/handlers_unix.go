@@ -132,6 +132,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 				"endpoint":          cfg.Endpoint,
 				"storage_config_id": job.StorageConfigID,
 			})
+			cfg.StorageMode = storageMode
 			newBackend, err := storage.NewBackend(cfg)
 			if err != nil {
 				obs.Warn("executeScanDataset: failed to create backend from config", obs.Field{
