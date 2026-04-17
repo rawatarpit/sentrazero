@@ -106,6 +106,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	if storageMode == "" {
 		storageMode = "shared_mount"
 	}
+	storageMode = normalizeStorageModeForJob(storageMode)
 
 	obs.Info("executeScanDataset: storage config", obs.Field{
 		"storage_mode":      storageMode,
@@ -116,7 +117,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 
 	var backend storage.StorageBackend
 
-	if job.StorageConfigID != "" && (storageMode == "s3" || storageMode == "aws_s3" || storageMode == "gcs" || storageMode == "azure_blob") {
+	if job.StorageConfigID != "" && (storageMode == "s3" || storageMode == "aws_s3" || storageMode == "object_storage" || storageMode == "gcs" || storageMode == "google_cloud_storage" || storageMode == "azure_blob") {
 		cfg, err := storage.GetConfigByID(job.StorageConfigID)
 		if err != nil {
 			obs.Warn("executeScanDataset: failed to get storage config by ID", obs.Field{
@@ -694,6 +695,21 @@ func deriveMountBasePath(storageMode string) string {
 
 	homeDir, _ := os.UserHomeDir()
 	return filepath.Join(homeDir, "sentra", "data")
+}
+
+func normalizeStorageModeForJob(mode string) string {
+	switch mode {
+	case "s3", "aws_s3", "s3_compatible":
+		return "s3"
+	case "gcs", "google_cloud_storage":
+		return "gcs"
+	case "azure_blob":
+		return "azure_blob"
+	case "shared_mount", "local", "object_storage":
+		return "shared_mount"
+	default:
+		return mode
+	}
 }
 
 func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
