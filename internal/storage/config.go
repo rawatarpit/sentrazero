@@ -484,13 +484,14 @@ func NewStorageClient(orgID, deviceID, token, anonKey, baseURL string) *StorageC
 
 func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 	type Response struct {
-		StorageMode   string      `json:"storage_mode"`
-		Provider      string      `json:"provider"`
-		BucketName    string      `json:"bucket_name"`
-		Region        string      `json:"region"`
-		Endpoint      string      `json:"endpoint"`
-		MountBasePath string      `json:"mount_base_path"`
-		Credentials   interface{} `json:"credentials"`
+		StorageMode      string      `json:"storage_mode"`
+		Provider        string      `json:"provider"`
+		BucketName      string      `json:"bucket_name"`
+		Region          string      `json:"region"`
+		Endpoint        string      `json:"endpoint"`
+		MountBasePath   string      `json:"mount_base_path"`
+		Credentials    interface{} `json:"credentials"`
+		VaultSecretName string    `json:"vault_secret_name,omitempty"`
 	}
 
 	body := map[string]string{
@@ -507,16 +508,29 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 		return nil, err
 	}
 
-	cfgMu.Lock()
-	cfg = &StorageConfig{
-		StorageMode:   result.StorageMode,
-		Provider:      result.Provider,
-		BucketName:    result.BucketName,
-		Region:        result.Region,
-		Endpoint:      result.Endpoint,
-		MountBasePath: result.MountBasePath,
-		Credentials:   result.Credentials,
+	cfg := &StorageConfig{
+		StorageMode:     result.StorageMode,
+		Provider:        result.Provider,
+		BucketName:      result.BucketName,
+		Region:          result.Region,
+		Endpoint:        result.Endpoint,
+		MountBasePath:   result.MountBasePath,
+		Credentials:    result.Credentials,
+		VaultSecretName: result.VaultSecretName,
 	}
+
+	if cfg.VaultSecretName != "" {
+		log.Printf("[storage] FetchConfig: resolving vault secret %s", cfg.VaultSecretName)
+		resolvedCreds, err := c.resolveVaultSecret(cfg.VaultSecretName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve vault secret %s: %w", cfg.VaultSecretName, err)
+		}
+		cfg.Credentials = resolvedCreds
+		log.Printf("[storage] FetchConfig: resolved vault secret %s -> credentials", cfg.VaultSecretName)
+	}
+
+	cfgMu.Lock()
+	cfg = cfg
 	cfgMu.Unlock()
 
 	return cfg, nil
@@ -561,13 +575,15 @@ func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig,
 	}
 
 	if cfg.VaultSecretName != "" {
+		log.Printf("[storage] FetchConfigByID: resolving vault secret %s", cfg.VaultSecretName)
 		resolvedCreds, err := c.resolveVaultSecret(cfg.VaultSecretName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve vault secret %s: %w", cfg.VaultSecretName, err)
 		}
+		secretName := cfg.VaultSecretName
 		cfg.Credentials = resolvedCreds
 		cfg.VaultSecretName = ""
-		log.Printf("[storage] resolved vault secret %s -> credentials", cfg.VaultSecretName)
+		log.Printf("[storage] FetchConfigByID: resolved vault secret %s -> credentials", secretName)
 	}
 
 	return cfg, nil
@@ -585,7 +601,7 @@ func (c *StorageClient) resolveVaultSecret(secretName string) (*S3Credentials, e
 		"secret_name": secretName,
 	}
 
-	resp, err := c.doRequest("POST", "/functions/v1/get_vault_secret", body)
+	resp, err := c.doRequest("POST", "/functions/v1/decrypt_vault_secret", body)
 	if err != nil {
 		return nil, err
 	}
