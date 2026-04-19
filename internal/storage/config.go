@@ -45,13 +45,14 @@ var (
 )
 
 type StorageConfig struct {
-	StorageMode   string      `json:"storage_mode"`
-	Provider      string      `json:"provider"`
-	BucketName    string      `json:"bucket_name"`
-	Region        string      `json:"region"`
-	Endpoint      string      `json:"endpoint"`
-	MountBasePath string      `json:"mount_base_path"`
-	Credentials   interface{} `json:"credentials"`
+	StorageMode     string      `json:"storage_mode"`
+	Provider        string      `json:"provider"`
+	BucketName      string      `json:"bucket_name"`
+	Region          string      `json:"region"`
+	Endpoint        string      `json:"endpoint"`
+	MountBasePath   string      `json:"mount_base_path"`
+	Credentials    interface{} `json:"credentials"`
+	VaultSecretName string     `json:"vault_secret_name,omitempty"`
 }
 
 type S3Credentials struct {
@@ -322,7 +323,8 @@ func NewBackend(cfg *StorageConfig) (StorageBackend, error) {
 
 	storageMode := normalizeStorageMode(cfg.StorageMode)
 
-	if storageMode == "s3" {
+	switch storageMode {
+	case "s3":
 		if cfg.BucketName == "" {
 			return nil, fmt.Errorf("S3 storage mode requires bucket_name")
 		}
@@ -346,10 +348,23 @@ func NewBackend(cfg *StorageConfig) (StorageBackend, error) {
 			return nil, fmt.Errorf("S3 storage mode requires credentials with access_key_id and secret_access_key")
 		}
 
+		log.Printf("[storage] initializing S3 backend: endpoint=%s bucket=%s region=%s",
+			cfg.Endpoint, cfg.BucketName, cfg.Region)
 		return NewS3Backend(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
-	}
 
-	return NewSharedMountBackend(cfg.MountBasePath), nil
+	case "gcs", "azure_blob":
+		return nil, fmt.Errorf("%s storage mode not yet implemented", storageMode)
+
+	case "shared_mount":
+		log.Printf("[storage] initializing SharedMountBackend: mount_base_path=%s", cfg.MountBasePath)
+		return NewSharedMountBackend(cfg.MountBasePath), nil
+
+	default:
+		if storageMode != "" {
+			return nil, fmt.Errorf("unknown storage mode: %s (must be one of: s3, shared_mount)", storageMode)
+		}
+		return nil, fmt.Errorf("storage mode is required")
+	}
 }
 
 func GetBackend() (StorageBackend, error) {
@@ -509,13 +524,14 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 
 func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig, error) {
 	type Response struct {
-		StorageMode   string      `json:"storage_mode"`
-		Provider      string      `json:"provider"`
-		BucketName    string      `json:"bucket_name"`
-		Region        string      `json:"region"`
-		Endpoint      string      `json:"endpoint"`
-		MountBasePath string      `json:"mount_base_path"`
+		StorageMode     string      `json:"storage_mode"`
+		Provider        string      `json:"provider"`
+		BucketName      string      `json:"bucket_name"`
+		Region         string      `json:"region"`
+		Endpoint       string      `json:"endpoint"`
+		MountBasePath  string      `json:"mount_base_path"`
 		Credentials   interface{} `json:"credentials"`
+		VaultSecretName string    `json:"vault_secret_name,omitempty"`
 	}
 
 	body := map[string]string{
@@ -533,14 +549,63 @@ func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig,
 		return nil, err
 	}
 
-	return &StorageConfig{
-		StorageMode:   result.StorageMode,
-		Provider:      result.Provider,
-		BucketName:    result.BucketName,
-		Region:        result.Region,
-		Endpoint:      result.Endpoint,
-		MountBasePath: result.MountBasePath,
-		Credentials:   result.Credentials,
+	cfg := &StorageConfig{
+		StorageMode:     result.StorageMode,
+		Provider:        result.Provider,
+		BucketName:      result.BucketName,
+		Region:          result.Region,
+		Endpoint:       result.Endpoint,
+		MountBasePath:   result.MountBasePath,
+		Credentials:    result.Credentials,
+		VaultSecretName: result.VaultSecretName,
+	}
+
+	if cfg.VaultSecretName != "" {
+		resolvedCreds, err := c.resolveVaultSecret(cfg.VaultSecretName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve vault secret %s: %w", cfg.VaultSecretName, err)
+		}
+		cfg.Credentials = resolvedCreds
+		cfg.VaultSecretName = ""
+		log.Printf("[storage] resolved vault secret %s -> credentials", cfg.VaultSecretName)
+	}
+
+	return cfg, nil
+}
+
+func (c *StorageClient) resolveVaultSecret(secretName string) (*S3Credentials, error) {
+	type VaultResponse struct {
+		AccessKeyID     string `json:"access_key_id"`
+		SecretAccessKey string `json:"secret_access_key"`
+		SessionToken    string `json:"session_token,omitempty"`
+	}
+
+	body := map[string]string{
+		"org_id":     c.OrgID,
+		"secret_name": secretName,
+	}
+
+	resp, err := c.doRequest("POST", "/functions/v1/get_vault_secret", body)
+	if err != nil {
+		return nil, err
+	}
+
+	var result VaultResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse vault secret: %w", err)
+	}
+
+	if result.AccessKeyID == "" || result.SecretAccessKey == "" {
+		return nil, fmt.Errorf("vault secret %s missing access_key_id or secret_access_key", secretName)
+	}
+
+	log.Printf("[storage] resolved vault credentials (access_key_id present: %t, session_token present: %t)",
+		result.AccessKeyID != "", result.SessionToken != "")
+
+	return &S3Credentials{
+		AccessKeyID:     result.AccessKeyID,
+		SecretAccessKey: result.SecretAccessKey,
+		SessionToken:    result.SessionToken,
 	}, nil
 }
 

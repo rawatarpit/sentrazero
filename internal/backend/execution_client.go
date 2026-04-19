@@ -78,10 +78,11 @@ func (c *ExecutionClient) post(ctx context.Context, path string, payload any) er
 }
 
 type AssignedJob struct {
-	JobID    string          `json:"job_id"`
-	JobType  string          `json:"job_type"`
-	Payload  json.RawMessage `json:"payload"`
-	LeaseTTL int             `json:"lease_ttl_seconds"`
+	JobID       string          `json:"job_id"`
+	JobType    string          `json:"job_type"`
+	Payload    json.RawMessage `json:"payload"`
+	LeaseTTL   int             `json:"lease_ttl_seconds"`
+	ExecutionID string          `json:"execution_id,omitempty"`
 }
 
 func (c *ExecutionClient) RequestJobAssignment(ctx context.Context) (*AssignedJob, error) {
@@ -122,19 +123,38 @@ func (c *ExecutionClient) RequestJobAssignment(ctx context.Context) (*AssignedJo
 	}
 
 	var result struct {
-		Ok     bool        `json:"ok"`
-		Result AssignedJob `json:"result"`
-		Error  string      `json:"error,omitempty"`
+		Ok      bool          `json:"ok"`
+		Result  AssignedJob   `json:"result"`
+		Error   string        `json:"error,omitempty"`
+		JobID   string        `json:"assigned_job_id"`
+		JobType string        `json:"job_type"`
+		Payload json.RawMessage `json:"payload"`
+		ExecutionID string    `json:"execution_id"`
 	}
+
+	// Try parsing response
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("invalid JSON from assign_agent_job: %w | body=%s", err, string(respBody))
 	}
 
-	if !result.Ok && result.Error != "" {
+	// Handle both wrapped (result) and flat (top-level) response
+	var assignedJob AssignedJob
+	if result.Result.JobID != "" {
+		assignedJob = result.Result
+	} else if result.JobID != "" {
+		assignedJob = AssignedJob{
+			JobID:       result.JobID,
+			JobType:    result.JobType,
+			Payload:   result.Payload,
+			ExecutionID: result.ExecutionID,
+		}
+	} else if !result.Ok && result.Error != "" {
 		return nil, fmt.Errorf("assign_agent_job rejected: %s", result.Error)
+	} else if !result.Ok {
+		return nil, fmt.Errorf("assign_agent_job failed: no job assigned")
 	}
 
-	return &result.Result, nil
+	return &assignedJob, nil
 }
 
 type JobLeaseStatus struct {
@@ -479,7 +499,8 @@ type execCompleteJobRequest struct {
 	ExecutionID string          `json:"execution_id"`
 	Status      string          `json:"status"`
 	DurationMs  int64           `json:"duration_ms,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
+	Output      json.RawMessage `json:"output,omitempty"`
+	Error       string          `json:"error,omitempty"`
 }
 
 type execCompleteJobResponse struct {
@@ -547,7 +568,7 @@ func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, s
 		if err != nil {
 			return &CompleteJobResult{Err: err}
 		}
-		reqBody.Result = resultJSON
+		reqBody.Output = resultJSON
 	}
 
 	body, _ := json.Marshal(reqBody)

@@ -372,13 +372,15 @@ func handleJobEvent(ctx context.Context, data string) {
 
 	traceID := obs.NewTraceID()
 
-	var executionStepID string
+	var executionStepID, executionID string
 	if len(job.Payload) > 0 {
 		var payload struct {
 			ExecutionStepID string `json:"execution_step_id"`
+			ExecutionID string `json:"execution_id"`
 		}
 		if err := json.Unmarshal(job.Payload, &payload); err == nil {
 			executionStepID = payload.ExecutionStepID
+			executionID = payload.ExecutionID
 		}
 	}
 
@@ -389,6 +391,7 @@ func handleJobEvent(ctx context.Context, data string) {
 			"job_type":          job.JobType,
 			"trace_id":          traceID,
 			"execution_step_id": executionStepID,
+			"execution_id":     executionID,
 		},
 	)
 
@@ -399,7 +402,7 @@ func handleJobEvent(ctx context.Context, data string) {
 		"",
 		traceID,
 		executionStepID,
-		"",
+		executionID,
 	); err != nil {
 		log.Printf("[sse] dispatch failed for job %s: %v", job.ID, err)
 	}

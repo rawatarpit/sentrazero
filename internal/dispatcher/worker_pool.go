@@ -260,7 +260,7 @@ func executeJobSafe(id int, req jobRequest) {
 	// ---- Record plugin execution start ----
 	var pluginExecID string
 	var pluginExecErr error
-	if execClient != nil && req.orgID != "" && req.jobID != "" && req.jobType != "scan_dataset" {
+	if execClient != nil && req.orgID != "" && req.jobID != "" {
 		pluginExecID, pluginExecErr = execClient.RecordPluginExecutionStart(
 			ctx, req.orgID, req.jobID, req.jobID, "",
 		)
@@ -272,6 +272,27 @@ func executeJobSafe(id int, req jobRequest) {
 				"error":  pluginExecErr.Error(),
 			})
 		}
+	}
+
+	// ---- Extract execution_id from payload if not provided ----
+	if req.executionID == "" && len(req.payload) > 0 {
+		var payload struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		if err := json.Unmarshal(req.payload, &payload); err == nil && payload.ExecutionID != "" {
+			req.executionID = payload.ExecutionID
+			obs.Debug("extracted execution_id from payload", obs.Field{
+				"job_id":       req.jobID,
+				"execution_id": req.executionID,
+			})
+		}
+	}
+
+	if req.executionID == "" && req.jobID != "" {
+		obs.Warn("execution_id not provided - job may fail at completion", obs.Field{
+			"job_id":   req.jobID,
+			"job_type": req.jobType,
+		})
 	}
 
 	// ---- Execute job payload ----
@@ -391,10 +412,6 @@ func executeJobSafe(id int, req jobRequest) {
 	)
 }
 
-// ---------------------------------------------------------------------
-// Job submission
-// ---------------------------------------------------------------------
-// Job submission
 // ---------------------------------------------------------------------
 // Job submission
 // ---------------------------------------------------------------------

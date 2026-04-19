@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"sentra-agent/internal/dataset"
@@ -120,41 +121,33 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	if job.StorageConfigID != "" && (storageMode == "s3" || storageMode == "aws_s3" || storageMode == "object_storage" || storageMode == "gcs" || storageMode == "google_cloud_storage" || storageMode == "azure_blob") {
 		cfg, err := storage.GetConfigByID(job.StorageConfigID)
 		if err != nil {
-			obs.Warn("executeScanDataset: failed to get storage config by ID", obs.Field{
-				"error":             err.Error(),
-				"storage_config_id": job.StorageConfigID,
-			})
-		} else {
-			obs.Info("executeScanDataset: got storage config", obs.Field{
-				"storage_mode":      cfg.StorageMode,
-				"provider":          cfg.Provider,
-				"bucket_name":       cfg.BucketName,
-				"endpoint":          cfg.Endpoint,
-				"storage_config_id": job.StorageConfigID,
-			})
-			cfgCopy := &storage.StorageConfig{
-				StorageMode:   storageMode,
-				Provider:      cfg.Provider,
-				BucketName:    cfg.BucketName,
-				Region:        cfg.Region,
-				Endpoint:      cfg.Endpoint,
-				MountBasePath: cfg.MountBasePath,
-				Credentials:   cfg.Credentials,
-			}
-			newBackend, err := storage.NewBackend(cfgCopy)
-			if err != nil {
-				obs.Warn("executeScanDataset: failed to create backend from config", obs.Field{
-					"error":             err.Error(),
-					"storage_config_id": job.StorageConfigID,
-				})
-			} else {
-				backend = newBackend
-				obs.Info("executeScanDataset: created backend from storage_config_id", obs.Field{
-					"backend_type":      fmt.Sprintf("%T", backend),
-					"storage_config_id": job.StorageConfigID,
-				})
-			}
+			return fmt.Errorf("failed to get storage config %s: %w", job.StorageConfigID, err)
 		}
+		obs.Info("executeScanDataset: got storage config", obs.Field{
+			"storage_mode":      cfg.StorageMode,
+			"provider":          cfg.Provider,
+			"bucket_name":       cfg.BucketName,
+			"endpoint":          cfg.Endpoint,
+			"storage_config_id": job.StorageConfigID,
+		})
+		cfgCopy := &storage.StorageConfig{
+			StorageMode:   storageMode,
+			Provider:      cfg.Provider,
+			BucketName:    cfg.BucketName,
+			Region:        cfg.Region,
+			Endpoint:      cfg.Endpoint,
+			MountBasePath: cfg.MountBasePath,
+			Credentials:   cfg.Credentials,
+		}
+		newBackend, err := storage.NewBackend(cfgCopy)
+		if err != nil {
+			return fmt.Errorf("failed to initialize storage backend for %s: %w", job.StorageConfigID, err)
+		}
+		backend = newBackend
+		obs.Info("executeScanDataset: created backend from storage_config_id", obs.Field{
+			"backend_type":      fmt.Sprintf("%T", backend),
+			"storage_config_id": job.StorageConfigID,
+		})
 	}
 
 	if backend == nil {
@@ -166,6 +159,12 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 
 	var remotePath string
 	if job.SourcePath != "" {
+		if strings.Contains(job.SourcePath, "http") {
+			return fmt.Errorf("invalid source_path: contains URL %q (must be S3 object key only, not full URL)", job.SourcePath)
+		}
+		if strings.HasPrefix(job.SourcePath, "/") || filepath.IsAbs(job.SourcePath) {
+			return fmt.Errorf("invalid source_path: is absolute path %q (must be S3 object key relative to bucket)", job.SourcePath)
+		}
 		remotePath = job.SourcePath
 	} else {
 		remotePath = storage.GetRemotePath(job.DatasetID, 0, "source")
@@ -173,6 +172,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 
 	obs.Info("executeScanDataset: listing remote objects", obs.Field{
 		"remote_path": remotePath,
+		"source_path_provided": job.SourcePath != "",
 	})
 
 	objects, err := backend.ListObjects(ctx, remotePath)
@@ -219,48 +219,18 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		inputPath = samplePath
 	}
 
-	pluginName := job.PluginName
-	if pluginName == "" {
-		pluginName = "plugin_scan_metadata"
-	}
-
-	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
+	summary, err := scanDatasetBuiltin(ctx, inputPath, workDir)
 	if err != nil {
-		return err
-	}
-
-	outputPath := filepath.Join(workDir, "scan_result.json")
-
-	scanCtx := PluginContext{
-		JobID:      job.ID,
-		OrgID:      job.OrgID,
-		DatasetID:  job.DatasetID,
-		ChunkID:    job.ChunkID,
-		InputPath:  inputPath,
-		OutputPath: outputPath,
-		Config:     job.StepConfig,
-	}
-
-	inJSON, _ := json.Marshal(scanCtx)
-
-	env := system.DetectExecutionEnv()
-	result, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
-	if err != nil {
-		return fmt.Errorf("scan plugin execution failed: %w", err)
-	}
-
-	var summary map[string]any
-	if err := json.Unmarshal([]byte(result.Output), &summary); err != nil {
-		return err
+		return fmt.Errorf("built-in scan failed: %w", err)
 	}
 
 	if summary == nil {
-		return errors.New("scan plugin returned nil output")
+		return errors.New("scan returned nil output")
 	}
 
 	obs.Info("scan completed", obs.Field{
-		"job_id":       job.ID,
-		"dataset_id":   job.DatasetID,
+		"job_id":        job.ID,
+		"dataset_id":    job.DatasetID,
 		"summary_keys": len(summary),
 	})
 
@@ -850,4 +820,71 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 	})
 
 	return nil
+}
+
+func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[string]any, error) {
+	summary := map[string]any{
+		"file_count":       0,
+		"total_size_bytes": int64(0),
+		"file_types":       map[string]int{},
+		"headers":        []string{},
+		"columns":        []string{},
+	}
+
+	inputIsDir := inputPath
+	if inputIsDir == "" {
+		return summary, nil
+	}
+
+	info, err := os.Stat(inputIsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			obs.Warn("scan input path does not exist", obs.Field{"path": inputIsDir})
+			return summary, nil
+		}
+		return nil, err
+	}
+
+	var files []os.FileInfo
+	if info.IsDir() {
+		entries, err := os.ReadDir(inputIsDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				f, err := e.Info()
+				if err == nil {
+					files = append(files, f)
+				}
+			}
+		}
+	} else {
+		files = []os.FileInfo{info}
+	}
+
+	fileCount := len(files)
+	totalSize := int64(0)
+	fileTypes := map[string]int{}
+
+	for _, f := range files {
+		totalSize += f.Size()
+		ext := filepath.Ext(f.Name())
+		if ext == "" {
+			ext = "(no extension)"
+		}
+		fileTypes[ext]++
+	}
+
+	summary["file_count"] = fileCount
+	summary["total_size_bytes"] = totalSize
+	summary["file_types"] = fileTypes
+
+	obs.Info("built-in scan complete", obs.Field{
+		"file_count":      fileCount,
+		"total_size_mb":   totalSize / (1024 * 1024),
+		"unique_types":   len(fileTypes),
+	})
+
+	return summary, nil
 }
