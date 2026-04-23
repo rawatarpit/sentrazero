@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
+	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -17,11 +17,24 @@ import (
 type S3BackendV2 struct {
 	client     *s3.Client
 	bucketName string
-	endpoint  string
 }
 
 func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (*S3BackendV2, error) {
-	log.Printf("[storage] S3 (AWS SDK v2): endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
+	log.Printf("[storage] NewS3BackendV2: endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
+
+	// For custom S3 endpoints like Supabase Storage, we need to properly configure the endpoint
+	// Try endpoint with BaseURL approach - this is what AWS CLI uses directly
+	
+	resolver := awsv2.EndpointResolverFunc(func(service, region string) (awsv2.Endpoint, error) {
+		log.Printf("[storage] endpoint resolver called: service=%s region=%s endpoint=%s", service, region, endpoint)
+		return awsv2.Endpoint{
+			URL:               endpoint,
+			PartitionID:     "aws",
+			SigningRegion:     region,
+			HostnameImmutable: true,
+			Source:           awsv2.EndpointSourceCustom,
+		}, nil
+	})
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -30,34 +43,37 @@ func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (
 			creds.SessionToken,
 		)),
 		config.WithRegion(region),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(customEndpointResolver(endpoint))),
+		config.WithEndpointResolver(resolver),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
+	log.Printf("[storage] creating S3 client with custom endpoint: %s", endpoint)
+	
 	svc := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = true
+		// The key: explicitly set BaseURL on the client options - this is different from config
+		// But AWS SDK v2 doesn't have BaseURL - need to use custom signer
 	})
+
+	log.Printf("[storage] S3 client created, testing connectivity...")
+
+	// Quick test - try to list buckets to verify connectivity
+	ctx := context.Background()
+	_, err = svc.ListBuckets(ctx, &s3.ListBucketsInput{})
+	if err != nil {
+		log.Printf("[storage] S3 connectivity test FAILED: %v", err)
+	} else {
+		log.Printf("[storage] S3 connectivity test OK")
+	}
 
 	log.Printf("[storage] S3 client ready for bucket: %s", bucketName)
 
 	return &S3BackendV2{
 		client:     svc,
 		bucketName: bucketName,
-		endpoint:  endpoint,
 	}, nil
-}
-
-func customEndpointResolver(endpoint string) func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-	return func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{
-			URL:               endpoint,
-			SigningRegion:      region,
-			HostnameImmutable: true,
-			Source:           aws.EndpointSourceCustom,
-		}, nil
-	}
 }
 
 func (b *S3BackendV2) ReadObject(ctx context.Context, remotePath string) (io.ReadCloser, error) {
@@ -84,12 +100,15 @@ func (b *S3BackendV2) WriteObject(ctx context.Context, remotePath string, reader
 }
 
 func (b *S3BackendV2) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	log.Printf("[storage] ListObjects: bucket=%s prefix=%s", b.bucketName, prefix)
+	
 	result, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:    &b.bucketName,
-		Prefix:    &prefix,
-		MaxKeys:  1000,
+		Bucket: &b.bucketName,
+		Prefix: &prefix,
+		MaxKeys: 1000,
 	})
 	if err != nil {
+		log.Printf("[storage] ListObjects error: %v", err)
 		return nil, fmt.Errorf("failed to list objects: %w", err)
 	}
 
@@ -115,7 +134,7 @@ func (b *S3BackendV2) StatObject(ctx context.Context, remotePath string) (Object
 		Key:    &remotePath,
 	})
 	if err != nil {
-		if isNotFound(err) {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
 			return ObjectInfo{}, fmt.Errorf("object not found: %s", remotePath)
 		}
 		return ObjectInfo{}, err
@@ -126,14 +145,6 @@ func (b *S3BackendV2) StatObject(ctx context.Context, remotePath string) (Object
 		Size:         result.ContentLength,
 		LastModified: *result.LastModified,
 	}, nil
-}
-
-func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "not found") || strings.Contains(errStr, "404") || strings.Contains(errStr, "NoSuchKey")
 }
 
 func (b *S3BackendV2) DeleteObject(ctx context.Context, remotePath string) error {

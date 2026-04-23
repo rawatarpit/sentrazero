@@ -558,6 +558,8 @@ const (
 )
 
 func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, jobID string, status string, durationMs int64, resultData any) *CompleteJobResult {
+	log.Printf("[EXEC-CLIENT] CompleteJob: executionID=%s jobID=%s status=%s", executionID, jobID, status)
+	
 	reqBody := execCompleteJobRequest{
 		ExecutionID: executionID,
 		JobID:      jobID,
