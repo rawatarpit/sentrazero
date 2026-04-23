@@ -359,9 +359,11 @@ func NewBackend(cfg *StorageConfig) (StorageBackend, error) {
 			return nil, fmt.Errorf("S3 storage mode requires credentials with access_key_id and secret_access_key")
 		}
 
-		log.Printf("[storage] initializing S3 backend: endpoint=%s bucket=%s region=%s",
+		log.Printf("[storage] initializing S3 backend (AWS SDK v2): endpoint=%s bucket=%s region=%s",
 			cfg.Endpoint, cfg.BucketName, cfg.Region)
-		return NewS3Backend(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
+		
+		// Use AWS SDK v2
+		return NewS3BackendV2(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
 
 	case "gcs", "azure_blob":
 		return nil, fmt.Errorf("%s storage mode not yet implemented", storageMode)
