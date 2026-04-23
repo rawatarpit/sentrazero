@@ -238,6 +238,7 @@ func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken),
 		Secure: useSSL,
+		// UsePathStyle is handled automatically for non-AWS endpoints in minio-go v7
 	}
 	if region != "" {
 		opts.Region = region
