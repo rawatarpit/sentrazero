@@ -370,11 +370,11 @@ func NewBackend(cfg *StorageConfig) (StorageBackend, error) {
 			return nil, fmt.Errorf("S3 storage mode requires credentials with access_key_id and secret_access_key")
 		}
 
-		log.Printf("[storage] initializing S3 backend: endpoint=%s bucket=%s region=%s",
+		log.Printf("[storage] initializing S3 HTTP backend: endpoint=%s bucket=%s region=%s",
 			cfg.Endpoint, cfg.BucketName, cfg.Region)
 		
-		// Use AWS SDK v2 with custom endpoint resolver
-		return NewS3BackendV2(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
+		// Use S3 HTTP backend with manual AWS Signature V4
+		return NewS3HTTPBackend(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
 
 	case "gcs", "azure_blob":
 		return nil, fmt.Errorf("%s storage mode not yet implemented", storageMode)
