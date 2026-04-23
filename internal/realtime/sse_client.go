@@ -99,11 +99,13 @@ func (cb *CircuitBreaker) AllowRequest() bool {
 }
 
 type SSEJobEvent struct {
-	ID      string          `json:"id"`
-	AgentID string          `json:"agent_id"`
-	JobType string          `json:"job_type"`
-	Payload json.RawMessage `json:"payload"`
-	Status  string          `json:"status"`
+	ID               string          `json:"id"`
+	AgentID          string          `json:"agent_id"`
+	JobType          string          `json:"job_type"`
+	Payload         json.RawMessage `json:"payload"`
+	Status          string          `json:"status"`
+	ExecutionID     string          `json:"execution_id"`
+	ExecutionStepID string          `json:"execution_step_id"`
 }
 
 var (
@@ -372,15 +374,16 @@ func handleJobEvent(ctx context.Context, data string) {
 
 	traceID := obs.NewTraceID()
 
-	var executionStepID, executionID string
-	if len(job.Payload) > 0 {
+	// execution_id is in the job table's execution_id column, not in payload
+	// Use job.ExecutionID directly from the database query
+	executionStepID := job.ExecutionStepID
+	executionID := job.ExecutionID
+	if executionStepID == "" && len(job.Payload) > 0 {
 		var payload struct {
 			ExecutionStepID string `json:"execution_step_id"`
-			ExecutionID string `json:"execution_id"`
 		}
 		if err := json.Unmarshal(job.Payload, &payload); err == nil {
 			executionStepID = payload.ExecutionStepID
-			executionID = payload.ExecutionID
 		}
 	}
 

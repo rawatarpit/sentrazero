@@ -166,6 +166,18 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 			return fmt.Errorf("invalid source_path: is absolute path %q (must be S3 object key relative to bucket)", job.SourcePath)
 		}
 		remotePath = job.SourcePath
+		// Strip bucket prefix if present - S3 key should NOT include bucket name
+		// e.g., "datasets/test-data.csv" -> "test-data.csv"
+		for _, bucket := range []string{"datasets", "data", "public"} {
+			remotePath = strings.TrimPrefix(remotePath, bucket+"/")
+		}
+		// Validate after stripping - warn if still has path separators (might be nested)
+		if strings.Contains(remotePath, "/") {
+			obs.Warn("source_path contains subdirectory - verify this is intentional", obs.Field{
+				"source_path": job.SourcePath,
+				"remote_path": remotePath,
+			})
+		}
 	} else {
 		remotePath = storage.GetRemotePath(job.DatasetID, 0, "source")
 	}

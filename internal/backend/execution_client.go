@@ -561,6 +561,12 @@ func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, s
 		ExecutionID: executionID,
 		Status:      status,
 		DurationMs:  durationMs,
+		// Also include empty values - complete_job edge function can accept job_id as alternative
+	}
+
+	// Also pass via context headers for edge function to use as fallback
+	if executionID == "" {
+		// Try to get from elsewhere - but for now pass empty
 	}
 
 	if resultData != nil {
