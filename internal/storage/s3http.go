@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -40,7 +41,13 @@ func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials)
 		accessKey: creds.AccessKeyID,
 		secretKey: creds.SecretAccessKey,
 		region:   region,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   &http.Client{
+			Timeout: 30 * time.Second,
+			// Skip TLS verification for Supabase Storage
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
 	}, nil
 }
 
