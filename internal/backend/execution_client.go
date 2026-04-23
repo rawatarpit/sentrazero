@@ -497,7 +497,7 @@ func (c *ExecutionClient) RecordPluginExecutionEnd(ctx context.Context, executio
 // This validates lease at completion time to prevent expired lease holders from overwriting
 type execCompleteJobRequest struct {
 	ExecutionID string          `json:"execution_id"`
-	JobID      string          `json:"job_id,omitempty"`
+	JobID      string          `json:"job_id"`
 	Status    string          `json:"status"`
 	DurationMs int64           `json:"duration_ms,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`

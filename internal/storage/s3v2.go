@@ -6,8 +6,9 @@ import (
 	"io"
 	"log"
 	"sort"
+	"strings"
 
-	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -16,23 +17,11 @@ import (
 type S3BackendV2 struct {
 	client     *s3.Client
 	bucketName string
+	endpoint  string
 }
 
 func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (*S3BackendV2, error) {
 	log.Printf("[storage] S3 (AWS SDK v2): endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
-
-	resolver := awsv2.EndpointResolverFunc(func(service string, region string) (awsv2.Endpoint, error) {
-		if service == s3.ServiceID {
-			return awsv2.Endpoint{
-				PartitionID:       "aws",
-				URL:                endpoint,
-				SigningRegion:      region,
-				HostnameImmutable: true,
-				Source:           awsv2.EndpointSourceCustom,
-			}, nil
-		}
-		return awsv2.Endpoint{}, &awsv2.EndpointNotFoundError{}
-	})
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -41,7 +30,7 @@ func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (
 			creds.SessionToken,
 		)),
 		config.WithRegion(region),
-		config.WithEndpointResolver(resolver),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(customEndpointResolver(endpoint))),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
@@ -56,7 +45,19 @@ func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (
 	return &S3BackendV2{
 		client:     svc,
 		bucketName: bucketName,
+		endpoint:  endpoint,
 	}, nil
+}
+
+func customEndpointResolver(endpoint string) func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+	return func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{
+			URL:               endpoint,
+			SigningRegion:      region,
+			HostnameImmutable: true,
+			Source:           aws.EndpointSourceCustom,
+		}, nil
+	}
 }
 
 func (b *S3BackendV2) ReadObject(ctx context.Context, remotePath string) (io.ReadCloser, error) {
@@ -84,9 +85,9 @@ func (b *S3BackendV2) WriteObject(ctx context.Context, remotePath string, reader
 
 func (b *S3BackendV2) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	result, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: &b.bucketName,
+		Bucket:    &b.bucketName,
 		Prefix:    &prefix,
-		MaxKeys:    1000,
+		MaxKeys:  1000,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list objects: %w", err)
@@ -114,6 +115,9 @@ func (b *S3BackendV2) StatObject(ctx context.Context, remotePath string) (Object
 		Key:    &remotePath,
 	})
 	if err != nil {
+		if isNotFound(err) {
+			return ObjectInfo{}, fmt.Errorf("object not found: %s", remotePath)
+		}
 		return ObjectInfo{}, err
 	}
 
@@ -122,6 +126,14 @@ func (b *S3BackendV2) StatObject(ctx context.Context, remotePath string) (Object
 		Size:         result.ContentLength,
 		LastModified: *result.LastModified,
 	}, nil
+}
+
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "not found") || strings.Contains(errStr, "404") || strings.Contains(errStr, "NoSuchKey")
 }
 
 func (b *S3BackendV2) DeleteObject(ctx context.Context, remotePath string) error {
