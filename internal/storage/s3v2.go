@@ -28,6 +28,7 @@ func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (
 				URL:                endpoint,
 				SigningRegion:      region,
 				HostnameImmutable: true,
+				Source:           awsv2.EndpointSourceCustom,
 			}, nil
 		}
 		return awsv2.Endpoint{}, &awsv2.EndpointNotFoundError{}

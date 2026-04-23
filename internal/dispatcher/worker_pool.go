@@ -341,7 +341,7 @@ func executeJobSafe(id int, req jobRequest) {
 				})
 			}
 
-			result := execClient.CompleteJob(ctx, req.executionID, "failed", duration.Milliseconds(), nil)
+			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), nil)
 			if result.IsStaleExecution() {
 				obs.Warn("job failure reported but completion rejected - stale execution", obs.Field{
 					"job_id":        req.jobID,
@@ -369,8 +369,8 @@ func executeJobSafe(id int, req jobRequest) {
 	// ---- Success path ----
 	atomic.AddInt64(&totalProcessed, 1)
 
-	if execClient != nil && req.executionID != "" {
-		result := execClient.CompleteJob(ctx, req.executionID, "completed", duration.Milliseconds(), nil)
+	if execClient != nil && (req.executionID != "" || req.jobID != "") {
+		result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "completed", duration.Milliseconds(), nil)
 
 		if result.IsStaleExecution() {
 			obs.Warn("job execution succeeded but completion rejected - stale execution", obs.Field{
