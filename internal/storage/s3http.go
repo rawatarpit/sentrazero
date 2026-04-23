@@ -15,97 +15,102 @@ import (
 
 type S3HTTPBackend struct {
 	bucketName string
-	endpoint   string
+	endpoint string
 	accessKey string
 	secretKey string
-	client   *http.Client
+	client  *http.Client
+	region  string
 }
 
 func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials) (*S3HTTPBackend, error) {
 	log.Printf("[storage] S3HTTP: endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
 
-	// Parse endpoint to get host
-	// endpoint: https://project.storage.supabase.co/storage/v1/s3
-	endpoint = strings.TrimSuffix(endpoint, "/")
-
+	// endpoint format: https://project.storage.supabase.co/storage/v1/s3
+	// we need host only and use path-style for requests
 	return &S3HTTPBackend{
 		bucketName: bucketName,
-		endpoint:   endpoint,
-		accessKey:  creds.AccessKeyID,
-		secretKey:  creds.SecretAccessKey,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		endpoint: strings.TrimSuffix(endpoint, "/"),
+		accessKey: creds.AccessKeyID,
+		secretKey: creds.SecretAccessKey,
+		region:   region,
+		client:   &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
-func (b *S3HTTPBackend) signRequest(req *http.Request, region string) error {
-	// AWS Signature Version 4 signing
+func (b *S3HTTPBackend) signRequest(req *http.Request) error {
+	// AWS Signature Version 4 - simplified for Supabase Storage S3
 	now := time.Now().UTC()
-	req.Header.Set("X-Amz-Date", now.Format("20060102T150405Z"))
-	req.Header.Set("Host", req.URL.Host)
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+
+	// Host header
+	host := req.URL.Host
+	req.Header.Set("X-Amz-Date", amzDate)
+	req.Header.Set("Host", host)
 
 	// Canonical request
 	canonicalURI := req.URL.Path
 	if canonicalURI == "" {
 		canonicalURI = "/"
 	}
-	
-	canonicalQueryString := req.URL.RawQuery
-	if canonicalQueryString != "" {
-		canonicalQueryString = strings.ReplaceAll(canonicalQueryString, "+", "%20")
+
+	canonicalQuery := ""
+	if req.URL.RawQuery != "" {
+		canonicalQuery = req.URL.RawQuery
 	}
 
-	// Canonical headers
-	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-date:%s\n", 
-		req.URL.Host, now.Format("20060102T150405Z"))
+	// Signed headers - must be lowercase and sorted
 	signedHeaders := "host;x-amz-date"
+	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-date:%s\n", host, amzDate)
 
-	// Payload hash
-	payload := ""
-	if req.Body != nil {
-		if body, err := io.ReadAll(req.Body); err == nil {
-			if len(body) > 0 {
-				hash := sha256.Sum256(body)
-				payload = hex.EncodeToString(hash[:])
-				req.Body = io.NopCloser(strings.NewReader(string(body)))
-			}
-		}
-	}
-	if payload == "" {
-		payload = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	}
-	req.Header.Set("X-Amz-Content-Sha256", payload)
+	// Unsigned payload
+	payloadHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	
+	// Canonical request string
+	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
+		req.Method,
+		canonicalURI,
+		canonicalQuery,
+		canonicalHeaders,
+		signedHeaders,
+		payloadHash,
+	)
+	
+	log.Printf("[storage] canonicalRequest: %s", canonicalRequest)
 
-	// Canonical request hash
-	cr := req.Method + "\n" + canonicalURI + "\n" + canonicalQueryString + "\n" + canonicalHeaders + "\n" + signedHeaders + "\n" + payload
-	hash := sha256.Sum256([]byte(cr))
+	// Hash canonical request
+	hash := sha256.Sum256([]byte(canonicalRequest))
 	canonicalRequestHash := hex.EncodeToString(hash[:])
 
+	// Credential scope
+	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", dateStamp, b.region)
+
 	// String to sign
-	amzDate := now.Format("20060102T150405Z")
-	dateStamp := now.Format("20060102")
-	service := "s3"
-	algorithm := "AWS4-HMAC-SHA256"
-	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
-	stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s",
-		algorithm,
+	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s",
 		amzDate,
 		credentialScope,
 		canonicalRequestHash,
 	)
+	
+	log.Printf("[storage] stringToSign: %s", stringToSign)
 
-	// Signing key
+	// Derive signing key
 	kDate := hmacSHA256([]byte("AWS4"+b.secretKey), dateStamp)
-	kRegion := hmacSHA256(kDate, region)
-	kService := hmacSHA256(kRegion, service)
+	kRegion := hmacSHA256(kDate, b.region)
+	kService := hmacSHA256(kRegion, "s3")
 	kSigning := hmacSHA256(kService, "aws4_request")
 
-	// Signature
+	// Calculate signature
 	signature := hex.EncodeToString(hmacSHA256(kSigning, stringToSign))
 
 	// Authorization header
-	authHeader := fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		algorithm, b.accessKey, credentialScope, signedHeaders, signature)
+	authHeader := fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		b.accessKey, credentialScope, signedHeaders, signature)
+	
 	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+
+	log.Printf("[storage] Authorization: %s", authHeader[:50]+"...")
 
 	return nil
 }
@@ -116,49 +121,42 @@ func hmacSHA256(key []byte, data string) []byte {
 	return h.Sum(nil)
 }
 
-func (b *S3HTTPBackend) makeRequest(method, objectKey string) (*http.Request, error) {
-	// Build URL: endpoint/bucket/object
-	url := fmt.Sprintf("%s/%s/%s", b.endpoint, b.bucketName, objectKey)
-	
-	// Handle trailing / in endpoint
-	if !strings.HasSuffix(b.endpoint, "/") && !strings.HasPrefix(objectKey, "/") {
-		url = b.endpoint + "/" + b.bucketName + "/" + objectKey
-	} else if strings.HasSuffix(b.endpoint, "/") {
-		url = b.endpoint + b.bucketName + "/" + objectKey
+func (b *S3HTTPBackend) buildURL(objectKey string) string {
+	// Build URL: endpoint/bucket/key
+	// endpoint: https://project.storage.supabase.co/storage/v1/s3
+	// path: /bucket/key but with any query string handled properly
+	if strings.Contains(objectKey, "?") {
+		// URL has query parameters - need to append to path properly
+		parts := strings.SplitN(objectKey, "?", 2)
+		key := parts[0]
+		query := parts[1]
+		if key != "" {
+			return fmt.Sprintf("%s/%s/%s?%s", b.endpoint, b.bucketName, key, query)
+		}
+		return fmt.Sprintf("%s/%s?%s", b.endpoint, b.bucketName, query)
 	}
-
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// Sign the request
-	if err := b.signRequest(req, "ap-south-1"); err != nil {
-		return nil, err
-	}
-
-	return req, nil
+	return fmt.Sprintf("%s/%s/%s", b.endpoint, b.bucketName, objectKey)
 }
 
 func (b *S3HTTPBackend) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	log.Printf("[storage] S3HTTP ListObjects: bucket=%s prefix=%s", b.bucketName, prefix)
 	
-	// Use list objects v2 API
-	objectKey := fmt.Sprintf("?list-type=2&prefix=%s&max-keys=1000", prefix)
+	// Build URL with query params
+	url := b.buildURL("?list-type=2&prefix=" + prefix + "&max-keys=1000")
+	log.Printf("[storage] URL: %s", url)
 	
-	url := fmt.Sprintf("%s/%s/%s", b.endpoint, b.bucketName, objectKey)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	
-	// Sign
-	if err := b.signRequest(req, "ap-south-1"); err != nil {
+	if err := b.signRequest(req); err != nil {
 		return nil, err
 	}
 
 	resp, err := b.client.Do(req)
 	if err != nil {
+		log.Printf("[storage] S3HTTP ListObjects request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -168,47 +166,58 @@ func (b *S3HTTPBackend) ListObjects(ctx context.Context, prefix string) ([]Objec
 		return nil, err
 	}
 
+	bodyStr := string(body)
+	if len(bodyStr) > 500 {
+		bodyStr = bodyStr[:500] + "..."
+	}
+	log.Printf("[storage] Response status: %d body: %s", resp.StatusCode, bodyStr)
+
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("S3 HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse XML response
-	return parseListObjectsV2Response(string(body))
+	// Parse XML manually
+	objects := parseListObjectsV2(string(body))
+	log.Printf("[storage] Found %d objects", len(objects))
+	return objects, nil
 }
 
-func parseListObjectsV2Response(xmlStr string) ([]ObjectInfo, error) {
-	// Simple XML parsing
+func parseListObjectsV2(xmlStr string) []ObjectInfo {
 	var objects []ObjectInfo
 	
-	// Extract contents between <Contents> tags
-	start := strings.Index(xmlStr, "<Contents>")
-	for start >= 0 {
-		end := strings.Index(xmlStr[start:], "</Contents>")
+	// Simple XML parsing
+	for {
+		start := strings.Index(xmlStr, "<Key>")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(xmlStr[start:], "</Key>")
 		if end < 0 {
 			break
 		}
-		contents := xmlStr[start:start+end+len("</Contents>")]
 		
-		// Extract key
-		keyStart := strings.Index(contents, "<Key>")
-		keyEnd := strings.Index(contents[keyStart:], "</Key>")
-		if keyStart >= 0 && keyEnd > 0 {
-			key := contents[keyStart+len("<Key>"):keyStart+keyEnd]
-			
-			// Extract size
-			sizeStart := strings.Index(contents, "<Size>")
-			sizeEnd := strings.Index(contents[sizeStart:], "</Size>")
-			var size int64
-			if sizeStart >= 0 && sizeEnd > 0 {
-				fmt.Sscanf(contents[sizeStart+len("<Size>"):sizeStart+sizeEnd], "%d", &size)
-			}
-			
-			objects = append(objects, ObjectInfo{Key: key, Size: size})
+		keyStart := start + len("<Key>")
+		key := xmlStr[keyStart:start+end]
+		xmlStr = xmlStr[start+end+len("</Key>"):]
+		
+		// Get size
+		sizeStart := strings.Index(xmlStr, "<Size>")
+		sizeEnd := strings.Index(xmlStr[sizeStart:], "</Size>")
+		var size int64 = 0
+		if sizeStart >= 0 && sizeEnd > 0 {
+			fmt.Sscanf(xmlStr[sizeStart+len("<Size>"):sizeStart+sizeEnd], "%d", &size)
 		}
 		
-		start = strings.Index(xmlStr[start+end+len("</Contents>"):], "<Contents>")
-		if start >= 0 {
-			start = start + end + len("</Contents>")
+		// Skip if no key
+		if key == "" {
+			continue
+		}
+		
+		objects = append(objects, ObjectInfo{Key: key, Size: size})
+		
+		// Check for more content
+		if len(objects) > 100 {
+			break
 		}
 	}
 
@@ -216,15 +225,19 @@ func parseListObjectsV2Response(xmlStr string) ([]ObjectInfo, error) {
 		objects = []ObjectInfo{}
 	}
 	
-	log.Printf("[storage] S3HTTP found %d objects", len(objects))
-	return objects, nil
+	return objects
 }
 
 func (b *S3HTTPBackend) ReadObject(ctx context.Context, remotePath string) (io.ReadCloser, error) {
 	log.Printf("[storage] S3HTTP ReadObject: %s", remotePath)
 	
-	req, err := b.makeRequest("GET", remotePath)
+	url := b.buildURL(remotePath)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		return nil, err
+	}
+	
+	if err := b.signRequest(req); err != nil {
 		return nil, err
 	}
 
@@ -247,14 +260,13 @@ func (b *S3HTTPBackend) WriteObject(ctx context.Context, remotePath string, read
 }
 
 func (b *S3HTTPBackend) StatObject(ctx context.Context, remotePath string) (ObjectInfo, error) {
-	// HEAD object
-	url := fmt.Sprintf("%s/%s/%s", b.endpoint, b.bucketName, remotePath)
+	url := b.buildURL(remotePath)
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	
-	if err := b.signRequest(req, "ap-south-1"); err != nil {
+	if err := b.signRequest(req); err != nil {
 		return ObjectInfo{}, err
 	}
 
@@ -271,13 +283,17 @@ func (b *S3HTTPBackend) StatObject(ctx context.Context, remotePath string) (Obje
 		return ObjectInfo{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	size := resp.ContentLength
-	return ObjectInfo{Key: remotePath, Size: size}, nil
+	return ObjectInfo{Key: remotePath, Size: resp.ContentLength}, nil
 }
 
 func (b *S3HTTPBackend) DeleteObject(ctx context.Context, remotePath string) error {
-	req, err := b.makeRequest("DELETE", remotePath)
+	url := b.buildURL(remotePath)
+	req, err := http.NewRequest("DELETE", url, nil)
 	if err != nil {
+		return err
+	}
+	
+	if err := b.signRequest(req); err != nil {
 		return err
 	}
 
