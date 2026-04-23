@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -221,6 +222,19 @@ type S3Backend struct {
 
 func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S3Backend, error) {
 	useSSL := true
+
+	// Extract host and scheme from endpoint, strip /storage/v1/s3 path
+	parsedURL, err := url.Parse(endpoint)
+	var host string
+	if err == nil && parsedURL != nil {
+		host = parsedURL.Host
+		if host == "" {
+			host = endpoint
+		}
+	} else {
+		host = endpoint
+	}
+
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken),
 		Secure: useSSL,
@@ -229,7 +243,7 @@ func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S
 		opts.Region = region
 	}
 
-	client, err := minio.New(endpoint, opts)
+	client, err := minio.New(host, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
