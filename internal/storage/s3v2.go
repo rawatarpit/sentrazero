@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"sort"
-	"strings"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -20,22 +19,19 @@ type S3BackendV2 struct {
 }
 
 func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (*S3BackendV2, error) {
-	// Supabase Storage S3 endpoint without /storage/v1/s3
-	s3Endpoint := endpoint
-	if strings.HasSuffix(endpoint, "/storage/v1/s3") {
-		s3Endpoint = strings.TrimSuffix(endpoint, "/storage/v1/s3")
-	}
+	log.Printf("[storage] S3 (AWS SDK v2): endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
 
-	// Create custom endpoint resolver to override the default S3 endpoint
-	resolver := awsv2.EndpointResolverWithOptionsFunc(
-		func(service, region string, options ...interface{}) (awsv2.Endpoint, error) {
+	resolver := awsv2.EndpointResolverFunc(func(service string, region string) (awsv2.Endpoint, error) {
+		if service == s3.ServiceID {
 			return awsv2.Endpoint{
-				URL:               "https://" + s3Endpoint,
-				HostnameImmutable: true,
 				PartitionID:       "aws",
+				URL:                endpoint,
+				SigningRegion:      region,
+				HostnameImmutable: true,
 			}, nil
-		},
-	)
+		}
+		return awsv2.Endpoint{}, &awsv2.EndpointNotFoundError{}
+	})
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -44,18 +40,17 @@ func NewS3BackendV2(endpoint, bucketName, region string, creds *S3Credentials) (
 			creds.SessionToken,
 		)),
 		config.WithRegion(region),
-		config.WithEndpointResolverWithOptions(resolver),
+		config.WithEndpointResolver(resolver),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Force path-style for Supabase Storage
 	svc := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = true
 	})
 
-	log.Printf("[storage] S3 (AWS SDK v2): connecting to %s with bucket %s", s3Endpoint, bucketName)
+	log.Printf("[storage] S3 client ready for bucket: %s", bucketName)
 
 	return &S3BackendV2{
 		client:     svc,
