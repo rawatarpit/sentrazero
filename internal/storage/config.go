@@ -222,9 +222,12 @@ type S3Backend struct {
 func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S3Backend, error) {
 	useSSL := true
 
-	// Supabase Storage S3: USE FULL ENDPOINT (same as AWS CLI)
-	// Do NOT strip /storage/v1/s3 - that's required for S3 API
+	// Supabase Storage S3: strip /storage/v1/s3 for minio-go
+	// AWS CLI adds this path automatically, but minio-go doesn't
 	s3Endpoint := endpoint
+	if strings.HasSuffix(endpoint, "/storage/v1/s3") {
+		s3Endpoint = strings.TrimSuffix(endpoint, "/storage/v1/s3")
+	}
 
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken),
@@ -234,19 +237,17 @@ func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S
 		opts.Region = region
 	}
 
-	log.Printf("[storage] S3: connecting to %s with bucket %s", s3Endpoint, bucketName)
+	log.Printf("[storage] S3: connecting to %s with bucket %s (endpoint: %s)", s3Endpoint, bucketName, endpoint)
 
 	client, err := minio.New(s3Endpoint, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create S3 client: %w", err)
+		log.Printf("[storage] S3: First attempt failed: %v", err)
+		// Try with full endpoint if first fails
+		client, err = minio.New(endpoint, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create S3 client: %w", err)
+		}
 	}
-
-	// Test connection by listing with empty prefix to see what happens
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	
-	// This will fail if bucket doesn't exist - but that's OK, we just need the client
-	_ = client.ListObjects(ctx, bucketName, minio.ListObjectsOptions{Prefix: "", MaxKeys: 1})
 
 	log.Printf("[storage] S3 client ready for bucket: %s", bucketName)
 
