@@ -34,6 +34,24 @@ func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials)
 	u, _ := url.Parse(endpoint)
 	host := u.Host
 
+	// Custom transport with TLS settings
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+	
+	// Pre-connect to warm up TLS
+	conn, err := tls.Dial("tcp", host+":443", tr.TLSClientConfig)
+	if err != nil {
+		log.Printf("[storage] TLS pre-connect failed: %v (continuing anyway)", err)
+	} else {
+		conn.Close()
+		log.Printf("[storage] TLS pre-connect OK, version: %d", conn.ConnectionState().Version)
+	}
+
+	log.Printf("[storage] S3HTTP: host=%s bucket=%s region=%s", host, bucketName, region)
+
 	return &S3HTTPBackend{
 		bucketName: bucketName,
 		endpoint:   endpoint,
@@ -41,12 +59,9 @@ func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials)
 		accessKey: creds.AccessKeyID,
 		secretKey: creds.SecretAccessKey,
 		region:   region,
-		client:   &http.Client{
+		client: &http.Client{
 			Timeout: 30 * time.Second,
-			// Skip TLS verification for Supabase Storage
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
+			Transport: tr,
 		},
 	}, nil
 }
