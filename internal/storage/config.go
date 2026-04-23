@@ -309,8 +309,10 @@ func normalizeStorageMode(mode string) string {
 		return "gcs"
 	case "azure_blob":
 		return "azure_blob"
-	case "shared_mount", "local", "object_storage":
+	case "shared_mount", "local":
 		return "shared_mount"
+	case "object_storage":
+		return "s3"
 	default:
 		return mode
 	}
@@ -503,6 +505,16 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 		return nil, err
 	}
 
+	type StorageConfigResponse struct {
+		Ok      bool   `json:"ok"`
+		Error   string `json:"error,omitempty"`
+		Details string `json:"details,omitempty"`
+	}
+	var checkResp StorageConfigResponse
+	if err := json.Unmarshal(resp, &checkResp); err == nil && !checkResp.Ok {
+		return nil, fmt.Errorf("storage config unavailable: %s (%s)", checkResp.Error, checkResp.Details)
+	}
+
 	var result Response
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -527,6 +539,10 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 		}
 		cfg.Credentials = resolvedCreds
 		log.Printf("[storage] FetchConfig: resolved vault secret %s -> credentials", cfg.VaultSecretName)
+	}
+
+	if cfg.Credentials == nil && (result.StorageMode == "s3" || result.StorageMode == "object_storage") {
+		return nil, fmt.Errorf("storage config unavailable: no credentials and storage_mode=%s", result.StorageMode)
 	}
 
 	cfgMu.Lock()
@@ -558,6 +574,16 @@ func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig,
 		return nil, err
 	}
 
+	type StorageConfigResponse struct {
+		Ok      bool   `json:"ok"`
+		Error   string `json:"error,omitempty"`
+		Details string `json:"details,omitempty"`
+	}
+	var checkResp StorageConfigResponse
+	if err := json.Unmarshal(resp, &checkResp); err == nil && !checkResp.Ok {
+		return nil, fmt.Errorf("storage config unavailable: %s (%s)", checkResp.Error, checkResp.Details)
+	}
+
 	var result Response
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -586,14 +612,24 @@ func (c *StorageClient) FetchConfigByID(storageConfigID string) (*StorageConfig,
 		log.Printf("[storage] FetchConfigByID: resolved vault secret %s -> credentials", secretName)
 	}
 
+	if cfg.Credentials == nil && (result.StorageMode == "s3" || result.StorageMode == "object_storage") {
+		return nil, fmt.Errorf("storage config unavailable: no credentials and storage_mode=%s", result.StorageMode)
+	}
+
 	return cfg, nil
 }
 
 func (c *StorageClient) resolveVaultSecret(secretName string) (*S3Credentials, error) {
-	type VaultResponse struct {
+	type VaultData struct {
 		AccessKeyID     string `json:"access_key_id"`
 		SecretAccessKey string `json:"secret_access_key"`
 		SessionToken    string `json:"session_token,omitempty"`
+	}
+	type VaultResponse struct {
+		Ok     bool       `json:"ok"`
+		Error  string     `json:"error,omitempty"`
+		Details string    `json:"details,omitempty"`
+		Data   *VaultData `json:"data,omitempty"`
 	}
 
 	body := map[string]string{
@@ -608,20 +644,24 @@ func (c *StorageClient) resolveVaultSecret(secretName string) (*S3Credentials, e
 
 	var result VaultResponse
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse vault secret: %w", err)
+		return nil, fmt.Errorf("failed to parse vault secret response: %w", err)
 	}
 
-	if result.AccessKeyID == "" || result.SecretAccessKey == "" {
+	if !result.Ok {
+		return nil, fmt.Errorf("vault secret decryption failed: %s (%s)", result.Error, result.Details)
+	}
+
+	if result.Data == nil || result.Data.AccessKeyID == "" || result.Data.SecretAccessKey == "" {
 		return nil, fmt.Errorf("vault secret %s missing access_key_id or secret_access_key", secretName)
 	}
 
 	log.Printf("[storage] resolved vault credentials (access_key_id present: %t, session_token present: %t)",
-		result.AccessKeyID != "", result.SessionToken != "")
+		result.Data.AccessKeyID != "", result.Data.SessionToken != "")
 
 	return &S3Credentials{
-		AccessKeyID:     result.AccessKeyID,
-		SecretAccessKey: result.SecretAccessKey,
-		SessionToken:    result.SessionToken,
+		AccessKeyID:     result.Data.AccessKeyID,
+		SecretAccessKey: result.Data.SecretAccessKey,
+		SessionToken:    result.Data.SessionToken,
 	}, nil
 }
 

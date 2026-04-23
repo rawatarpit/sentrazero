@@ -79,11 +79,44 @@ Agent does automatically:
 
 *The claim code can also be provided via CLI flag `--claim-code` or the agent will prompt for it.
 
-### CLI Flags
+### CLI Flags & Environment Variables
 
-| Flag | Description |
-|------|-------------|
-| `--claim-code <code>` | Claim code for non-interactive registration |
+| Flag/Env | Required | Default | Description |
+|----------|---------|---------|-------------|
+| `--claim-code` | No* | - | Claim code (required on first run) |
+| `SENTRA_CLAIM_CODE` | No* | - | Claim code via env var |
+| `SENTRA_BACKEND_URL` | No | auto | Backend URL |
+| `SENTRA_REDIS_URL` | No | - | Redis URL |
+| `ENVIRONMENT_POOL_MAX_SIZE` | No | 10 | Max env pools |
+| `ENVIRONMENT_MAX_COUNT` | No | 50 | Max environments |
+
+*Either `--claim-code` or prompt on first run.
+
+## Wiring: Backend API Calls
+
+The agent binary communicates with Supabase Edge Functions:
+
+```
+Agent Binary                    Supabase Backend
+    │                           │
+    ├─── claim_device() ────────► claim_device
+    │     {claim_code, sysinfo}     {device_id, token}
+    │                           │
+    ├─── agent_health_policy() ──► agent_health_policy
+    │     {cpu, memory, etc}      {concurrency}
+    │                           │
+    ├─── assign_agent_job() ──────► assign_agent_job RPC
+    │     (auth header)         {job_id, payload}
+    │                           │
+    ├─── complete_job() ────────► complete_job
+    │     {status, output}       {success}
+    │                           │
+    ├─── get_plugin() ──────────► get_plugin
+    │     {plugin_id}          {plugin}
+    │                           │
+    └─── verify_job_lease() ──► verify_job_lease
+          {job_id, device_id}    {valid}
+```
 
 ## Architecture
 
@@ -362,6 +395,328 @@ This release includes fixes for the following issues:
 | M8 | Added cleanup_stuck_jobs cron function |
 | L1 | CGO check now guarded by env var |
 | L2 | Added fallback path warning |
+
+## API Reference
+
+### Edge Functions (Backend API)
+
+All Edge Functions run on Supabase and are called by the agent binary.
+
+#### Authentication
+
+All functions (except `claim_device` and `register_device`) require:
+- `Authorization: Bearer <access_token>` header
+- `x-agent-token: <token>` header
+
+#### claim_device
+
+First-time device registration via claim code.
+
+```bash
+POST /functions/v1/claim_device
+Body: {
+  claim_code: "ORG-CLAIM-123",
+  sysinfo?: {
+    hostname?: string,
+    type?: "agent",
+    cpu_cores?: number,
+    memory_gb?: number,
+    benchmark_score?: number,
+    environment?: "local" | "docker",
+    storage?: "local" | "s3",
+    network_zone?: string,
+    merge_capable?: boolean
+  }
+}
+Response: { ok, device_id, agent_token, org_id }
+```
+
+#### register_device
+
+Device registration (alternative to claim_device with Bearer auth).
+
+```bash
+POST /functions/v1/register_device
+Authorization: Bearer <claim_code>
+Body: {
+  name: "device-name",
+  specs?: object,
+  environment_type?: "local",
+  storage_type?: "disk",
+  capabilities?: string[],
+  benchmark_score?: number,
+  force_reclaim?: boolean
+}
+Response: { ok, device_id, access_token }
+```
+
+#### agent_health_policy
+
+Reports device health and receives concurrency policy.
+
+```bash
+POST /functions/v1/agent_health_policy
+Headers: Authorization, x-agent-token
+Body: {
+  total_cpu_cores?: number,
+  total_memory_gb?: number,
+  cpu_cores_free?: number,
+  memory_free_gb?: number,
+  cpu_usage_percent?: number,
+  network_latency_ms?: number,
+  gpu_available?: boolean,
+  incoming_workload_weight?: number
+}
+Response: { ok, concurrency, load_factor }
+```
+
+#### assign_agent_job
+
+Requests a job assignment from the backend.
+
+```bash
+GET /functions/v1/assign_agent_job
+Headers: Authorization, x-agent-token
+Response: { ok, result: { job_id, job_type, payload, execution_id } }
+```
+
+#### agent_stream
+
+Server-Sent Events stream for real-time job delivery.
+
+```bash
+GET /functions/v1/agent_stream
+Headers: Authorization, x-agent-token
+Response: event-stream with job events
+```
+
+Events:
+- `hello`: { device_id, org_id, realtime_enabled }
+- `job`: { id, job_type, status, payload }
+- `sync`: { jobs_sent, timestamp }
+
+#### complete_job
+
+Reports job completion.
+
+```bash
+POST /functions/v1/complete_job
+Body: {
+  execution_id: uuid,
+  status: "completed" | "failed" | "cancelled",
+  duration_ms?: number,
+  output?: object,
+  error?: string,
+  device_id?: uuid
+}
+Response: { success, execution }
+```
+
+#### verify_job_lease
+
+Verifies job lease is still valid.
+
+```bash
+POST /functions/v1/verify_job_lease
+Body: {
+  job_id: uuid,
+  device_id: uuid
+}
+Response: { valid }
+```
+
+#### get_plugin
+
+Retrieves plugin code.
+
+```bash
+POST /functions/v1/get_plugin
+Body: { plugin_id: uuid }
+Response: { plugin }
+```
+
+#### relay_job_event
+
+Relays job events to notification queue.
+
+```bash
+POST /functions/v1/relay_job_event
+Body: {
+  job_id: uuid,
+  event_type: string,
+  payload: object
+}
+Response: { ok }
+```
+
+#### report_job_error
+
+Reports job execution error.
+
+```bash
+POST /functions/v1/report_job_error
+Body: {
+  job_id: uuid,
+  error: string,
+  failure_classification?: "transient" | "permanent" | "resource" | "configuration"
+}
+Response: { ok }
+```
+
+#### record_benchmark
+
+Records benchmark scores.
+
+```bash
+POST /functions/v1/record_benchmark
+Body: {
+  test_name?: string,
+  latency_ms?: number,
+  device_id?: uuid
+}
+Response: { ok }
+```
+
+#### get_storage_config
+
+Gets storage backend configuration.
+
+```bash
+POST /functions/v1/get_storage_config
+Body: { storage_type?: string }
+Response: { config }
+```
+
+#### test_storage_connection
+
+Tests storage connection.
+
+```bash
+POST /functions/v1/test_storage_connection
+Body: {
+  storage_type: string,
+  credentials: object
+}
+Response: { ok }
+```
+
+#### store_storage_credentials
+
+Stores encrypted storage credentials.
+
+```bash
+POST /functions/v1/store_storage_credentials
+Body: {
+  storage_type: string,
+  credentials: object,
+  encryption_key?: string
+}
+Response: { ok }
+```
+
+### Database Schema
+
+#### agent_jobs
+
+Main job queue table.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Job ID (PK) |
+| job_type | text | Job type: scan_dataset, process, process_dataset, merge_dataset |
+| payload | jsonb | Job configuration and data |
+| status | text | pending, assigned, running, completed, failed |
+| agent_id | uuid | Assigned device |
+| org_id | uuid | Organization |
+| execution_id | uuid | Pipeline execution |
+| retry_count | integer | Retry count |
+| max_retries | integer | Max retries |
+| error | text | Error message |
+| output_token | text | Job output |
+| runtime_type | text | python, node, native |
+| runtime_dependencies | jsonb | Dependencies |
+| execution_timeout_seconds | integer | Timeout |
+
+#### devices
+
+Registered agent devices.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Device ID (PK) |
+| org_id | uuid | Organization |
+| name | text | Device name |
+| status | text | online, busy, available, offline |
+| access_token_hash | text | Token hash |
+| type | text | Device type |
+| max_concurrency | integer | Max workers |
+| total_cpu_cores | integer | Total CPU cores |
+| total_memory_gb | integer | Total memory (GB) |
+| cpu_cores_free | integer | Free CPU cores |
+| memory_free_gb | integer | Free memory (GB) |
+| cpu_usage_percent | integer | CPU usage |
+| network_latency_ms | integer | Network latency |
+| gpu_available | boolean | GPU available |
+| last_heartbeat | timestamptz | Last heartbeat |
+| benchmark_score | numeric | Benchmark score |
+
+#### executions
+
+Pipeline execution tracking.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Execution ID (PK) |
+| org_id | uuid | Organization |
+| dataset_id | uuid | Dataset |
+| status | text | pending, running, completed, failed |
+| current_step_index | integer | Current step |
+| output | jsonb | Execution output |
+| error_message | text | Error message |
+
+#### datasets
+
+Registered datasets.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Dataset ID (PK) |
+| org_id | uuid | Organization |
+| name | text | Dataset name |
+| status | text | registered, scanning, scanned, processing, processed, merged |
+| metadata | jsonb | Dataset metadata |
+| scan_assigned_device | uuid | Device doing scan |
+| merged_output_verified | boolean | Output verified |
+
+#### batch_chunks
+
+Dataset chunks for processing.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Chunk ID (PK) |
+| batch_id | uuid | Batch ID |
+| chunk_index | integer | Chunk index |
+| status | text | pending, assigned, completed |
+| chunk_vector | vector(16) | Embedding vector |
+| assigned_device_id | uuid | Assigned device |
+| job_type | text | Job type |
+| merged_in | boolean | Merged |
+| similarity_score | float | Similarity score |
+
+#### plugins
+
+Available plugins.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | text | Plugin ID |
+| org_id | uuid | Organization |
+| name | text | Plugin name |
+| version | text | Version |
+| code_url | text | Plugin code URL |
+| signature | text | Ed25519 signature |
+| runtime_type | text | python, node |
 
 ## License
 

@@ -410,8 +410,21 @@ type StorageConfig struct {
 	Error         string      `json:"error,omitempty"`
 }
 
+type GetStorageConfigRequest struct {
+	OrgID string `json:"org_id"`
+}
+
 func (c *Client) GetStorageConfig(ctx context.Context) (*StorageConfig, error) {
-	resp, err := c.httpc.Get(ctx, FunctionGetStorageConfig)
+	reqBody := GetStorageConfigRequest{
+		OrgID: c.orgID,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpc.Post(ctx, FunctionGetStorageConfig, body)
 	if err != nil {
 		return nil, err
 	}

@@ -124,9 +124,36 @@ func (kf *KeyFetcher) FetchAllOrgKeys(ctx context.Context, orgID string) ([]*Plu
 		return nil, fmt.Errorf("key list fetch failed with status %d", resp.StatusCode)
 	}
 
-	var keys []*PluginSigningKey
-	if err := json.NewDecoder(resp.Body).Decode(&keys); err != nil {
+	// Edge function returns: { ok: true, data: [...] }
+	// Not a direct array
+	var response struct {
+		Ok   bool   `json:"ok"`
+		Data []*struct {
+			KeyID     string  `json:"key_id"`
+			PublicKey string  `json:"public_key"`
+			Algorithm string `json:"algorithm"`
+			CreatedAt string `json:"created_at"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode keys response: %w", err)
+	}
+
+	keys := make([]*PluginSigningKey, 0, len(response.Data))
+	for _, k := range response.Data {
+		key := &PluginSigningKey{
+			KeyID:     k.KeyID,
+			PublicKey: k.PublicKey,
+			Algorithm: k.Algorithm,
+		}
+		if k.CreatedAt != "" {
+			key.CreatedAt, _ = time.Parse(time.RFC3339, k.CreatedAt)
+		}
+		if k.ExpiresAt != "" {
+			key.ExpiresAt, _ = time.Parse(time.RFC3339, k.ExpiresAt)
+		}
+		keys = append(keys, key)
 	}
 
 	kf.mu.Lock()

@@ -41,10 +41,9 @@ type DBPlugin struct {
 }
 
 type PluginListResponse struct {
-	Plugins  []DBPlugin `json:"plugins"`
-	OrgID    string     `json:"org_id"`
-	DeviceID string     `json:"device_id"`
-	Source   string     `json:"source"`
+	Ok    bool      `json:"ok"`
+	Data  []DBPlugin `json:"data"`
+	Error string    `json:"error,omitempty"`
 }
 
 func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonKey, deviceToken string) ([]DBPlugin, error) {
@@ -52,7 +51,6 @@ func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonK
 		httpclient.WithTimeout(30*time.Second),
 	)
 
-	// ✅ FIX 1: pass org_id as query param
 	url := fmt.Sprintf("%s?org_id=%s", FunctionListPlugins, orgID)
 
 	resp, err := httpc.Get(ctx, url)
@@ -66,14 +64,18 @@ func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonK
 		return nil, fmt.Errorf("plugin fetch failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// ✅ FIX 2: response is ARRAY, not object
-	var plugins []DBPlugin
-	if err := json.NewDecoder(resp.Body).Decode(&plugins); err != nil {
+	// Edge function returns: { ok: true, data: [...] }
+	var response PluginListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	log.Printf("[plugin] Fetched %d plugins from API for org %s", len(plugins), orgID)
-	return plugins, nil
+	if !response.Ok && response.Error != "" {
+		return nil, fmt.Errorf("API error: %s", response.Error)
+	}
+
+	log.Printf("[plugin] Fetched %d plugins from API for org %s", len(response.Data), orgID)
+	return response.Data, nil
 }
 
 func ShouldRunPlugin(deviceID string, rolloutPercentage int) bool {
