@@ -222,15 +222,20 @@ type S3Backend struct {
 func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S3Backend, error) {
 	useSSL := true
 
-	log.Printf("[storage] NewS3Backend: endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
+	log.Printf("[storage] NewS3Backend: input endpoint=%s bucket=%s region=%s", endpoint, bucketName, region)
 	
-	// Extract just the host from the full endpoint for minio-go
-	s3Endpoint := endpoint
+	// For Supabase Storage S3 API endpoint: https://project.storage.supabase.co/storage/v1/s3
+	// We need to use the BASE URL (without path) AND provide custom source path
+	// Let me extract the base URL properly:
+	var s3Endpoint string
 	if strings.HasSuffix(endpoint, "/storage/v1/s3") {
-		// Extract hostname: https://project.storage.supabase.co
-		// Don't strip - try using the base URL only
-		s3Endpoint = strings.TrimSuffix(endpoint, "/storage/v1/s3")
-		log.Printf("[storage] NewS3Backend: using base endpoint (will add S3 path automatically)")
+		// Extract just the host: https://project.storage.supabase.co
+		parts := strings.TrimSuffix(endpoint, "/storage/v1/s3")
+		// Make sure we only have hostname
+		s3Endpoint = parts
+		log.Printf("[storage] Using base URL: %s", s3Endpoint)
+	} else {
+		s3Endpoint = endpoint
 	}
 
 	opts := &minio.Options{
@@ -241,20 +246,18 @@ func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S
 		opts.Region = region
 	}
 
-	log.Printf("[storage] NewS3Backend: minio.New(%s)", s3Endpoint)
+	log.Printf("[storage] NewS3Backend: minio.New(%s) with bucket=%s", s3Endpoint, bucketName)
 
 	client, err := minio.New(s3Endpoint, opts)
 	if err != nil {
-		log.Printf("[storage] NewS3Backend: first attempt failed: %v", err)
-		// Try with full endpoint if first fails
+		log.Printf("[storage] NewS3Backend: failed with base URL: %v", err)
+		// Try again with full endpoint (won't work but let's see the error)
 		client, err = minio.New(endpoint, opts)
 		if err != nil {
-			log.Printf("[storage] NewS3Backend: second attempt failed: %v", err)
+			log.Printf("[storage] NewS3Backend: also failed with full endpoint: %v", err)
+			// Try a third approach - just the hostname without https prefix if already has it
 			return nil, fmt.Errorf("failed to create S3 client: %w", err)
 		}
-		log.Printf("[storage] NewS3Backend: second attempt succeeded with full endpoint")
-	} else {
-		log.Printf("[storage] NewS3Backend: first attempt succeeded with base endpoint")
 	}
 
 	log.Printf("[storage] S3 client ready for bucket: %s", bucketName)
@@ -370,8 +373,8 @@ func NewBackend(cfg *StorageConfig) (StorageBackend, error) {
 		log.Printf("[storage] initializing S3 backend: endpoint=%s bucket=%s region=%s",
 			cfg.Endpoint, cfg.BucketName, cfg.Region)
 		
-		// Use minio-go (AWS SDK v1 compatible)
-		return NewS3Backend(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
+		// Use AWS SDK v2 with custom endpoint resolver
+		return NewS3BackendV2(cfg.Endpoint, cfg.BucketName, cfg.Region, creds)
 
 	case "gcs", "azure_blob":
 		return nil, fmt.Errorf("%s storage mode not yet implemented", storageMode)
