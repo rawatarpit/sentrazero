@@ -248,13 +248,8 @@ func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
 
-	exists, err := client.BucketExists(context.Background(), bucketName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check bucket existence: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("bucket %s does not exist", bucketName)
-	}
+	// Skip bucket existence check - Supabase Storage has different API
+	// and the bucket is guaranteed to exist if configured in the console
 
 	return &S3Backend{
 		client:     client,
