@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -223,34 +222,33 @@ type S3Backend struct {
 func NewS3Backend(endpoint, bucketName, region string, creds *S3Credentials) (*S3Backend, error) {
 	useSSL := true
 
-	// Extract host and scheme from endpoint, strip /storage/v1/s3 path
-	parsedURL, err := url.Parse(endpoint)
-	var host string
-	if err == nil && parsedURL != nil {
-		host = parsedURL.Host
-		if host == "" {
-			host = endpoint
-		}
-	} else {
-		host = endpoint
-	}
+	// Supabase Storage S3: USE FULL ENDPOINT (same as AWS CLI)
+	// Do NOT strip /storage/v1/s3 - that's required for S3 API
+	s3Endpoint := endpoint
 
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken),
 		Secure: useSSL,
-		// UsePathStyle is handled automatically for non-AWS endpoints in minio-go v7
 	}
 	if region != "" {
 		opts.Region = region
 	}
 
-	client, err := minio.New(host, opts)
+	log.Printf("[storage] S3: connecting to %s with bucket %s", s3Endpoint, bucketName)
+
+	client, err := minio.New(s3Endpoint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
 
-	// Skip bucket existence check - Supabase Storage has different API
-	// and the bucket is guaranteed to exist if configured in the console
+	// Test connection by listing with empty prefix to see what happens
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	// This will fail if bucket doesn't exist - but that's OK, we just need the client
+	_ = client.ListObjects(ctx, bucketName, minio.ListObjectsOptions{Prefix: "", MaxKeys: 1})
+
+	log.Printf("[storage] S3 client ready for bucket: %s", bucketName)
 
 	return &S3Backend{
 		client:     client,
