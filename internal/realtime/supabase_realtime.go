@@ -173,25 +173,30 @@ func (p *PollingClient) fetchNewJobs() {
 		return
 	}
 
-	// Handle case where response uses new column names from claim_jobs_for_device
+	log.Printf("[realtime] poll response: jobs=%d, body_len=%d", len(result.Jobs), len(respBody))
+
+	// Handle case where response uses new column names from claim_jobs_for_device (job_id, job_payload, exec_id)
 	if len(result.Jobs) == 0 {
 		var altResult struct {
 			Ok   bool              `json:"ok"`
 			Jobs []ClaimJobResponse `json:"jobs"`
 		}
 		if altErr := json.Unmarshal(respBody, &altResult); altErr == nil && altResult.Ok && len(altResult.Jobs) > 0 {
+			log.Printf("[realtime] alt response: altJobs=%d", len(altResult.Jobs))
 			for _, altJob := range altResult.Jobs {
 				if altJob.JobID == "" {
+					log.Printf("[realtime] skipping empty altJob")
 					continue
 				}
 				execID := altJob.ExecID
 				if execID == "" {
 					execID = altJob.ExecutionID
 				}
+				log.Printf("[realtime] mapping altJob: job_id=%s exec_id=%s", altJob.JobID, execID)
 				job := RealtimeJobPayload{
-					ID:          altJob.JobID,
-					JobType:     altJob.JobType,
-					Payload:    altJob.JobPayload,
+					ID:           altJob.JobID,
+					JobType:      altJob.JobType,
+					Payload:     altJob.JobPayload,
 					ExecutionID: execID,
 				}
 				result.Jobs = append(result.Jobs, job)
