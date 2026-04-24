@@ -323,6 +323,7 @@ func executeJobSafe(id int, req jobRequest) {
 		ctx,
 		req.jobType,
 		req.payload,
+		req.executionID,
 	)
 
 	// ---- Record plugin execution end ----

@@ -126,6 +126,13 @@ func claimDevice(ctx context.Context, client *http.Client, backendURL, anonKey, 
 		return nil, fmt.Errorf("invalid claim response: missing id or token")
 	}
 
+	if result.BackendURL == "" {
+		result.BackendURL = backendURL
+	}
+	if result.AnonKey == "" {
+		result.AnonKey = anonKey
+	}
+
 	return &result, nil
 }
 

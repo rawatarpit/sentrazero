@@ -12,6 +12,10 @@ type traceKeyType struct{}
 
 var traceKey = traceKeyType{}
 
+type executionIDKeyType struct{}
+
+var executionIDKey = executionIDKeyType{}
+
 func NewTraceID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
@@ -24,6 +28,19 @@ func WithTrace(ctx context.Context, traceID string) context.Context {
 
 func TraceID(ctx context.Context) string {
 	if v := ctx.Value(traceKey); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func WithExecutionID(ctx context.Context, executionID string) context.Context {
+	return context.WithValue(ctx, executionIDKey, executionID)
+}
+
+func ExecutionID(ctx context.Context) string {
+	if v := ctx.Value(executionIDKey); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}

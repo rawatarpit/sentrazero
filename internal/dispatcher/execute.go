@@ -112,6 +112,7 @@ func ExecuteJob(
 	ctx context.Context,
 	jobType string,
 	payload json.RawMessage,
+	executionID string,
 ) error {
 
 	// -------------------------------------------------------------
@@ -123,6 +124,11 @@ func ExecuteJob(
 		return ctx.Err()
 	default:
 	}
+
+	// -------------------------------------------------------------
+	// Inject execution_id into context for handlers
+	// -------------------------------------------------------------
+	ctx = obs.WithExecutionID(ctx, executionID)
 
 	// -------------------------------------------------------------
 	// Validate & extract metadata
