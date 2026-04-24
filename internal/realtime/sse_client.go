@@ -365,6 +365,34 @@ func handleJobEvent(ctx context.Context, data string) {
 		return
 	}
 
+	// ============================================================
+	// MANDATORY VALIDATION: Drop malformed jobs
+	// ============================================================
+	
+	// job_id is required
+	if job.ID == "" {
+		log.Printf("[sse] ⚠️ dropped malformed job: missing job_id")
+		return
+	}
+	
+	// job_type is required
+	if job.JobType == "" {
+		log.Printf("[sse] ⚠️ dropped malformed job: missing job_type job_id=%s", job.ID)
+		return
+	}
+	
+	// execution_id is CRITICAL - required for completion
+	if job.ExecutionID == "" {
+		log.Printf("[sse] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", job.ID, job.JobType)
+		return
+	}
+	
+	// Validate payload if present
+	if len(job.Payload) > 0 && !json.Valid(job.Payload) {
+		log.Printf("[sse] ⚠️ dropped malformed job: invalid JSON payload job_id=%s", job.ID)
+		return
+	}
+
 	if seenRecently(job.ID) {
 		log.Printf("[sse] duplicate job %s ignored", job.ID)
 		return
@@ -374,10 +402,11 @@ func handleJobEvent(ctx context.Context, data string) {
 
 	traceID := obs.NewTraceID()
 
-	// execution_id is in the job table's execution_id column, not in payload
-	// Use job.ExecutionID directly from the database query
+	// execution_id validated above - use directly
 	executionStepID := job.ExecutionStepID
 	executionID := job.ExecutionID
+	
+	// Also extract execution_step_id from payload if not in main field
 	if executionStepID == "" && len(job.Payload) > 0 {
 		var payload struct {
 			ExecutionStepID string `json:"execution_step_id"`

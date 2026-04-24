@@ -297,16 +297,46 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 	}
 
 	jobType, _ := newRecord["job_type"].(string)
+	executionID, _ := newRecord["execution_id"].(string)
 	payloadJSON, _ := json.Marshal(newRecord["payload"])
+
+	// ============================================================
+	// MANDATORY VALIDATION: Drop malformed jobs
+	// ============================================================
+	
+	// job_id is required
+	if jobID == "" {
+		log.Printf("[ws] ⚠️ dropped malformed job: missing job_id")
+		return
+	}
+	
+	// job_type is required
+	if jobType == "" {
+		log.Printf("[ws] ⚠️ dropped malformed job: missing job_type job_id=%s", jobID)
+		return
+	}
+	
+	// execution_id is CRITICAL - required for completion
+	if executionID == "" {
+		log.Printf("[ws] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", jobID, jobType)
+		return
+	}
+	
+	// Validate payload if present
+	if len(payloadJSON) > 0 && !json.Valid(payloadJSON) {
+		log.Printf("[ws] ⚠️ dropped malformed job: invalid JSON payload job_id=%s", jobID)
+		return
+	}
 
 	log.Printf("[ws] new job received: %s (type: %s)", jobID, jobType)
 
 	obs.Info(
 		"job received via websocket",
 		obs.Field{
-			"job_id":   jobID,
-			"job_type": jobType,
-			"source":   "websocket",
+			"job_id":        jobID,
+			"job_type":    jobType,
+			"source":      "websocket",
+			"execution_id": executionID,
 		},
 	)
 
@@ -329,7 +359,7 @@ func handlePostgresChanges(ctx context.Context, payload any, device auth.Device)
 		"",
 		traceID,
 		executionStepID,
-		"",
+		executionID,
 	); err != nil {
 		log.Printf("[ws] dispatch failed for job %s: %v", jobID, err)
 	}

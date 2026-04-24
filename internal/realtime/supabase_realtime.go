@@ -174,10 +174,15 @@ func (p *PollingClient) fetchNewJobs() {
 
 	log.Printf("[realtime] poll response: jobs=%d, body_len=%d", len(result.Jobs), len(respBody))
 
+	// DEBUG: Log all raw jobs from first parse
+	for i, j := range result.Jobs {
+		log.Printf("[DEBUG] first_parse[%d]: job_id=%q job_type=%q execution_id=%q", i, j.ID, j.JobType, j.ExecutionID)
+	}
+
 	// First, check if we have valid jobs from first parse
 	hasValidJobs := false
 	for _, j := range result.Jobs {
-		if j.ID != "" {
+		if j.ID != "" && j.ExecutionID != "" {
 			hasValidJobs = true
 			break
 		}
@@ -214,6 +219,38 @@ func (p *PollingClient) fetchNewJobs() {
 
 	for _, job := range result.Jobs {
 
+		// ============================================================
+		// MANDATORY VALIDATION: Drop malformed jobs
+		// ============================================================
+		
+		// Validate required fields - job_id is the primary key
+		if job.ID == "" {
+			log.Printf("[realtime] ⚠️ dropped malformed job: missing job_id")
+			continue
+		}
+		
+		// job_type is required
+		if job.JobType == "" {
+			log.Printf("[realtime] ⚠️ dropped malformed job: missing job_type job_id=%s", job.ID)
+			continue
+		}
+		
+		// execution_id is CRITICAL - required for completion tracking
+		if job.ExecutionID == "" {
+			log.Printf("[realtime] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", job.ID, job.JobType)
+			continue
+		}
+		
+		// Validate payload if present
+		if len(job.Payload) > 0 && !json.Valid(job.Payload) {
+			log.Printf("[realtime] ⚠️ dropped malformed job: invalid JSON payload job_id=%s", job.ID)
+			continue
+		}
+
+		// ============================================================
+		// Duplicate detection
+		// ============================================================
+		
 		if _, exists := p.sentJobs.Load(job.ID); exists {
 			continue
 		}
@@ -234,6 +271,10 @@ func (p *PollingClient) fetchNewJobs() {
 		)
 
 		traceID := obs.NewTraceID()
+
+		// DEBUG: Log exact values being sent to dispatcher
+		log.Printf("[DEBUG] BEFORE dispatch → job_id=%s execution_id=%s job_type=%s payload_len=%d",
+			job.ID, job.ExecutionID, job.JobType, len(job.Payload))
 
 		if err := dispatcher.SubmitJobWithMeta(
 			job.JobType,

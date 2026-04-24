@@ -32,8 +32,18 @@ func extractJobMeta(payload json.RawMessage, envelopeJobType ...string) (*JobMet
 
 	var meta JobMeta
 
-	if err := json.Unmarshal(payload, &meta); err != nil {
-		return nil, fmt.Errorf("invalid job payload: %w", err)
+	// ============================================================
+	// HARDENED VALIDATION: Check payload before parsing
+	// ============================================================
+	
+	// Payload must not be empty
+	if len(payload) == 0 {
+		return nil, errors.New("empty payload - job cannot be processed")
+	}
+	
+	// Must be valid JSON
+	if !json.Valid(payload) {
+		return nil, errors.New("invalid JSON payload - job cannot be parsed")
 	}
 
 	if meta.JobType == "" {

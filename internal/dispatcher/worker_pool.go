@@ -183,6 +183,9 @@ func startWorker(id int) {
 func executeJobSafe(id int, req jobRequest) {
 	_ = id
 
+	// DEBUG: Log worker received job
+	log.Printf("[DEBUG] WORKER START → job_id=%s execution_id=%s job_type=%s", req.jobID, req.executionID, req.jobType)
+
 	defer func() {
 		if req.executionStepID != "" {
 			activeJobsMutex.Lock()
@@ -275,27 +278,47 @@ func executeJobSafe(id int, req jobRequest) {
 	}
 
 	// ---- Extract execution_id from payload if not provided ----
+	// NOTE: This is a fallback - execution_id should already be validated at enqueue
 	if req.executionID == "" && len(req.payload) > 0 {
 		var payload struct {
 			ExecutionID string `json:"execution_id"`
 		}
 		if err := json.Unmarshal(req.payload, &payload); err == nil && payload.ExecutionID != "" {
+			log.Printf("[DEBUG] extracted execution_id from payload: %s", payload.ExecutionID)
 			req.executionID = payload.ExecutionID
 			obs.Debug("extracted execution_id from payload", obs.Field{
 				"job_id":       req.jobID,
 				"execution_id": req.executionID,
 			})
+		} else {
+			log.Printf("[DEBUG] failed to extract execution_id from payload or empty - payload=%s", string(req.payload))
 		}
 	}
 
-	if req.executionID == "" && req.jobID != "" {
-		obs.Warn("execution_id not provided - job may fail at completion", obs.Field{
+	// ============================================================
+	// STRICT VALIDATION: execution_id MUST be present
+	// ============================================================
+	if req.executionID == "" {
+		obs.Error("dispatcher: FATAL - execution_id missing at execution start", obs.Field{
 			"job_id":   req.jobID,
 			"job_type": req.jobType,
 		})
+		atomic.AddInt64(&totalFailed, 1)
+		if execClient != nil && req.jobID != "" {
+			execClient.ReportJobFailure(
+				context.Background(),
+				req.jobID,
+				errors.New("dispatcher: execution_id missing at execution - cannot complete job"),
+			)
+		}
+		return
 	}
 
 	// ---- Execute job payload ----
+	// DEBUG: Log exact values passed to handler
+	log.Printf("[DEBUG] BEFORE ExecuteJob → job_id=%s execution_id=%s job_type=%s payload_len=%d",
+		req.jobID, req.executionID, req.jobType, len(req.payload))
+	
 	err := ExecuteJob(
 		ctx,
 		req.jobType,
@@ -328,6 +351,12 @@ func executeJobSafe(id int, req jobRequest) {
 	// ---- Failure path ----
 	if err != nil {
 		atomic.AddInt64(&totalFailed, 1)
+
+		obs.Error("dispatcher: job execution failed", obs.Field{
+			"job_id":       req.jobID,
+			"execution_id": req.executionID,
+			"error":        err.Error(),
+		})
 
 		if execClient != nil && req.jobID != "" {
 			if repErr := execClient.ReportJobFailure(
@@ -370,11 +399,21 @@ func executeJobSafe(id int, req jobRequest) {
 	atomic.AddInt64(&totalProcessed, 1)
 
 	if execClient != nil && (req.executionID != "" || req.jobID != "") {
+		obs.Info("dispatcher: calling complete_job", obs.Field{
+			"job_id":       req.jobID,
+			"execution_id": req.executionID,
+		})
+		
+		// DEBUG: Log exact values before complete_job
+		log.Printf("[DEBUG] BEFORE complete_job → job_id=%s execution_id=%s",
+			req.jobID, req.executionID)
+		
 		result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "completed", duration.Milliseconds(), nil)
 
 		if result.IsStaleExecution() {
 			obs.Warn("job execution succeeded but completion rejected - stale execution", obs.Field{
 				"job_id":        req.jobID,
+				"execution_id":  req.executionID,
 				"lease_expired": result.IsLeaseExpired,
 				"already_done":  result.IsAlreadyDone,
 				"duration_ms":   duration.Milliseconds(),
@@ -428,6 +467,45 @@ func SubmitJobWithMeta(
 	if jobQueue == nil {
 		return errors.New("dispatcher: pool not initialized")
 	}
+
+	// ============================================================
+	// MANDATORY VALIDATION: Drop malformed jobs at enqueue
+	// ============================================================
+	
+	// job_id is required
+	if jobID == "" {
+		obs.Error("dispatcher: rejecting job with empty job_id", obs.Field{
+			"job_type": jobType,
+		})
+		return errors.New("dispatcher: job_id is required")
+	}
+	
+	// execution_id is CRITICAL - required for completion
+	if executionID == "" {
+		obs.Error("dispatcher: rejecting job with empty execution_id", obs.Field{
+			"job_id":   jobID,
+			"job_type": jobType,
+		})
+		return errors.New("dispatcher: execution_id is required for completion")
+	}
+	
+	// job_type is required
+	if jobType == "" {
+		obs.Error("dispatcher: rejecting job with empty job_type", obs.Field{
+			"job_id": jobID,
+		})
+		return errors.New("dispatcher: job_type is required")
+	}
+
+	obs.Info("dispatcher: enqueueing job", obs.Field{
+		"job_id":        jobID,
+		"job_type":      jobType,
+		"execution_id":  executionID,
+		"payload_len":   len(payload),
+	})
+
+	// DEBUG: Log enqueue point
+	log.Printf("[DEBUG] ENQUEUE → job_id=%s execution_id=%s job_type=%s", jobID, executionID, jobType)
 
 	if jobID != "" {
 		activeJobsMutex.Lock()
