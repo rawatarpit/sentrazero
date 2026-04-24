@@ -5,8 +5,8 @@ import "encoding/json"
 // Job payload (backend-owned schema)
 // Core Rule: Paths are never stored - agents derive them locally using dataset_id + chunk_index
 type Job struct {
-	ID              string          `json:"id,omitempty"`
-	Type            string          `json:"type"`
+	ID              string          `json:"job_id"`  // FIX: was "id,omitempty"
+	Type            string          `json:"job_type"`  // FIX: was "type"
 	OrgID           string          `json:"org_id,omitempty"`
 	DatasetID       string          `json:"dataset_id,omitempty"`
 	ChunkIndex      int             `json:"chunk_index,omitempty"`

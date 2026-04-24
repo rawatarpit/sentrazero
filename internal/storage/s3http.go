@@ -171,73 +171,82 @@ func hmacSHA256(key []byte, data string) []byte {
 }
 
 func (b *S3HTTPBackend) buildURL(objectKey string) string {
-	// Virtual-hosted style: https://bucket.host/path/key
-	// This is what AWS CLI uses!
+	// PATH-STYLE: https://host/bucket/key (NOT virtual-hosted)
 	if objectKey == "" || objectKey == "/" {
-		return fmt.Sprintf("https://%s.%s/storage/v1/s3/%s", b.bucketName, b.host, b.bucketName)
+		return fmt.Sprintf("%s/%s", b.endpoint, b.bucketName)
 	}
-	// Handle query string in object key
-	if strings.Contains(objectKey, "?") {
-		parts := strings.SplitN(objectKey, "?", 2)
-		key := parts[0]
-		query := parts[1]
-		if key == "" {
-			return fmt.Sprintf("https://%s.%s/storage/v1/s3?%s", b.bucketName, b.host, query)
-		}
-		return fmt.Sprintf("https://%s.%s/storage/v1/s3/%s?%s", b.bucketName, b.host, key, query)
+	// If key starts with ?, it's a query - build properly
+	if strings.HasPrefix(objectKey, "?") {
+		return fmt.Sprintf("%s/%s%s", b.endpoint, b.bucketName, objectKey)
 	}
-	// Regular key
+	// Normal path - trim leading slash
 	if strings.HasPrefix(objectKey, "/") {
 		objectKey = objectKey[1:]
 	}
-	return fmt.Sprintf("https://%s.%s/storage/v1/s3/%s", b.bucketName, b.host, objectKey)
+	return fmt.Sprintf("%s/%s/%s", b.endpoint, b.bucketName, objectKey)
 }
 
 func (b *S3HTTPBackend) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	log.Printf("[storage] S3HTTP ListObjects: bucket=%s prefix=%s", b.bucketName, prefix)
 	
-	// Build URL with query params - virtual-hosted style
-	// Format: https://bucket.host/storage/v1/s3?list-type=2&prefix=xxx
+	// PATH-style URL: https://host/storage/v1/s3/bucket?query
 	queryParams := "list-type=2&prefix=" + url.QueryEscape(prefix) + "&max-keys=1000"
-	urlStr := fmt.Sprintf("https://%s.%s/storage/v1/s3?%s", b.bucketName, b.host, queryParams)
+	urlStr := fmt.Sprintf("%s/%s?%s", b.endpoint, b.bucketName, queryParams)
 	
-	log.Printf("[storage] ListObjects URL: %s", urlStr)
+	log.Printf("[storage] ListObjects URL (path-style): %s", urlStr)
 	
-	req, err := http.NewRequest("GET", urlStr, nil)
-	if err != nil {
-		return nil, err
+	// Retry logic for TLS errors
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			log.Printf("[storage] ListObjects retry %d after error: %v", attempt, lastErr)
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+	
+		req, err := http.NewRequest("GET", urlStr, nil)
+		if err != nil {
+			return nil, err
+		}
+		
+		if err := b.signRequest(req); err != nil {
+			return nil, err
+		}
+
+		resp, err := b.client.Do(req)
+		if err != nil {
+			errStr := err.Error()
+			// Check if TLS/network error - retry
+			if strings.Contains(errStr, "tls:") || strings.Contains(errStr, "network") {
+				lastErr = err
+				continue
+			}
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		// Handle response
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		
+		if resp.StatusCode >= 400 {
+			errStr := string(body)
+			// If TLS error in response - retry
+			if strings.Contains(errStr, "tls:") || strings.Contains(errStr, "handshake") {
+				lastErr = fmt.Errorf("TLS error: %s", errStr)
+				continue
+			}
+			return nil, fmt.Errorf("S3 HTTP %d: %s", resp.StatusCode, errStr)
+		}
+
+		// Success
+		objects := parseListObjectsV2(string(body))
+		log.Printf("[storage] ListObjects: found %d objects", len(objects))
+		return objects, nil
 	}
 	
-	if err := b.signRequest(req); err != nil {
-		return nil, err
-	}
-
-	resp, err := b.client.Do(req)
-	if err != nil {
-		log.Printf("[storage] ListObjects request failed: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	bodyStr := string(body)
-	if len(bodyStr) > 300 {
-		bodyStr = bodyStr[:300] + "..."
-	}
-	log.Printf("[storage] Response status: %d body: %s", resp.StatusCode, bodyStr)
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("S3 HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Parse XML manually  
-	objects := parseListObjectsV2(string(body))
-	log.Printf("[storage] Found %d objects", len(objects))
-	return objects, nil
+	return nil, fmt.Errorf("ListObjects failed after 3 retries: %w", lastErr)
 }
 
 func parseListObjectsV2(xmlStr string) []ObjectInfo {

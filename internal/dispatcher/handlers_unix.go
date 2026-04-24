@@ -87,13 +87,24 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return fmt.Errorf("invalid payload: %w", err)
 	}
 
+	// VALIDATION: execution_id is REQUIRED for completion
+	if job.ExecutionID == "" {
+		obs.Error("executeScanDataset: missing execution_id - job will fail at completion", obs.Field{
+			"job_id":     job.ID,
+			"dataset_id": job.DatasetID,
+		})
+		// Continue anyway - we'll see the error at completion
+	}
+
 	obs.Info("executeScanDataset received job", obs.Field{
-		"job_id":       job.ID,
+		"job_id":        job.ID,
+		"execution_id": job.ExecutionID,
 		"dataset_id":   job.DatasetID,
-		"storage_mode": job.StorageMode,
+		"storage_mode":  job.StorageMode,
 		"storage_type": job.StorageType,
 		"source_path":  job.SourcePath,
 		"input_path":   job.InputPath,
+		"raw_payload":  string(payload),  // Debug: log raw payload
 	})
 
 	if job.DatasetID == "" {
