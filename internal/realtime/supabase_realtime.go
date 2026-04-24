@@ -36,13 +36,12 @@ type RealtimeJobPayload struct {
 	ExecutionTimeout int             `json:"execution_timeout_seconds"`
 }
 
+// ClaimJobResponse handles the new column names from claim_jobs_for_device (job_id, job_payload, exec_id)
 type ClaimJobResponse struct {
-	JobID        string          `json:"job_id,omitempty"`
-	ID           string          `json:"id,omitempty"`
-	JobType      string          `json:"job_type,omitempty"`
-	JobPayload  json.RawMessage `json:"payload,omitempty"`
-	ExecID      string          `json:"exec_id,omitempty"`
-	ExecutionID string          `json:"execution_id,omitempty"`
+	JobID       string          `json:"job_id"`
+	JobType     string          `json:"job_type"`
+	JobPayload json.RawMessage `json:"job_payload"`
+	ExecID      string          `json:"exec_id"`
 }
 
 type PollingClient struct {
@@ -178,7 +177,7 @@ func (p *PollingClient) fetchNewJobs() {
 	// Handle case where response uses new column names from claim_jobs_for_device (job_id, job_payload, exec_id)
 	if len(result.Jobs) == 0 {
 		var altResult struct {
-			Ok   bool              `json:"ok"`
+			Ok   bool               `json:"ok"`
 			Jobs []ClaimJobResponse `json:"jobs"`
 		}
 		if altErr := json.Unmarshal(respBody, &altResult); altErr == nil && altResult.Ok && len(altResult.Jobs) > 0 {
@@ -188,16 +187,12 @@ func (p *PollingClient) fetchNewJobs() {
 					log.Printf("[realtime] skipping empty altJob")
 					continue
 				}
-				execID := altJob.ExecID
-				if execID == "" {
-					execID = altJob.ExecutionID
-				}
-				log.Printf("[realtime] mapping altJob: job_id=%s exec_id=%s", altJob.JobID, execID)
+				log.Printf("[realtime] mapping altJob: job_id=%s job_type=%s exec_id=%s", altJob.JobID, altJob.JobType, altJob.ExecID)
 				job := RealtimeJobPayload{
 					ID:           altJob.JobID,
 					JobType:      altJob.JobType,
 					Payload:     altJob.JobPayload,
-					ExecutionID: execID,
+					ExecutionID: altJob.ExecID,
 				}
 				result.Jobs = append(result.Jobs, job)
 			}
