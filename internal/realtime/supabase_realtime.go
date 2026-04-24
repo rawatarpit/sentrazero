@@ -177,6 +177,7 @@ func (p *PollingClient) fetchNewJobs() {
 			obs.Field{
 				"job_id":            job.ID,
 				"job_type":          job.JobType,
+				"execution_id":     job.ExecutionID,
 				"execution_step_id": job.ExecutionStepID,
 				"source":            "low_latency_poll",
 			},

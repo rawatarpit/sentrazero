@@ -567,10 +567,6 @@ func (c *StorageClient) FetchConfig() (*StorageConfig, error) {
 		return nil, fmt.Errorf("storage config unavailable: no credentials and storage_mode=%s", result.StorageMode)
 	}
 
-	cfgMu.Lock()
-	cfg = cfg
-	cfgMu.Unlock()
-
 	return cfg, nil
 }
 
