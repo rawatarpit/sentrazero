@@ -174,8 +174,17 @@ func (p *PollingClient) fetchNewJobs() {
 
 	log.Printf("[realtime] poll response: jobs=%d, body_len=%d", len(result.Jobs), len(respBody))
 
-	// Handle case where response uses new column names from claim_jobs_for_device (job_id, job_payload, exec_id)
-	if len(result.Jobs) == 0 {
+	// First, check if we have valid jobs from first parse
+	hasValidJobs := false
+	for _, j := range result.Jobs {
+		if j.ID != "" {
+			hasValidJobs = true
+			break
+		}
+	}
+
+	// If no valid jobs, try the alternative format with new column names
+	if !hasValidJobs {
 		var altResult struct {
 			Ok   bool               `json:"ok"`
 			Jobs []ClaimJobResponse `json:"jobs"`
