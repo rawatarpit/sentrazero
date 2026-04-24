@@ -24,7 +24,7 @@ type RealtimeJobPayload struct {
 	Payload          json.RawMessage `json:"payload"`
 	Status           string          `json:"status"`
 	ExecutionStepID  string          `json:"execution_step_id"`
-	ExecutionID      string          `json:"execution_id"`
+	ExecutionID      string          `json:"execution_id,omitempty"`
 	OrgID            string          `json:"org_id"`
 	DatasetID        string          `json:"dataset_id"`
 	ChunkIndex       int             `json:"chunk_index"`
@@ -34,6 +34,15 @@ type RealtimeJobPayload struct {
 	RuntimeDeps      json.RawMessage `json:"runtime_dependencies"`
 	ExecutionMode    string          `json:"execution_mode"`
 	ExecutionTimeout int             `json:"execution_timeout_seconds"`
+}
+
+type ClaimJobResponse struct {
+	JobID        string          `json:"job_id,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	JobType      string          `json:"job_type,omitempty"`
+	JobPayload  json.RawMessage `json:"payload,omitempty"`
+	ExecID      string          `json:"exec_id,omitempty"`
+	ExecutionID string          `json:"execution_id,omitempty"`
 }
 
 type PollingClient struct {
@@ -148,14 +157,46 @@ func (p *PollingClient) fetchNewJobs() {
 		return
 	}
 
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[realtime] failed to read response body: %v", err)
+		return
+	}
+
 	var result struct {
 		Ok   bool                 `json:"ok"`
 		Jobs []RealtimeJobPayload `json:"jobs"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		log.Printf("[realtime] failed to decode response: %v", err)
 		return
+	}
+
+	// Handle case where response uses new column names from claim_jobs_for_device
+	if len(result.Jobs) == 0 {
+		var altResult struct {
+			Ok   bool              `json:"ok"`
+			Jobs []ClaimJobResponse `json:"jobs"`
+		}
+		if altErr := json.Unmarshal(respBody, &altResult); altErr == nil && altResult.Ok && len(altResult.Jobs) > 0 {
+			for _, altJob := range altResult.Jobs {
+				if altJob.JobID == "" {
+					continue
+				}
+				execID := altJob.ExecID
+				if execID == "" {
+					execID = altJob.ExecutionID
+				}
+				job := RealtimeJobPayload{
+					ID:          altJob.JobID,
+					JobType:     altJob.JobType,
+					Payload:    altJob.JobPayload,
+					ExecutionID: execID,
+				}
+				result.Jobs = append(result.Jobs, job)
+			}
+		}
 	}
 
 	if !result.Ok {

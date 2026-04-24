@@ -58,9 +58,6 @@ func InitMergeLockManager(backend MergeLockBackend) *MergeLockManager {
 }
 
 func GetMergeLockManager() *MergeLockManager {
-	if lockManager == nil {
-		panic("MergeLockManager: accessed before initialization - call InitMergeLockManager first")
-	}
 	return lockManager
 }
 
