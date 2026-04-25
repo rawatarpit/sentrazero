@@ -1,6 +1,8 @@
 package config
 
 var (
-	DefaultBackendURL = "https://pqcwgkqrblugplpcaxcy.supabase.co"
-	DefaultAnonKey   = "REDACTED_ANON_KEY"
+	// Default values - set via environment variables or .env file
+	// Never hardcode secrets in source code!
+	DefaultBackendURL = ""
+	DefaultAnonKey   = ""
 )
