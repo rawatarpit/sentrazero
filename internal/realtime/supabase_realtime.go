@@ -20,11 +20,14 @@ import (
 
 type RealtimeJobPayload struct {
 	ID               string          `json:"id"`
+	JobID            string          `json:"job_id"` // Alternative field name from some endpoints
 	JobType          string          `json:"job_type"`
 	Payload          json.RawMessage `json:"payload"`
+	JobPayload       json.RawMessage `json:"job_payload"` // Alternative field name
 	Status           string          `json:"status"`
 	ExecutionStepID  string          `json:"execution_step_id"`
 	ExecutionID      string          `json:"execution_id,omitempty"`
+	ExecID           string          `json:"exec_id,omitempty"` // Alternative field name
 	OrgID            string          `json:"org_id"`
 	DatasetID        string          `json:"dataset_id"`
 	ChunkIndex       int             `json:"chunk_index"`
@@ -34,6 +37,27 @@ type RealtimeJobPayload struct {
 	RuntimeDeps      json.RawMessage `json:"runtime_dependencies"`
 	ExecutionMode    string          `json:"execution_mode"`
 	ExecutionTimeout int             `json:"execution_timeout_seconds"`
+}
+
+func (j *RealtimeJobPayload) getJobID() string {
+	if j.ID != "" {
+		return j.ID
+	}
+	return j.JobID
+}
+
+func (j *RealtimeJobPayload) getExecutionID() string {
+	if j.ExecutionID != "" {
+		return j.ExecutionID
+	}
+	return j.ExecID
+}
+
+func (j *RealtimeJobPayload) getPayload() json.RawMessage {
+	if len(j.Payload) > 0 {
+		return j.Payload
+	}
+	return j.JobPayload
 }
 
 // ClaimJobResponse handles the new column names from claim_jobs_for_device (job_id, job_payload, exec_id)
@@ -176,13 +200,13 @@ func (p *PollingClient) fetchNewJobs() {
 
 	// DEBUG: Log all raw jobs from first parse
 	for i, j := range result.Jobs {
-		log.Printf("[DEBUG] first_parse[%d]: job_id=%q job_type=%q execution_id=%q", i, j.ID, j.JobType, j.ExecutionID)
+		log.Printf("[DEBUG] first_parse[%d]: job_id=%q job_type=%q execution_id=%q", i, j.getJobID(), j.JobType, j.getExecutionID())
 	}
 
-	// First, check if we have valid jobs from first parse
+	// First, check if we have valid jobs from first parse using getter methods
 	hasValidJobs := false
 	for _, j := range result.Jobs {
-		if j.ID != "" && j.ExecutionID != "" {
+		if j.getJobID() != "" && j.getExecutionID() != "" {
 			hasValidJobs = true
 			break
 		}
@@ -223,27 +247,32 @@ func (p *PollingClient) fetchNewJobs() {
 		// MANDATORY VALIDATION: Drop malformed jobs
 		// ============================================================
 		
+		// Get canonical job_id and execution_id using getter methods
+		jobID := job.getJobID()
+		executionID := job.getExecutionID()
+		payload := job.getPayload()
+		
 		// Validate required fields - job_id is the primary key
-		if job.ID == "" {
+		if jobID == "" {
 			log.Printf("[realtime] ⚠️ dropped malformed job: missing job_id")
 			continue
 		}
 		
 		// job_type is required
 		if job.JobType == "" {
-			log.Printf("[realtime] ⚠️ dropped malformed job: missing job_type job_id=%s", job.ID)
+			log.Printf("[realtime] ⚠️ dropped malformed job: missing job_type job_id=%s", jobID)
 			continue
 		}
 		
 		// execution_id is CRITICAL - required for completion tracking
-		if job.ExecutionID == "" {
-			log.Printf("[realtime] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", job.ID, job.JobType)
+		if executionID == "" {
+			log.Printf("[realtime] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", jobID, job.JobType)
 			continue
 		}
 		
 		// Validate payload if present
-		if len(job.Payload) > 0 && !json.Valid(job.Payload) {
-			log.Printf("[realtime] ⚠️ dropped malformed job: invalid JSON payload job_id=%s", job.ID)
+		if len(payload) > 0 && !json.Valid(payload) {
+			log.Printf("[realtime] ⚠️ dropped malformed job: invalid JSON payload job_id=%s", jobID)
 			continue
 		}
 
@@ -251,20 +280,20 @@ func (p *PollingClient) fetchNewJobs() {
 		// Duplicate detection
 		// ============================================================
 		
-		if _, exists := p.sentJobs.Load(job.ID); exists {
+		if _, exists := p.sentJobs.Load(jobID); exists {
 			continue
 		}
 
-		p.sentJobs.Store(job.ID, time.Now())
+		p.sentJobs.Store(jobID, time.Now())
 
-		log.Printf("[realtime] new job received: %s (type: %s)", job.ID, job.JobType)
+		log.Printf("[realtime] new job received: %s (type: %s)", jobID, job.JobType)
 
 		obs.Info(
 			"job received via realtime polling",
 			obs.Field{
-				"job_id":            job.ID,
+				"job_id":            jobID,
 				"job_type":          job.JobType,
-				"execution_id":     job.ExecutionID,
+				"execution_id":      executionID,
 				"execution_step_id": job.ExecutionStepID,
 				"source":            "low_latency_poll",
 			},
@@ -274,19 +303,19 @@ func (p *PollingClient) fetchNewJobs() {
 
 		// DEBUG: Log exact values being sent to dispatcher
 		log.Printf("[DEBUG] BEFORE dispatch → job_id=%s execution_id=%s job_type=%s payload_len=%d",
-			job.ID, job.ExecutionID, job.JobType, len(job.Payload))
+			jobID, executionID, job.JobType, len(payload))
 
 		if err := dispatcher.SubmitJobWithMeta(
 			job.JobType,
-			job.Payload,
-			job.ID,
+			payload,
+			jobID,
 			job.OrgID,
 			traceID,
 			job.ExecutionStepID,
-			job.ExecutionID,
+			executionID,
 		); err != nil {
 
-			log.Printf("[realtime] dispatch failed for job %s: %v", job.ID, err)
+			log.Printf("[realtime] dispatch failed for job %s: %v", jobID, err)
 		}
 	}
 }
