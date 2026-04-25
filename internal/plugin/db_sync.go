@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"sentra-agent/internal/auth"
+	"sentra-agent/internal/config"
 	"sentra-agent/internal/httpclient"
 )
 
@@ -218,19 +219,21 @@ func SyncPluginsFromAPI(ctx context.Context) error {
 
 func loadConfig() (*Config, error) {
 	backendURL := firstNonEmpty(
-		os.Getenv("BACKEND_URL"),
 		os.Getenv("SENTRA_BACKEND_URL"),
 		os.Getenv("APP_SUPABASE_URL"),
 		os.Getenv("SUPABASE_URL"),
+		os.Getenv("BACKEND_URL"),
+		config.DefaultBackendURL,
 	)
 	if backendURL == "" {
 		return nil, fmt.Errorf("backend URL not configured: set SENTRA_BACKEND_URL")
 	}
 
 	anonKey := firstNonEmpty(
-		os.Getenv("BACKEND_ANON_KEY"),
 		os.Getenv("SENTRA_BACKEND_ANON_KEY"),
 		os.Getenv("SUPABASE_ANON_KEY"),
+		os.Getenv("BACKEND_ANON_KEY"),
+		config.DefaultAnonKey,
 	)
 
 	return &Config{

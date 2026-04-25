@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
 	"sentra-agent/internal/obs"
 	"sentra-agent/internal/plugin"
@@ -31,9 +32,26 @@ var (
 )
 
 func init() {
-	supabaseBaseURL = os.Getenv("SUPABASE_URL")
-	supabaseToken = os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
-	supabaseAnonKey = os.Getenv("SUPABASE_ANON_KEY")
+	supabaseBaseURL = firstNonEmpty(
+		os.Getenv("SUPABASE_URL"),
+		config.DefaultBackendURL,
+	)
+	supabaseToken = firstNonEmpty(
+		os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
+	)
+	supabaseAnonKey = firstNonEmpty(
+		os.Getenv("SUPABASE_ANON_KEY"),
+		config.DefaultAnonKey,
+	)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // -----------------------------------------------------------------------------
