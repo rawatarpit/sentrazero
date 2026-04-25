@@ -67,13 +67,13 @@ func LoadStatic() *Config {
 
 	anonKey := firstNonEmpty(
 		os.Getenv("BACKEND_ANON_KEY"),
+		os.Getenv("SENTRA_BACKEND_ANON_KEY"),
 		os.Getenv("SUPABASE_ANON_KEY"),
+		os.Getenv("APP_SUPABASE_ANON_KEY"),
 		DefaultAnonKey,
 	)
 
-	if anonKey == "" {
-		log.Fatal("❌ Anon key not configured. Set BACKEND_ANON_KEY or rebuild with -ldflags.")
-	}
+	// Note: anonKey can be empty - will be provided by claim_device response if using cloud
 
 	cfg := &Config{
 		BackendURL:     backendURL,
