@@ -1,6 +1,6 @@
 package config
 
 var (
-	DefaultBackendURL = "https://app.sentra.ai"
-	DefaultAnonKey   = ""
+	DefaultBackendURL = "https://pqcwgkqrblugplpcaxcy.supabase.co"
+	DefaultAnonKey   = "REDACTED_ANON_KEY"
 )
