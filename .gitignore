@@ -15,7 +15,8 @@ sentra-agent*
 *.tar.gz
 *.dump
 
-# Supabase CSV metadata (functions are now tracked)
+# Supabase - exclude edge functions and CSV metadata
+supabase/
 Supabase*.csv
 03_BINARY*
 
