@@ -289,13 +289,14 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		"summary_keys": len(summary),
 	})
 
+	// Report scan results to backend - non-critical, don't fail job on error
 	if err := reportDatasetScan(ctx, job.DatasetID, job.OrgID, storageMode, summary); err != nil {
 		obs.Warn("failed to report dataset scan", obs.Field{
 			"job_id":     job.ID,
 			"dataset_id": job.DatasetID,
 			"error":      err.Error(),
 		})
-		return err
+		// Don't return error - reporting is non-critical
 	}
 
 	return nil
