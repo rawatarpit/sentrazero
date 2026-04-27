@@ -246,8 +246,17 @@ func executeJobSafe(id int, req jobRequest) {
 
 	// ---- Job start (DB-enforced) ----
 	if execClient != nil && req.jobID != "" {
+		// Signal job start to backend (for observability)
 		if err := execClient.ReportJobStart(ctx, req.jobID); err != nil {
 			log.Printf("[dispatcher] ⚠️ job start rejected: %v", err)
+		}
+		// Transition job to running state in DB
+		if startResult, err := execClient.StartJob(ctx, req.jobID); err != nil {
+			log.Printf("[dispatcher] ⚠️ start_job failed: %v", err)
+		} else if !startResult.Success {
+			log.Printf("[dispatcher] ⚠️ start_job returned false: %s", startResult.Error)
+		} else {
+			log.Printf("[dispatcher] ✅ job started: %s status=%s", req.jobID, startResult.Status)
 		}
 	}
 

@@ -322,6 +322,40 @@ func (c *ExecutionClient) ReportJobStart(ctx context.Context, jobID string) erro
 	})
 }
 
+type StartJobResult struct {
+	Success   bool      `json:"success"`
+	JobID    string    `json:"job_id"`
+	Status   string    `json:"status"`
+	StartedAt time.Time `json:"started_at"`
+	Error    string    `json:"error"`
+}
+
+func (c *ExecutionClient) StartJob(ctx context.Context, jobID string) (*StartJobResult, error) {
+	reqBody := map[string]any{
+		"p_job_id": jobID,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	resp, err := c.httpc.Post(ctx, "/functions/v1/start_job", body)
+	if err != nil {
+		return nil, fmt.Errorf("start_job RPC failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[EXEC-CLIENT] start_job → HTTP %d | body: %s", resp.StatusCode, string(respBody))
+
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("start_job failed: HTTP %d", resp.StatusCode)
+	}
+
+	var result StartJobResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (c *ExecutionClient) SendJobExecutionHeartbeat(ctx context.Context, jobID string) error {
 	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
