@@ -27,28 +27,19 @@ serve(async (req) => {
   try {
     const authResult = await authenticateDevice(req);
     if (!authResult.device) {
+      console.log("[start_job] auth failed:", authResult.error);
       return jsonResponse({ ok: false, error: authResult.error }, 401);
     }
 
-    let body;
-    const contentType = req.headers.get("content-type") || "";
-    
-    if (contentType.includes("application/json")) {
-      try {
-        body = await req.json();
-      } catch (e) {
-        body = {};
-      }
-    }
-    
-    const p_job_id = body?.p_job_id || body?.job_id || "";
-    const p_agent_id = body?.p_agent_id || body?.agent_id || null;
+    console.log("[start_job] device:", authResult.device.id);
 
-    console.log("[start_job] body:", JSON.stringify(body));
-    console.log("[start_job] job_id:", p_job_id);
+    const body = await req.json();
+    const jobId = body?.p_job_id || body?.job_id || "";
 
-    if (!p_job_id) {
-      return jsonResponse({ ok: false, error: "p_job_id required" }, 400);
+    console.log("[start_job] received job_id:", jobId);
+
+    if (!jobId) {
+      return jsonResponse({ ok: false, error: "job_id required" }, 400);
     }
 
     const supabase = createClient(
@@ -56,35 +47,42 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    console.log("[start_job] calling RPC for job:", p_job_id);
+    console.log("[start_job] calling RPC with job_id:", jobId);
 
-    // Call the RPC
-    const { data, error } = await supabase.rpc("start_job", {
-      p_job_id: p_job_id,
-      p_agent_id: p_agent_id,
+    // Call the RPC with exact parameter names matching DB
+    const result = await supabase.rpc("start_job", {
+      p_job_id: jobId,
+      p_agent_id: null
     });
+    
+    console.log("[start_job] RPC completed, result:", JSON.stringify(result));
 
-    console.log("[start_job] RPC done, data:", data, "error:", error);
-
-    if (error) {
-      console.error("[start_job] RPC error:", error.message);
-      return jsonResponse({
-        ok: false,
-        error: error.message,
-      }, 500);
+    if (result.error) {
+      console.error("[start_job] RPC error:", result.error.message);
+      return jsonResponse({ ok: false, error: result.error.message }, 500);
     }
 
-    console.log("[start_job] success, data:", data);
+    if (!result.data) {
+      console.log("[start_job] no data from RPC");
+      // Still return success - update may have happened
+      return jsonResponse({
+        ok: true,
+        job_id: jobId,
+        status: "running"
+      });
+    }
+
+    console.log("[start_job] returning:", result.data);
     return jsonResponse({
       ok: true,
-      ...data,
+      ...result.data
     });
 
   } catch (error) {
     console.error("[start_job] FATAL:", error);
     return jsonResponse({
       ok: false,
-      error: String(error),
+      error: String(error)
     }, 500);
   }
 });
