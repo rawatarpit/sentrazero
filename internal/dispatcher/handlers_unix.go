@@ -5,14 +5,12 @@ package dispatcher
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +21,7 @@ import (
 
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
+	"sentra-agent/internal/httpclient"
 	"sentra-agent/internal/obs"
 	"sentra-agent/internal/plugin"
 	"sentra-agent/internal/storage"
@@ -289,7 +288,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		"summary_keys": len(summary),
 	})
 
-	if err := reportDatasetScan(ctx, job.DatasetID, job.OrgID, storageMode, summary); err != nil {
+	if err := reportDatasetScan(ctx, job.DatasetID, job.OrgID, storageMode, summary, job.DeviceToken); err != nil {
 		obs.Warn("failed to report dataset scan", obs.Field{
 			"job_id":     job.ID,
 			"dataset_id": job.DatasetID,
@@ -301,21 +300,21 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	return nil
 }
 
-func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string, summary map[string]any) error {
+func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string, summary map[string]any, deviceToken string) error {
 	if supabaseBaseURL == "" {
 		obs.Warn("report_dataset_scan skipped: SUPABASE_URL not set", nil)
 		return nil
 	}
-	if supabaseToken == "" {
-		obs.Warn("report_dataset_scan skipped: SUPABASE_SERVICE_ROLE_KEY not set", nil)
+	if deviceToken == "" {
+		obs.Warn("report_dataset_scan skipped: device_token not available", nil)
 		return nil
 	}
 
 	reportPayload := map[string]interface{}{
 		"dataset_id":   datasetID,
-		"org_id":       orgID,
+		"org_id":      orgID,
 		"storage_type": storageType,
-		"summary":      summary,
+		"summary":     summary,
 	}
 
 	payloadBytes, err := json.Marshal(reportPayload)
@@ -323,17 +322,8 @@ func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string
 		return fmt.Errorf("failed to marshal report payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", supabaseBaseURL+"/functions/v1/report_dataset_scan", bytes.NewReader(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+supabaseAnonKey)
-	req.Header.Set("x-agent-token", supabaseToken)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	httpc := httpclient.NewClient(supabaseBaseURL, supabaseAnonKey, deviceToken)
+	resp, err := httpc.DoWithReq(ctx, "POST", "/functions/v1/report_dataset_scan", payloadBytes, nil)
 	if err != nil {
 		return fmt.Errorf("failed to call report_dataset_scan: %w", err)
 	}
