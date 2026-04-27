@@ -28,7 +28,6 @@ type Job struct {
 	Payload         json.RawMessage `json:"payload"`
 	SourcePath      string          `json:"source_path,omitempty"`
 	StorageConfigID string          `json:"storage_config_id,omitempty"`
-	DeviceToken     string          `json:"device_token,omitempty"`
 }
 
 // PluginContext is the canonical input shape for all plugin binaries

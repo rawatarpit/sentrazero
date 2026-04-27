@@ -19,6 +19,7 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 
+	"sentra-agent/internal/auth"
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
 	"sentra-agent/internal/httpclient"
@@ -288,7 +289,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		"summary_keys": len(summary),
 	})
 
-	if err := reportDatasetScan(ctx, job.DatasetID, job.OrgID, storageMode, summary, job.DeviceToken); err != nil {
+	if err := reportDatasetScan(ctx, job.DatasetID, job.OrgID, storageMode, summary); err != nil {
 		obs.Warn("failed to report dataset scan", obs.Field{
 			"job_id":     job.ID,
 			"dataset_id": job.DatasetID,
@@ -300,13 +301,15 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	return nil
 }
 
-func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string, summary map[string]any, deviceToken string) error {
+func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string, summary map[string]any) error {
 	if supabaseBaseURL == "" {
 		obs.Warn("report_dataset_scan skipped: SUPABASE_URL not set", nil)
 		return nil
 	}
-	if deviceToken == "" {
-		obs.Warn("report_dataset_scan skipped: device_token not available", nil)
+
+	deviceToken, err := auth.GetToken()
+	if err != nil {
+		obs.Warn("report_dataset_scan skipped: device token not available", obs.Field{"error": err.Error()})
 		return nil
 	}
 
