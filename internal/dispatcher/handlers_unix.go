@@ -4,8 +4,10 @@
 package dispatcher
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/parquet-go/parquet-go"
 
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
@@ -875,11 +879,14 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 
 func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[string]any, error) {
 	summary := map[string]any{
-		"file_count":       0,
-		"total_size_bytes": int64(0),
-		"file_types":       map[string]int{},
-		"headers":        []string{},
-		"columns":        []string{},
+		"file_count":        0,
+		"total_size_bytes":  int64(0),
+		"file_types":        map[string]int{},
+		"headers":            []string{},
+		"columns":            []string{},
+		"sample_row_count":   0,
+		"detected_formats":  []string{},
+		"schema":             map[string]string{},
 	}
 
 	inputIsDir := inputPath
@@ -917,25 +924,502 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 	fileCount := len(files)
 	totalSize := int64(0)
 	fileTypes := map[string]int{}
+	var sampleFile os.FileInfo
+	var ext string
 
 	for _, f := range files {
 		totalSize += f.Size()
-		ext := filepath.Ext(f.Name())
+		ext = filepath.Ext(f.Name())
 		if ext == "" {
 			ext = "(no extension)"
 		}
 		fileTypes[ext]++
+		
+		// Use first file as sample for metadata extraction
+		if sampleFile == nil && f.Size() > 0 {
+			sampleFile = f
+		}
 	}
 
 	summary["file_count"] = fileCount
 	summary["total_size_bytes"] = totalSize
 	summary["file_types"] = fileTypes
+	summary["detected_formats"] = []string{}
+
+	// Only extract metadata if we have a sample file
+	if sampleFile != nil {
+		samplePath := filepath.Join(inputIsDir, sampleFile.Name())
+		if !info.IsDir() {
+			samplePath = inputPath
+		}
+
+		metadata, err := extractFileMetadata(ctx, samplePath)
+		if err != nil {
+			obs.Warn("failed to extract file metadata", obs.Field{
+				"path": samplePath,
+				"error": err.Error(),
+			})
+		} else {
+			// Merge extracted metadata into summary
+			for k, v := range metadata {
+				summary[k] = v
+			}
+			
+			// Track detected formats
+			if format, ok := metadata["format"].(string); ok && format != "" {
+				summary["detected_formats"] = []string{format}
+			}
+		}
+	}
 
 	obs.Info("built-in scan complete", obs.Field{
 		"file_count":      fileCount,
 		"total_size_mb":   totalSize / (1024 * 1024),
 		"unique_types":   len(fileTypes),
+		"sample_file":    summary["sample_file"],
+		"columns":        len(summary["columns"].([]string)),
 	})
 
 	return summary, nil
+}
+
+func extractFileMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	
+	switch ext {
+	case ".csv", ".tsv", ".txt":
+		return extractCSVMetadata(ctx, filePath)
+	case ".json", ".jsonl":
+		return extractJSONMetadata(ctx, filePath)
+	case ".parquet":
+		return extractParquetMetadata(ctx, filePath)
+	case ".ndjson":
+		return extractJSONLMetadata(ctx, filePath)
+	default:
+		// Try to detect format by reading first bytes
+		return detectAndExtractMetadata(ctx, filePath)
+	}
+}
+
+func extractCSVMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":       "csv",
+		"sample_file":  filepath.Base(filePath),
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return metadata, err
+	}
+	defer file.Close()
+
+	// Detect delimiter
+	delimiter := detectDelimiter(file)
+	metadata["delimiter"] = string(delimiter)
+
+	// Reset to beginning
+	file.Seek(0, 0)
+
+	reader := csv.NewReader(file)
+	reader.Comma = delimiter
+	reader.FieldsPerRecord = 0 // Allow variable fields
+
+	// Read header
+	headers, err := reader.Read()
+	if err != nil {
+		if err == io.EOF {
+			return metadata, nil
+		}
+		return metadata, err
+	}
+
+	metadata["headers"] = headers
+	metadata["columns"] = headers
+	metadata["column_count"] = len(headers)
+
+	// Read first few rows to detect types and row count sample
+	rowCount := 0
+	typeHints := map[string]string{}
+	sampleRows := []map[string]any{}
+
+	for i := 0; i < 100; i++ {
+		row, err := reader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		rowCount++
+
+		// Collect sample rows
+		if i < 10 {
+			rowMap := map[string]any{}
+			for j, val := range row {
+				if j < len(headers) {
+					rowMap[headers[j]] = val
+				}
+			}
+			sampleRows = append(sampleRows, rowMap)
+		}
+
+		// Detect types
+		for j, val := range row {
+			if j < len(headers) {
+				col := headers[j]
+				if _, exists := typeHints[col]; !exists && val != "" {
+					typeHints[col] = detectValueType(val)
+				}
+			}
+		}
+	}
+
+	metadata["sample_row_count"] = rowCount
+	metadata["schema"] = typeHints
+	metadata["sample_rows"] = sampleRows
+	metadata["has_header"] = true
+	metadata["estimated_row_count"] = estimateTotalRows(filePath, rowCount)
+
+	return metadata, nil
+}
+
+func extractJSONMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":       "json",
+		"sample_file": filepath.Base(filePath),
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return metadata, err
+	}
+
+	var jsonData any
+	if err := json.Unmarshal(data, &jsonData); err != nil {
+		return metadata, err
+	}
+
+	switch v := jsonData.(type) {
+	case []any:
+		metadata["array_length"] = len(v)
+		if len(v) > 0 {
+			if obj, ok := v[0].(map[string]any); ok {
+				headers := make([]string, 0, len(obj))
+				schema := map[string]string{}
+				for k, val := range obj {
+					headers = append(headers, k)
+					schema[k] = detectValueTypeFromAny(val)
+				}
+				metadata["headers"] = headers
+				metadata["columns"] = headers
+				metadata["column_count"] = len(headers)
+				metadata["schema"] = schema
+
+				// Sample rows
+				sampleRows := []map[string]any{}
+				for i := 0; i < min(10, len(v)); i++ {
+					if row, ok := v[i].(map[string]any); ok {
+						sampleRows = append(sampleRows, row)
+					}
+				}
+				metadata["sample_rows"] = sampleRows
+			}
+		}
+	case map[string]any:
+		headers := make([]string, 0, len(v))
+		schema := map[string]string{}
+		sampleRow := map[string]any{}
+		for k, val := range v {
+			headers = append(headers, k)
+			schema[k] = detectValueTypeFromAny(val)
+			sampleRow[k] = val
+		}
+		metadata["headers"] = headers
+		metadata["columns"] = headers
+		metadata["column_count"] = len(headers)
+		metadata["schema"] = schema
+		metadata["sample_rows"] = []map[string]any{sampleRow}
+	}
+
+	metadata["estimated_row_count"] = estimateTotalRows(filePath, 1)
+	return metadata, nil
+}
+
+func extractJSONLMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":        "jsonl",
+		"sample_file":   filepath.Base(filePath),
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return metadata, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	rowCount := 0
+	headers := []string{}
+	schema := map[string]string{}
+	sampleRows := []map[string]any{}
+
+	for i := 0; i < 100 && scanner.Scan(); i++ {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
+		}
+		rowCount++
+
+		// Collect headers from first row
+		if i == 0 {
+			for k, v := range row {
+				headers = append(headers, k)
+				schema[k] = detectValueTypeFromAny(v)
+			}
+		}
+
+		if i < 10 {
+			sampleRows = append(sampleRows, row)
+		}
+	}
+
+	metadata["headers"] = headers
+	metadata["columns"] = headers
+	metadata["column_count"] = len(headers)
+	metadata["schema"] = schema
+	metadata["sample_rows"] = sampleRows
+	metadata["sample_row_count"] = rowCount
+	metadata["estimated_row_count"] = estimateTotalRows(filePath, rowCount)
+
+	return metadata, nil
+}
+
+func extractParquetMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":       "parquet",
+		"sample_file": filepath.Base(filePath),
+	}
+
+	// Open parquet file
+	f, err := os.Open(filePath)
+	if err != nil {
+		return metadata, err
+	}
+	defer f.Close()
+
+	pr := parquet.NewReader(f)
+	if pr == nil {
+		return metadata, errors.New("failed to create parquet reader")
+	}
+	defer func() { pr.Close() }()
+
+	// Get schema from parquet
+	schema := map[string]string{}
+	headers := []string{}
+
+	schemaFields := pr.Schema().Fields()
+	for _, field := range schemaFields {
+		headers = append(headers, field.Name())
+		schema[field.Name()] = parquetTypeToString(field.Type())
+	}
+
+	// Read sample rows
+	rowCount := min(10, int(pr.NumRows()))
+	sampleRows := []map[string]any{}
+
+	for i := 0; i < rowCount; i++ {
+		rowMap := make(map[string]any)
+		if err := pr.Read(&rowMap); err != nil {
+			if err == io.EOF {
+				break
+			}
+			continue
+		}
+		sampleRows = append(sampleRows, rowMap)
+	}
+
+	metadata["headers"] = headers
+	metadata["columns"] = headers
+	metadata["column_count"] = len(headers)
+	metadata["schema"] = schema
+	metadata["sample_rows"] = sampleRows
+	metadata["total_row_count"] = int(pr.NumRows())
+	metadata["estimated_row_count"] = int(pr.NumRows())
+
+	return metadata, nil
+}
+
+func detectAndExtractMetadata(ctx context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":       "unknown",
+		"sample_file": filepath.Base(filePath),
+	}
+
+	// Read first 4KB to detect format
+	file, err := os.Open(filePath)
+	if err != nil {
+		return metadata, err
+	}
+	defer file.Close()
+
+	header := make([]byte, 4096)
+	n, err := file.Read(header)
+	if err != nil {
+		return metadata, err
+	}
+
+	// Magic bytes detection
+	if n >= 4 {
+		// Parquet magic bytes
+		if string(header[:4]) == "PAR1" {
+			return extractParquetMetadata(ctx, filePath)
+		}
+		// gzip
+		if header[0] == 0x1f && header[1] == 0x8b {
+			metadata["format"] = "gzip"
+		}
+	}
+
+	// Content-based detection
+	content := string(header[:min(n, 1000)])
+	if strings.HasPrefix(content, "{") || strings.HasPrefix(content, "[") {
+		// Try JSON first
+		if strings.Contains(content, "\n") {
+			return extractJSONLMetadata(ctx, filePath)
+		}
+		return extractJSONMetadata(ctx, filePath)
+	}
+
+	// Default to CSV-like detection
+	if strings.Contains(content, ",") || strings.Contains(content, "\t") || strings.Contains(content, ";") {
+		return extractCSVMetadata(ctx, filePath)
+	}
+
+	return metadata, nil
+}
+
+func detectDelimiter(file *os.File) rune {
+	// Read first line to detect delimiter
+	reader := bufio.NewReader(file)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil {
+		return ','
+	}
+
+	delimiters := map[rune]int{',': 0, '\t': 0, ';': 0, '|': 0}
+	for _, c := range firstLine {
+		if _, ok := delimiters[c]; ok {
+			delimiters[c]++
+		}
+	}
+
+	// Find max
+	maxCount := 0
+	delimiter := ','
+	for d, count := range delimiters {
+		if count > maxCount {
+			maxCount = count
+			delimiter = d
+		}
+	}
+
+	return delimiter
+}
+
+func detectValueType(value string) string {
+	if value == "" {
+		return "null"
+	}
+
+	// Check if number
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return "integer"
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "float"
+	}
+
+	// Check if boolean
+	lower := strings.ToLower(value)
+	if lower == "true" || lower == "false" {
+		return "boolean"
+	}
+
+	// Check if date/time
+	dateFormats := []string{
+		"2006-01-02", "2006/01/02", "01/02/2006",
+		"2006-01-02T15:04:05", "2006-01-02 15:04:05",
+	}
+	for _, format := range dateFormats {
+		if _, err := time.Parse(format, value); err == nil {
+			return "datetime"
+		}
+	}
+
+	return "string"
+}
+
+func detectValueTypeFromAny(value any) string {
+	if value == nil {
+		return "null"
+	}
+
+	switch value.(type) {
+	case int, int64:
+		return "integer"
+	case float64:
+		return "float"
+	case bool:
+		return "boolean"
+	case string:
+		return "string"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	default:
+		return "unknown"
+	}
+}
+
+func parquetTypeToString(t any) string {
+	typeStr := fmt.Sprintf("%T", t)
+	switch {
+	case strings.Contains(typeStr, "Int64"):
+		return "integer"
+	case strings.Contains(typeStr, "Float"):
+		return "float"
+	case strings.Contains(typeStr, "Boolean"):
+		return "boolean"
+	case strings.Contains(typeStr, "ByteArray"):
+		return "binary"
+	case strings.Contains(typeStr, "UTF8"):
+		return "string"
+	default:
+		return typeStr
+	}
+}
+
+func estimateTotalRows(filePath string, sampleRowCount int) int {
+	if sampleRowCount == 0 {
+		return 0
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0
+	}
+
+	// Estimate based on average row size
+	avgRowSize := info.Size() / int64(sampleRowCount)
+	if avgRowSize == 0 {
+		return 0
+	}
+
+	return int(info.Size() / avgRowSize)
 }
