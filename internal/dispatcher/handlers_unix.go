@@ -306,6 +306,10 @@ func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string
 		obs.Warn("report_dataset_scan skipped: SUPABASE_URL not set", nil)
 		return nil
 	}
+	if supabaseToken == "" {
+		obs.Warn("report_dataset_scan skipped: SUPABASE_SERVICE_ROLE_KEY not set", nil)
+		return nil
+	}
 
 	reportPayload := map[string]interface{}{
 		"dataset_id":   datasetID,
