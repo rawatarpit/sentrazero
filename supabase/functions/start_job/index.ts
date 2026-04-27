@@ -27,58 +27,63 @@ serve(async (req) => {
   try {
     const authResult = await authenticateDevice(req);
     if (!authResult.device) {
-      return jsonResponse({ success: false, error: authResult.error }, 401);
+      return jsonResponse({ ok: false, error: authResult.error }, 401);
     }
 
-    const body = await req.json();
-    const { p_job_id, p_agent_id } = body;
+    let body;
+    const contentType = req.headers.get("content-type") || "";
+    
+    if (contentType.includes("application/json")) {
+      try {
+        body = await req.json();
+      } catch (e) {
+        body = {};
+      }
+    }
+    
+    const p_job_id = body?.p_job_id || body?.job_id || "";
+    const p_agent_id = body?.p_agent_id || body?.agent_id || null;
+
+    console.log("[start_job] body:", JSON.stringify(body));
+    console.log("[start_job] job_id:", p_job_id);
 
     if (!p_job_id) {
-      return jsonResponse({ success: false, error: "p_job_id required" }, 400);
+      return jsonResponse({ ok: false, error: "p_job_id required" }, 400);
     }
-
-    console.log("[start_job] job_id:", p_job_id);
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    console.log("[start_job] calling RPC...");
+    console.log("[start_job] calling RPC for job:", p_job_id);
 
     // Call the RPC
     const { data, error } = await supabase.rpc("start_job", {
       p_job_id: p_job_id,
-      p_agent_id: p_agent_id || null,
+      p_agent_id: p_agent_id,
     });
 
-    console.log("[start_job] RPC result:", data, "error:", error);
+    console.log("[start_job] RPC done, data:", data, "error:", error);
 
     if (error) {
       console.error("[start_job] RPC error:", error.message);
       return jsonResponse({
-        success: false,
+        ok: false,
         error: error.message,
       }, 500);
     }
 
-    // Handle case where data might be null/undefined
-    if (!data) {
-      console.log("[start_job] no data returned, treating as success");
-      return jsonResponse({
-        success: true,
-        job_id: p_job_id,
-        status: "running",
-      });
-    }
-
-    console.log("[start_job] result:", data);
-    return jsonResponse(data);
+    console.log("[start_job] success, data:", data);
+    return jsonResponse({
+      ok: true,
+      ...data,
+    });
 
   } catch (error) {
     console.error("[start_job] FATAL:", error);
     return jsonResponse({
-      success: false,
+      ok: false,
       error: String(error),
     }, 500);
   }
