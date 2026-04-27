@@ -56,8 +56,8 @@ serve(async (req) => {
 
     const updateData: Record<string, unknown> = {
       scanned_at: new Date().toISOString(),
-      // Skip status to avoid trigger failure - status will be set by trigger
-      // status: "scanned", // Temporarily disabled until trigger is fixed
+      // Set status to scanned - triggers will handle chained events
+      status: "scanned",
     };
 
     if (summary) {
