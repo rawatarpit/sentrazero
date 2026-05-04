@@ -4,7 +4,7 @@ import { authenticateDeviceWithDetails } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-agent-token, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-agent-token, x-relay-key, x-org-id, x-client-info, apikey, content-type, x-device-id",
 };
 
 function jsonResponse(
@@ -44,7 +44,7 @@ serve(async (req) => {
     console.log("[complete_job] input:", { job_id, execution_id, status });
 
     if (!job_id && !execution_id) {
-      return jsonResponse({ success: false, error: "Missing id" }, 400);
+      return jsonResponse({ ok: false, error: "Missing id" }, 400);
     }
 
     // --- Create service role client ---
@@ -90,7 +90,7 @@ serve(async (req) => {
 
       if (currJob?.status === "completed" || currJob?.status === "failed") {
         return jsonResponse({ 
-          success: true, 
+          ok: true, 
           job_id, 
           execution_id: execution_id || currJob?.execution_id,
           status: currJob.status,
@@ -143,7 +143,7 @@ serve(async (req) => {
     // --- Return success ---
     console.log("[complete_job] === END (SUCCESS) ===");
     return jsonResponse({ 
-      success: true, 
+      ok: true, 
       job_id,
       execution_id: execId,
       status 
@@ -151,6 +151,6 @@ serve(async (req) => {
 
   } catch (error) {
     console.error("[complete_job] FATAL:", error);
-    return jsonResponse({ success: false, error: String(error) }, 500);
+    return jsonResponse({ ok: false, error: String(error) }, 500);
   }
 });

@@ -273,8 +273,24 @@ func executeJobSafe(id int, req jobRequest) {
 	var pluginExecID string
 	var pluginExecErr error
 	if execClient != nil && req.orgID != "" && req.jobID != "" {
+		// Extract plugin_id from job payload (Bug #25 fix)
+		var payload struct {
+			PluginID string `json:"plugin_id,omitempty"`
+			PluginName string `json:"plugin_name,omitempty"`
+		}
+		pluginID := req.jobID // fallback
+		if len(req.payload) > 0 {
+			if err := json.Unmarshal(req.payload, &payload); err == nil {
+				if payload.PluginID != "" {
+					pluginID = payload.PluginID
+				} else if payload.PluginName != "" {
+					pluginID = payload.PluginName
+				}
+			}
+		}
+		
 		pluginExecID, pluginExecErr = execClient.RecordPluginExecutionStart(
-			ctx, req.orgID, req.jobID, req.jobID, "",
+			ctx, req.orgID, pluginID, req.jobID, req.jobID,
 		)
 		_ = pluginExecID
 		_ = pluginExecErr
@@ -381,6 +397,7 @@ func executeJobSafe(id int, req jobRequest) {
 			}
 
 			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), nil)
+			// Removed duplicate ReportJobComplete - CompleteJob already reports completion
 			if result.IsStaleExecution() {
 				obs.Warn("job failure reported but completion rejected - stale execution", obs.Field{
 					"job_id":        req.jobID,
@@ -393,6 +410,7 @@ func executeJobSafe(id int, req jobRequest) {
 					"error":  result.Err.Error(),
 				})
 			}
+			return
 		}
 
 		log.Printf(
@@ -428,23 +446,13 @@ func executeJobSafe(id int, req jobRequest) {
 				"already_done":  result.IsAlreadyDone,
 				"duration_ms":   duration.Milliseconds(),
 			})
-			if repErr := execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil); repErr != nil {
-				obs.Warn("failed to report job completion after stale execution", obs.Field{
-					"job_id": req.jobID,
-					"error":  repErr.Error(),
-				})
-			}
+			// Do NOT call ReportJobComplete - CompleteJob already handles this
 		} else if result.Err != nil {
 			obs.Error("job completed but DB update failed", obs.Field{
 				"job_id": req.jobID,
 				"error":  result.Err.Error(),
 			})
-			if repErr := execClient.ReportJobComplete(context.Background(), req.jobID, duration.Milliseconds(), nil); repErr != nil {
-				obs.Warn("failed to report job completion after DB failure", obs.Field{
-					"job_id": req.jobID,
-					"error":  repErr.Error(),
-				})
-			}
+			// Do NOT call ReportJobComplete - CompleteJob already handles this
 		} else {
 			obs.Info("job completed and persisted", obs.Field{
 				"job_id":      req.jobID,

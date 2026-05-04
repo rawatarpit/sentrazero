@@ -546,6 +546,10 @@ type execCompleteJobResponse struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// Note: CompleteJob expects (ctx, executionID, jobID, status, durationMs, resultData)
+// executionID is the primary identifier for the execution record
+// jobID is used for job state transitions
+
 // CompleteJobResult is a wrapper that can indicate lease expiration specifically
 type CompleteJobResult struct {
 	Response        *execCompleteJobResponse
@@ -618,6 +622,7 @@ func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, j
 
 	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/complete_job", body, func(r *http.Request) {
 		r.Header.Set("x-device-id", c.deviceID)
+		r.Header.Set("apikey", c.anonKey)
 	})
 	if err != nil {
 		return &CompleteJobResult{Err: err}

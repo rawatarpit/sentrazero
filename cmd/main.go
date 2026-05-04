@@ -91,7 +91,12 @@ func main() {
 		})
 
 		if err != nil {
-			log.Println("⚠️ Token invalid → reclaiming device")
+			log.Println("⚠️ Token invalid → clearing and reclaiming device")
+
+			// Clear invalid token before reclaiming
+			if clearErr := auth.ClearToken(id.DeviceID); clearErr != nil {
+				log.Printf("⚠️ Failed to clear invalid token: %v", clearErr)
+			}
 
 			device, err := auth.ClaimDevice(
 				cfg.BackendURL,

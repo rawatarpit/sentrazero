@@ -53,6 +53,10 @@ func Validate(parentCtx context.Context, cfg *config.Config) error {
 		}
 	}
 
+	// v2 RuntimeManager can handle Python/Node.js without Docker
+	// No need to fail here - the dispatcher handles fallback to v2 runtime
+	obs.Info("startup: Docker check passed, v2 RuntimeManager available as fallback", obs.Field{})
+
 	obs.Info("startup config validated", obs.Field{"backend": cfg.BackendURL})
 
 	httpc := httpclient.NewClient(

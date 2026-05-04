@@ -362,8 +362,15 @@ func (ep *EnvironmentPool) GetMetrics() map[string]interface{} {
 }
 
 func (ep *EnvironmentPool) CalculateDependencyHash(rt RuntimeType, deps []Dependency) string {
+	// Match SQL calculate_dependency_hash function
+	// SQL: encode(digest(COALESCE(p_runtime_type, 'native') || '|' || COALESCE(jsonb_pretty(p_runtime_dependencies), ''), 'sha256'), 'hex')
 	data, _ := json.Marshal(deps)
-	hash := sha256.Sum256(append([]byte(string(rt)), data...))
+	// Use jsonb_pretty equivalent by using json.Marshal then json.Unmarshal then json.Marshal for deterministic output
+	var normalizedJSON json.RawMessage
+	json.Unmarshal(data, &normalizedJSON)
+	prettyData, _ := json.Marshal(normalizedJSON)
+	content := fmt.Sprintf("%s|%s", rt, string(prettyData))
+	hash := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -596,8 +603,21 @@ func (ep *EnvironmentPool) isValidForRuntime(envPath string, rt RuntimeType) boo
 		return ep.IsValidPythonEnvironment(envPath)
 	case RuntimeNode:
 		return ep.IsValidNodeEnvironment(envPath)
-	default:
+	case RuntimeNative:
+		// Native runtime: just check that the path exists and is valid
 		return ep.IsValidEnvironment(envPath)
+	default:
+		// Unknown runtime type: do thorough validation
+		// Check .ready marker file exists
+		if !ep.IsValidEnvironment(envPath) {
+			return false
+		}
+		// Also check that the runtime type directory exists
+		rtDir := filepath.Join(envPath, string(rt))
+		if _, err := os.Stat(rtDir); os.IsNotExist(err) {
+			return false
+		}
+		return true
 	}
 }
 

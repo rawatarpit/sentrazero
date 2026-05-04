@@ -23,6 +23,7 @@ var (
 type TokenStore interface {
 	Save(deviceID, token string) error
 	Load(deviceID string) (string, error)
+	Clear(deviceID string) error
 	Name() string
 }
 
@@ -36,14 +37,10 @@ func NewTokenStoreManager() *TokenStoreManager {
 	envValue := strings.ToLower(os.Getenv("SENTRA_USE_KEYRING"))
 	useKeyring := envValue == "true"
 
-	if !useKeyring && envValue == "" {
-		if runtime.GOOS == "darwin" {
-			isInteractive := os.Getenv("TERM") != "dumb"
-			if isInteractive {
-				f, _ := os.Stdin.Stat()
-				useKeyring = (f.Mode() & os.ModeCharDevice) != 0
-			}
-		}
+	// macOS (darwin) should NOT use keyring - use file-based storage
+	// This ensures consistency with other platforms
+	if runtime.GOOS == "darwin" && envValue == "" {
+		useKeyring = false
 	}
 
 	fileStore := &FileTokenStore{}
@@ -213,6 +210,26 @@ func (f *FileTokenStore) Name() string {
 	return "file"
 }
 
+func (f *FileTokenStore) Clear(deviceID string) error {
+	if deviceID == "" {
+		return errors.New("deviceID is required")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	path, err := f.tokenFilePath(deviceID)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	return nil
+}
+
 type KeyringTokenStore struct{}
 
 func (k *KeyringTokenStore) Save(deviceID, token string) error {
@@ -253,6 +270,22 @@ func (k *KeyringTokenStore) Name() string {
 	return "keyring"
 }
 
+func (k *KeyringTokenStore) Clear(deviceID string) error {
+	if deviceID == "" {
+		return errors.New("deviceID is required")
+	}
+
+	if err := keyring.Delete("sentra-agent", deviceID); err != nil {
+		// Ignore "not found" errors
+		if err == keyring.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	return nil
+}
+
 func GetTokenStore() *TokenStoreManager {
 	tokenStoreOnce.Do(func() {
 		tokenStoreManager = NewTokenStoreManager()
@@ -261,4 +294,30 @@ func GetTokenStore() *TokenStoreManager {
 		panic("TokenStoreManager: failed to initialize - nil pointer after sync.Once")
 	}
 	return tokenStoreManager
+}
+
+func (m *TokenStoreManager) Clear(deviceID string) error {
+	if deviceID == "" {
+		return errors.New("deviceID is required")
+	}
+
+	// Clear from primary store
+	if err := m.primary.Clear(deviceID); err != nil {
+		log.Printf("[token-store] ⚠️ Failed to clear from %s: %v", m.primary.Name(), err)
+	}
+
+	// Clear from fallback store if exists
+	if m.fallback != nil {
+		if err := m.fallback.Clear(deviceID); err != nil {
+			log.Printf("[token-store] ⚠️ Failed to clear from fallback (%s): %v", m.fallback.Name(), err)
+		}
+	}
+
+	return nil
+}
+
+// ClearToken clears the token for a device from all storage backends
+func ClearToken(deviceID string) error {
+	store := GetTokenStore()
+	return store.Clear(deviceID)
 }

@@ -81,13 +81,21 @@ func RunRealtimeWS(ctx context.Context, device auth.Device, cfg *config.Config) 
 }
 
 func runWSConnection(ctx context.Context, device auth.Device, cfg *config.Config) error {
+	// Supabase Realtime v2 WebSocket URL
+	// Use anon key in URL for Realtime authentication
 	url := strings.Replace(cfg.BackendURL, "https://", "wss://", 1)
 	url = fmt.Sprintf("%s/realtime/v1/websocket?apikey=%s&vsn=1.0.0", url, cfg.BackendAnonKey)
 
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+cfg.BackendAnonKey)
+	// Supabase Realtime uses apikey in URL, not custom tokens
+	// Optionally add device token for custom auth if needed
+	header.Set("x-sentra-device-id", device.ID)
+	header.Set("User-Agent", "sentra-agent/1.0")
 
-	dialer := websocket.Dialer{}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
 	conn, _, err := dialer.Dial(url, header)
 	if err != nil {
 		return fmt.Errorf("WebSocket dial failed: %w", err)

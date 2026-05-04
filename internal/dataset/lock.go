@@ -247,11 +247,14 @@ func (b *InMemoryMergeLockBackend) AcquireLock(ctx context.Context, datasetID, a
 	now := time.Now()
 	expiresAt := now.Add(duration)
 
+	// Bug #23 fix: Check if lock already exists and is active
 	if existing, ok := b.locks[datasetID]; ok {
-		if existing.ExpiresAt.Before(now) {
-			existing.Status = "expired"
-		} else {
-			return "", time.Time{}, fmt.Errorf("lock already held")
+		if existing.Status == "active" && existing.ExpiresAt.After(now) {
+			return "", time.Time{}, fmt.Errorf("lock already held for dataset %s", datasetID)
+		}
+		// Clean up expired lock
+		if existing.ExpiresAt.Before(now) || existing.Status == "expired" {
+			delete(b.locks, datasetID)
 		}
 	}
 

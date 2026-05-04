@@ -209,16 +209,26 @@ func VerifyPluginSignature(ctx context.Context, manifestPath, signatureB64, keyI
 		return fmt.Errorf("invalid signature size: expected %d, got %d", ed25519.SignatureSize, len(signature))
 	}
 
+	// Load manifest to get the plugin filename
 	manifest, err := loadManifest(manifestPath)
 	if err != nil {
 		return fmt.Errorf("failed to load manifest for signature verification: %w", err)
 	}
 
-	signingData := fmt.Sprintf("%s|%s|%s|%s", manifest.Name, manifest.Version, manifest.Filename, manifest.Checksum)
-	msgBytes := []byte(signingData)
-	hash := sha256.Sum256(msgBytes)
+	// Get the plugin file path (manifest is at pluginDir/pluginName.json)
+	pluginDir := filepath.Dir(manifestPath)
+	pluginPath := filepath.Join(pluginDir, manifest.Filename)
 
-	if !ed25519.Verify(key.PublicKey, hash[:], signature) {
+	// Read the plugin file and compute SHA256 hash
+	pluginBytes, err := os.ReadFile(pluginPath)
+	if err != nil {
+		return fmt.Errorf("failed to read plugin file for signature verification: %w", err)
+	}
+
+	fileHash := sha256.Sum256(pluginBytes)
+
+	// Verify: Ed25519Verify(publicKey, SHA256(fileBytes), signature)
+	if !ed25519.Verify(key.PublicKey, fileHash[:], signature) {
 		return fmt.Errorf("plugin signature verification failed")
 	}
 

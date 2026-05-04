@@ -7,10 +7,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-agent-token, x-client-info, apikey, content-type",
 };
 
-function jsonResponse(
-  payload: Record<string, unknown>,
-  status = 200
-): Response {
+function jsonResponse(payload: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     headers: { "Content-Type": "application/json", ...corsHeaders },
     status,
@@ -22,8 +19,6 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
-  console.log("[report_dataset_scan] START");
-
   try {
     const authResult = await authenticateDeviceWithDetails(req);
     if (!authResult.device) {
@@ -31,33 +26,27 @@ serve(async (req) => {
     }
 
     const body = await req.json();
-    const { dataset_id, summary, storage_type, source_path } = body;
+    const { dataset_id, summary, storage_type, org_id } = body;
 
     if (!dataset_id) {
       return jsonResponse({ error: "Missing dataset_id" }, 400);
     }
-
-    console.log("[report_dataset_scan] dataset_id:", dataset_id);
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    console.log("[report_dataset_scan] supabase client created");
-
-    // Build scan metadata
     const scanMetadata: Record<string, unknown> = {
       scanned_at: new Date().toISOString(),
       storage_type: storage_type,
-      source_path: source_path,
       scan_completed: true,
     };
 
     const updateData: Record<string, unknown> = {
       scanned_at: new Date().toISOString(),
-      // Set status to scanned - triggers will handle chained events
       status: "scanned",
+      scan_completed: true,
     };
 
     if (summary) {
@@ -77,14 +66,14 @@ serve(async (req) => {
         }
       }
 
-      if (Array.isArray(summary.columns) && summary.columns.length > 0) {
-        updateData.detected_columns = summary.columns.filter((c: unknown) => typeof c === 'string');
-      }
+       if (Array.isArray(summary.columns) && summary.columns.length > 0) {
+         updateData.detected_columns = summary.columns.filter((c: string) => typeof c === "string");
+       }
 
-      if (summary.file_types && typeof summary.file_types === 'object') {
+      if (summary.file_types && typeof summary.file_types === "object") {
         const types = Object.keys(summary.file_types);
         if (types.length > 0) {
-          updateData.file_type = types[0].replace('.', '');
+          updateData.file_type = types[0].replace(".", "");
         }
       }
 
@@ -98,27 +87,33 @@ serve(async (req) => {
 
     updateData.metadata = scanMetadata;
 
-    console.log("[report_dataset_scan] update payload:", JSON.stringify(updateData));
+    console.log("[report_dataset_scan] Updating dataset:", dataset_id, "with data:", JSON.stringify(updateData));
 
-    console.log("[report_dataset_scan] executing dataset update...");
-    const { error: updateError } = await supabase
+    const { data, error: updateError } = await supabase
       .from("datasets")
       .update(updateData)
-      .eq("id", dataset_id);
-
-    console.log("[report_dataset_scan] update done, error:", updateError);
+      .eq("id", dataset_id)
+      .select();
 
     if (updateError) {
-      console.error("[report_dataset_scan] UPDATE ERROR:", updateError.message);
-      console.error("[report_dataset_scan] ERROR DETAILS:", JSON.stringify(updateError));
+      console.error("[report_dataset_scan] UPDATE ERROR:", updateError.message, updateError.details, updateError.hint);
       return jsonResponse({
         success: false,
         error: "Database update failed",
         details: updateError.message,
+        hint: updateError.hint,
+        code: updateError.code
       }, 500);
     }
 
-    console.log("[report_dataset_scan] metadata saved successfully");
+    if (!data || data.length === 0) {
+      return jsonResponse({
+        success: false,
+        error: "Dataset not found or update failed",
+        dataset_id: dataset_id
+      }, 404);
+    }
+
     return jsonResponse({
       success: true,
       dataset_id,
