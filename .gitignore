@@ -20,6 +20,10 @@ supabase/
 Supabase*.csv
 03_BINARY*
 
+# Allow specific supabase files
+!supabase/functions/create-user/index.ts
+!supabase/functions/register_plugin/index.ts
+
 # Logs
 *.log
 
