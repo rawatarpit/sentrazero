@@ -19,13 +19,8 @@ sentra-agent*
 supabase/
 Supabase*.csv
 03_BINARY*
+*.sql
 
-# Allow specific supabase files
-!supabase/functions/create-user/index.ts
-!supabase/functions/register_plugin/index.ts
-!supabase/migrations/20260506091744_add_vault_secret_name_to_signing_keys.sql
-!supabase/migrations/20260506104424_add_get_vault_secret_function.sql
-!supabase/migrations/20260507060000_update_vault_secret_names.sql
 
 # Logs
 *.log
