@@ -146,26 +146,33 @@ serve(async (req)=>{
        if (!platformPubKey || !platformPrivKey) {
          throw new Error("PLATFORM_SIGNING_PUBLIC_KEY_B64 or PLATFORM_SIGNING_PRIVATE_KEY_B64 is not set.");
        }
-       // Store private key in Vault
-       const privKeySecretName = `org_${orgId}_ed25519_priv_${Date.now()}`;
-       const { error: vaultError } = await supabase.rpc("store_plugin_signing_key_to_vault", {
-         p_org_id: orgId,
-         p_private_key_b64: platformPrivKey,
-         p_secret_name: privKeySecretName
-       });
-       if (vaultError) {
-         throw new Error("[create-user] Failed to store private key in Vault: " + vaultError.message);
-       }
-       // Insert signing key with vault reference
-       const keyRes = await supabase.from("plugin_signing_keys").insert({
-         org_id: orgId,
-         public_key: platformPubKey,
-         algorithm: "ed25519",
-         vault_secret_name: privKeySecretName
-       });
-       if (keyRes.error) {
-         throw new Error("[create-user] Failed to insert signing key: " + keyRes.error.message);
-       }
+        // Store private key in Vault
+        const privKeySecretName = `org_${orgId}_ed25519_priv_${Date.now()}`;
+        console.log("[create-user] Storing private key in Vault with name:", privKeySecretName);
+        const { data: vaultResult, error: vaultError } = await supabase.rpc("store_plugin_signing_key_to_vault", {
+          p_org_id: orgId,
+          p_private_key_b64: platformPrivKey,
+          p_secret_name: privKeySecretName
+        });
+        if (vaultError) {
+          console.error("[create-user] Vault storage failed:", vaultError);
+          throw new Error("[create-user] Failed to store private key in Vault: " + vaultError.message);
+        }
+        console.log("[create-user] Vault storage result:", JSON.stringify(vaultResult));
+        console.log("[create-user] About to insert signing key with vault_secret_name:", privKeySecretName);
+        // Insert signing key with vault reference
+        console.log("[create-user] Inserting signing key with vault_secret_name:", privKeySecretName);
+        const keyRes = await supabase.from("plugin_signing_keys").insert({
+          org_id: orgId,
+          public_key: platformPubKey,
+          algorithm: "ed25519",
+          vault_secret_name: privKeySecretName
+        });
+        if (keyRes.error) {
+          console.error("[create-user] Signing key insert error:", keyRes.error);
+          throw new Error("[create-user] Failed to insert signing key: " + keyRes.error.message);
+        }
+        console.log("[create-user] Signing key inserted successfully");
       console.log("[create-user] org + claim code created " + orgId);
       return new Response(JSON.stringify({
         user_id: userId,

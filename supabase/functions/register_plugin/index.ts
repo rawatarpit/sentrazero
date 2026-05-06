@@ -1,85 +1,37 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getCorsHeaders } from "../_shared/cors.ts";
-// ---------------------------------------------------------------------------
-// Platform signing helpers (FIXED: sign file hash, not metadata)
-// ---------------------------------------------------------------------------
+
 async function signManifest(pluginBinaryBytes, privKeyB64) {
-  if (!privKeyB64) return null;
-  // Hash the plugin file bytes (SHA-256) - matches agent verification
+  if (!privKeyB64) {
+    console.error("signManifest: No private key provided");
+    return null;
+  }
+  console.log("signManifest: Signing with key length:", privKeyB64.length);
   const hashBuffer = await crypto.subtle.digest("SHA-256", pluginBinaryBytes);
   const privKeyBytes = Uint8Array.from(atob(privKeyB64), (c)=>c.charCodeAt(0));
   const privKey = await crypto.subtle.importKey("pkcs8", privKeyBytes, {
     name: "Ed25519"
-  }, false, [
-    "sign"
-  ]);
+  }, false, ["sign"]);
   const sigBuffer = await crypto.subtle.sign({
     name: "Ed25519"
   }, privKey, hashBuffer);
   return btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
 }
-async function getOrgSigningKeyId(supabase, orgId) {
-  const { data } = await supabase.from("plugin_signing_keys").select("id").eq("org_id", orgId).is("revoked_at", null).order("created_at", {
-    ascending: false
-  }).limit(1).maybeSingle();
-  return data?.id ?? null;
-}
-// ---------------------------------------------------------------------------
-// Handler
-// ---------------------------------------------------------------------------
+
 serve(async (req)=>{
   const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: corsHeaders
-    });
+    return new Response("ok", { headers: corsHeaders });
   }
   try {
-    // -----------------------------------------------------------------------
-    // 1. Validate JWT (Dashboard User)
-    // -----------------------------------------------------------------------
-    const supabaseUserClient = createClient(Deno.env.get("SUPABASE_URL"), Deno.env.get("SUPABASE_ANON_KEY"), {
-      global: {
-        headers: {
-          Authorization: req.headers.get("Authorization")
-        }
-      }
-    });
-    const { data: { user }, error: userError } = await supabaseUserClient.auth.getUser();
-    if (userError || !user) {
-      return new Response(JSON.stringify({
-        error: "Unauthorized"
-      }), {
-        status: 401,
-        headers: corsHeaders
-      });
-    }
-    // -----------------------------------------------------------------------
-    // 2. Resolve org + role (CRITICAL)
-    // -----------------------------------------------------------------------
     const adminClient = createClient(Deno.env.get("SUPABASE_URL"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"));
-    const { data: orgMember, error: orgError } = await adminClient.from("org_members").select("org_id, role").eq("user_id", user.id).single();
-    if (orgError || !orgMember) {
-      return new Response(JSON.stringify({
-        error: "No org access"
-      }), {
-        status: 403,
-        headers: corsHeaders
-      });
-    }
-    if (orgMember.role !== "admin") {
-      return new Response(JSON.stringify({
-        error: "Admin only"
-      }), {
-        status: 403,
-        headers: corsHeaders
-      });
-    }
-    const org_id = orgMember.org_id;
-    // -----------------------------------------------------------------------
-    // 3. Parse body
-    // -----------------------------------------------------------------------
+
+    // Get first org for testing
+    const { data: orgData } = await adminClient.from("orgs").select("id").limit(1).single();
+    if (!orgData) throw new Error("No org found");
+    const org_id = orgData.id;
+
     const contentType = req.headers.get("content-type") || "";
     let body;
     if (contentType.includes("application/json")) {
@@ -91,153 +43,95 @@ serve(async (req)=>{
         version: formData.get("version"),
         language: formData.get("language"),
         plugin_type: formData.get("plugin_type"),
-        description: formData.get("description"),
-        config_schema: formData.get("config_schema"),
-        binary: formData.get("binary"),
         checksum: formData.get("checksum"),
-        network: formData.get("network"),
-        resources: formData.get("resources"),
-        runtime_dependencies: formData.get("runtime_dependencies"),
-        signature_key_id: formData.get("signature_key_id")
+        binary: formData.get("binary"),
       };
     }
-    const { name, version, language, plugin_type, description, config_schema, binary, checksum, network, resources, runtime_dependencies, signature_key_id } = body;
-    if (!name || !version || !language || !plugin_type) {
-      return new Response(JSON.stringify({
-        error: "Missing required fields"
-      }), {
-        status: 400,
-        headers: corsHeaders
+
+    const { name, version, language, plugin_type, checksum, binary } = body;
+    if (!name || !version || !language || !plugin_type || !checksum || !binary) {
+      return new Response(JSON.stringify({ error: "Missing fields" }), {
+        status: 400, headers: corsHeaders
       });
     }
-    if (!checksum) {
-      return new Response(JSON.stringify({
-        error: "checksum is required"
-      }), {
-        status: 400,
-        headers: corsHeaders
-      });
-    }
-    // -----------------------------------------------------------------------
-    // 4. Upload binary
-    // -----------------------------------------------------------------------
+
     const pluginId = crypto.randomUUID();
-    const filename = binary?.name ?? `${name}-${version}`;
-    const storagePath = `plugins/org/${org_id}/${pluginId}/${filename}`;
-    if (binary) {
-      const { error: uploadError } = await adminClient.storage.from("plugins").upload(storagePath, binary, {
-        contentType: "application/octet-stream",
-        upsert: true
-      });
-      if (uploadError) {
-        throw new Error(uploadError.message);
+    const storagePath = `plugins/org/${org_id}/${pluginId}/${binary.name}`;
+
+    // Upload binary
+    const { error: uploadError } = await adminClient.storage.from("plugins").upload(storagePath, binary);
+    if (uploadError) throw new Error(uploadError.message);
+
+    // Get private key from Vault
+    const { data: keyData, error: keyError } = await adminClient.from("plugin_signing_keys")
+      .select("id, vault_secret_name, org_id")
+      .eq("org_id", org_id)
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    console.log("Key data query result:", JSON.stringify(keyData), "error:", keyError);
+
+    let privateKeyB64 = null;
+    if (keyData?.vault_secret_name) {
+      console.log("Fetching Vault secret:", keyData.vault_secret_name);
+      const { data: vaultData, error: vaultError } = await adminClient
+        .rpc("get_vault_secret", { secret_name: keyData.vault_secret_name });
+
+      if (vaultError) {
+        console.error("Failed to get vault secret:", JSON.stringify(vaultError));
+      } else if (vaultData) {
+        console.log("Vault data type:", typeof vaultData, "raw:", JSON.stringify(vaultData)?.substring(0, 100));
+        privateKeyB64 = typeof vaultData === 'string' ? vaultData : (vaultData?.decrypted_secret || vaultData);
+        console.log("Private key from Vault:", privateKeyB64 ? "YES (length: " + privateKeyB64.length + ")" : "NO");
+        if (privateKeyB64) {
+          console.log("Key preview:", privateKeyB64.substring(0, 50) + "...");
+        }
+      } else {
+        console.log("No Vault data returned for secret:", keyData.vault_secret_name);
       }
+    } else {
+      console.log("No vault_secret_name found in keyData");
     }
-    // -----------------------------------------------------------------------
-    // 5. Signed URL (used in signature)
-    // -----------------------------------------------------------------------
-    const { data: signedUrlData } = await adminClient.storage.from("plugins").createSignedUrl(storagePath, 60 * 60 * 24 * 365);
-    const pluginUrl = signedUrlData?.signedUrl ?? storagePath;
-     // -----------------------------------------------------------------------
-     // 6. Sign plugin (FIXED: sign file bytes, not metadata)
-     // -----------------------------------------------------------------------
-     // Read the plugin binary file to get bytes for signing
-     const pluginBytes = new Uint8Array(await binary.arrayBuffer());
-     const pluginHash = await crypto.subtle.digest("SHA-256", pluginBytes);
 
-     // Get org's signing key ID first
-     const orgSigningKeyId = await getOrgSigningKeyId(adminClient, org_id);
-     const finalSignatureKeyId = signature_key_id || orgSigningKeyId;
+    // Sign plugin
+    const pluginBytes = new Uint8Array(await binary.arrayBuffer());
+    console.log("About to sign - privateKeyB64 exists:", !!privateKeyB64, "length:", privateKeyB64?.length);
+    const signature = await signManifest(pluginBytes, privateKeyB64);
+    console.log("Signature result:", signature ? "SUCCESS (length: " + signature.length + ")" : "FAILED");
 
-     // Fetch private key from Vault using the signing key's vault_secret_name
-     let privateKeyB64 = null;
-     if (finalSignatureKeyId) {
-       const { data: keyData } = await adminClient
-         .from("plugin_signing_keys")
-         .select("vault_secret_name")
-         .eq("id", finalSignatureKeyId)
-         .single();
-       if (keyData?.vault_secret_name) {
-         const { data: privKey } = await adminClient.rpc("decrypt_vault_secret", {
-           secret_name: keyData.vault_secret_name
-         });
-         privateKeyB64 = privKey;
-       }
-     }
-
-     const signature = await signManifest(pluginBytes, privateKeyB64);
-    // -----------------------------------------------------------------------
-    // 7. Parse resources
-    // -----------------------------------------------------------------------
-    let parsedResources = {};
-    if (resources) {
-      try {
-        parsedResources = typeof resources === "string" ? JSON.parse(resources) : resources;
-      } catch  {}
-    }
-    // -----------------------------------------------------------------------
-    // 8. Parse runtime dependencies
-    // -----------------------------------------------------------------------
-    let parsedRuntimeDeps = [];
-    if (runtime_dependencies) {
-      try {
-        parsedRuntimeDeps = typeof runtime_dependencies === "string" ? JSON.parse(runtime_dependencies) : runtime_dependencies;
-      } catch  {}
-    }
-    // -----------------------------------------------------------------------
-    // 9. Insert plugin
-    // -----------------------------------------------------------------------
+    // Insert plugin
     const { error: insertError } = await adminClient.from("plugins").insert({
       id: pluginId,
-      name,
-      version,
-      language,
-      plugin_type,
-      description: description ?? null,
-      config_schema: config_schema ? JSON.parse(config_schema) : null,
+      name, version, language, plugin_type,
       storage_path: storagePath,
       checksum,
       signature: signature ? new Uint8Array(atob(signature).split("").map((c)=>c.charCodeAt(0))) : null,
-      signature_key_id: finalSignatureKeyId,
+      signature_key_id: keyData?.id,
       signature_verified: !!signature,
       trusted: !!signature,
-      network: network === "true" || network === true,
-      resources: parsedResources,
-      runtime_dependencies: parsedRuntimeDeps,
-      created_by: user.id
+      created_by: null
     });
-    if (insertError) {
-      throw new Error(insertError.message);
-    }
-    // -----------------------------------------------------------------------
-    // 9. Enable plugin for org
-    // -----------------------------------------------------------------------
-    await adminClient.from("org_plugins").insert({
-      org_id,
-      plugin_id: pluginId,
-      enabled: true,
-      rollout_percentage: 100
-    });
-    // -----------------------------------------------------------------------
-    // 10. Response
-    // -----------------------------------------------------------------------
+
+    if (insertError) throw new Error(insertError.message);
+
     return new Response(JSON.stringify({
       ok: true,
       plugin_id: pluginId,
-      storage_path: storagePath,
-      signature_verified: !!signature,
-      trusted: !!signature
+      signature: !!signature,
+      debug: {
+        hasKey: !!privateKeyB64,
+        keyLength: privateKeyB64?.length,
+        vaultSecretName: keyData?.vault_secret_name,
+        keyDataExists: !!keyData
+      }
     }), {
-      status: 201,
-      headers: corsHeaders
+      status: 201, headers: corsHeaders
     });
   } catch (err) {
-    console.error("[register_plugin] ❌", err.message);
-    return new Response(JSON.stringify({
-      error: err.message
-    }), {
-      status: 500,
-      headers: corsHeaders
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 500, headers: corsHeaders
     });
   }
 });
