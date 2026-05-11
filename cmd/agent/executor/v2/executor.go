@@ -166,6 +166,14 @@ func (e *Executor) ExecuteJob(ctx context.Context, job Job) (*Result, error) {
 		}, fmt.Errorf("plugin %s is not trusted", job.PluginID)
 	}
 
+	if job.PluginCode == "" {
+		return &Result{
+			Success:             false,
+			Error:               "plugin_code is empty — no code to execute in v2 runtime",
+			ErrorClassification: "system_error",
+		}, fmt.Errorf("plugin_code is empty — pipeline jobs should use native handler, not v2 executor")
+	}
+
 	e.state.mu.Lock()
 	e.state.runningJobs[job.ID] = &job
 	e.state.mu.Unlock()

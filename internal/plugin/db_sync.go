@@ -92,32 +92,32 @@ func ShouldRunPlugin(deviceID string, rolloutPercentage int) bool {
 	return (hashValue % 100) < rolloutPercentage
 }
 
-func SyncPluginsFromAPI(ctx context.Context) error {
+func SyncPluginsFromAPI(ctx context.Context) ([]DBPlugin, error) {
 	log.Printf("🔄 [plugin] Fetching plugins from database API...")
 
 	device, token, err := auth.LoadIdentity()
 	if err != nil {
-		return fmt.Errorf("failed to load device identity: %w", err)
+		return nil, fmt.Errorf("failed to load device identity: %w", err)
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
 	plugins, err := FetchPluginsFromAPI(ctx, device.DeviceID, device.OrgID, cfg.BackendURL, cfg.BackendAnonKey, token)
 	if err != nil {
-		return fmt.Errorf("failed to fetch plugins from API: %w", err)
+		return nil, fmt.Errorf("failed to fetch plugins from API: %w", err)
 	}
 
 	if len(plugins) == 0 {
 		log.Println("ℹ️  No plugins returned from API.")
-		return nil
+		return plugins, nil
 	}
 
 	dir, err := EnsurePluginDir()
 	if err != nil {
-		return fmt.Errorf("EnsurePluginDir failed: %w", err)
+		return plugins, fmt.Errorf("EnsurePluginDir failed: %w", err)
 	}
 
 	downloaded := 0
@@ -214,7 +214,7 @@ func SyncPluginsFromAPI(ctx context.Context) error {
 	}
 
 	log.Printf("📦 Plugin sync complete: %d downloaded, %d skipped, %d total", downloaded, skipped, len(plugins))
-	return nil
+	return plugins, nil
 }
 
 func loadConfig() (*Config, error) {

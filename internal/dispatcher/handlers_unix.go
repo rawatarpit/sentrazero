@@ -19,6 +19,8 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 
+	executorv2 "sentra-agent/cmd/agent/executor/v2"
+	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
 	"sentra-agent/internal/auth"
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
@@ -564,18 +566,31 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	inputPath := processPayload.InputPath
 	outputPath := processPayload.OutputPath
 
+	stepIndex := job.StepIndex
+
 	if storageMode == "shared_mount" {
 		mountBasePath := deriveMountBasePath(storageMode)
 		if inputPath == "" && datasetID != "" {
-			inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+			if stepIndex > 0 {
+				// Chain from previous step's output
+				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "results", fmt.Sprintf("chunk_%d.out", chunkIndex))
+			} else {
+				// First step: read from chunks
+				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+			}
 		}
 		if outputPath == "" && datasetID != "" {
 			outputPath = filepath.Join(mountBasePath, "datasets", datasetID, "results", fmt.Sprintf("chunk_%d.out", chunkIndex))
 		}
 	} else {
-		objReader, err := backend.ReadObject(ctx, chunkKey)
+		// S3/object storage: download input based on step index
+		inputKey := chunkKey
+		if stepIndex > 0 {
+			inputKey = resultKey
+		}
+		objReader, err := backend.ReadObject(ctx, inputKey)
 		if err != nil {
-			return fmt.Errorf("failed to read chunk: %w", err)
+			return fmt.Errorf("failed to read input object: %w", err)
 		}
 		defer objReader.Close()
 
@@ -600,9 +615,13 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("could not derive output_path")
 	}
 
-	pluginName := job.PluginName
+	pluginName := ResolvePluginName(job.PluginID, job.PluginName)
 	if pluginName == "" {
-		pluginName = "plugin_process_chunk"
+		obs.Warn("no plugin name or ID in job payload — agent cannot load plugin", obs.Field{
+			"job_id":    job.ID,
+			"plugin_id": job.PluginID,
+		})
+		return fmt.Errorf("no plugin_id in job payload — cannot determine which plugin to execute")
 	}
 
 	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
@@ -633,12 +652,26 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	env := system.DetectExecutionEnv()
 	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
 	if err != nil {
-		return fmt.Errorf("process plugin failed: %w", err)
+		// If Docker is unavailable and this is a script plugin, fall back to v2 runtime
+		if strings.Contains(err.Error(), "Docker") || strings.Contains(err.Error(), "docker") {
+			obs.Info("docker sandbox unavailable, falling back to v2 runtime", obs.Field{
+				"plugin": manifest.Name,
+				"error":  err.Error(),
+			})
+			execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, &processPayload, &job)
+			if err != nil {
+				return fmt.Errorf("process plugin failed (native+v2 fallback): %w", err)
+			}
+		} else {
+			return fmt.Errorf("process plugin failed: %w", err)
+		}
 	}
 
 	var result map[string]any
-	if err := json.Unmarshal([]byte(execResult.Output), &result); err != nil {
-		return fmt.Errorf("failed to parse process plugin output: %w", err)
+	if execResult != nil && execResult.Output != "" {
+		if err := json.Unmarshal([]byte(execResult.Output), &result); err != nil {
+			return fmt.Errorf("failed to parse process plugin output: %w", err)
+		}
 	}
 
 	if storageMode != "shared_mount" {
@@ -812,9 +845,9 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 		}
 	}
 
-	pluginName := job.PluginName
+	pluginName := ResolvePluginName(job.PluginID, job.PluginName)
 	if pluginName == "" {
-		pluginName = "plugin_ingest_dataset"
+		return fmt.Errorf("no plugin_id in job payload — cannot determine which plugin to execute for ingestion")
 	}
 
 	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
@@ -1418,4 +1451,86 @@ func estimateTotalRows(filePath string, sampleRowCount int) int {
 	}
 
 	return int(info.Size() / avgRowSize)
+}
+
+// fallbackToV2Runtime is used when the Docker sandbox is unavailable for script plugins.
+// It reads the cached plugin file and executes it via the v2 runtime (venv/npm).
+func fallbackToV2Runtime(
+	ctx context.Context,
+	pluginPath string,
+	manifest plugin.Manifest,
+	processPayload *ProcessPayload,
+	job *Job,
+) (*plugin.ExecutionResult, error) {
+	// Read plugin code from cached file
+	pluginCode, err := os.ReadFile(pluginPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read plugin file for v2 fallback: %w", err)
+	}
+
+	// Map manifest language to v2 runtime type
+	var rtType runtimev2.RuntimeType
+	switch manifest.Language {
+	case "python", "python3", "python2":
+		rtType = runtimev2.RuntimePython
+	case "node", "nodejs", "javascript", "typescript":
+		rtType = runtimev2.RuntimeNode
+	default:
+		return nil, fmt.Errorf("v2 fallback: unsupported language %q", manifest.Language)
+	}
+
+	// Build v2 executor job
+	payloadMap := make(map[string]interface{})
+	if processPayload != nil {
+		payloadMap["dataset_id"] = processPayload.DatasetID
+		payloadMap["chunk_id"] = processPayload.ChunkID
+		payloadMap["chunk_index"] = processPayload.ChunkIndex
+		payloadMap["input_path"] = processPayload.InputPath
+		payloadMap["output_path"] = processPayload.OutputPath
+	}
+
+	v2Job := executorv2.Job{
+		ID:               job.ID,
+		Type:             job.Type,
+		Payload:          payloadMap,
+		PluginID:         job.PluginID,
+		PluginCode:       string(pluginCode),
+		RuntimeType:      string(rtType),
+		ExecutionID:      job.ExecutionID,
+		ExecutionStepID:  job.ExecutionStepID,
+		OrgID:            job.OrgID,
+		TimeoutSeconds:   300,
+		Trusted:          manifest.Trusted,
+	}
+
+	obs.Info("falling back to v2 runtime", obs.Field{
+		"plugin":     manifest.Name,
+		"language":   manifest.Language,
+		"runtime":    rtType,
+		"plugin_id":  job.PluginID,
+	})
+
+	execResult, err := executorInstance.ExecuteJob(ctx, v2Job)
+	if err != nil {
+		return nil, err
+	}
+	if !execResult.Success {
+		errMsg := execResult.Error
+		if errMsg == "" {
+			errMsg = "v2 fallback execution returned failure"
+		}
+		return nil, fmt.Errorf("v2 fallback: %s", errMsg)
+	}
+
+	// Marshal v2 result data back to JSON string for plugin.ExecutionResult
+	outputJSON := ""
+	if execResult.Data != nil {
+		dataBytes, _ := json.Marshal(execResult.Data)
+		outputJSON = string(dataBytes)
+	}
+
+	return &plugin.ExecutionResult{
+		Output:     outputJSON,
+		DurationMs: execResult.DurationMs,
+	}, nil
 }

@@ -240,9 +240,11 @@ func main() {
 	// ---------------------------------------------------------------------
 
 	log.Println("🔄 Syncing plugins from API...")
-	if err := plugin.SyncPluginsFromAPI(ctx); err != nil {
+	if syncedPlugins, err := plugin.SyncPluginsFromAPI(ctx); err != nil {
 		// Non-fatal: agent can still run builtins
 		log.Printf("⚠️ Plugin sync failed (non-fatal): %v", err)
+	} else {
+		dispatcher.PopulatePluginIDMap(syncedPlugins)
 	}
 
 	// ---------------------------------------------------------------------

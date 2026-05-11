@@ -46,6 +46,11 @@ func extractJobMeta(payload json.RawMessage, envelopeJobType ...string) (*JobMet
 		return nil, errors.New("invalid JSON payload - job cannot be parsed")
 	}
 
+	// Parse payload into meta to extract ChunkID and DatasetID
+	if err := json.Unmarshal(payload, &meta); err != nil {
+		return nil, fmt.Errorf("failed to parse job payload: %w", err)
+	}
+
 	if meta.JobType == "" {
 		if len(envelopeJobType) > 0 && envelopeJobType[0] != "" {
 			meta.JobType = envelopeJobType[0]
@@ -253,12 +258,28 @@ func ExecuteJob(
 		return executeMergeDataset(ctx, payload)
 	}
 
+	// Route process jobs through native handler when they have chunk-level fields
+	// and no inline plugin_code — these are pipeline chunk jobs that use cached plugins
+	if meta.JobType == "process" && fullJob.PluginCode == "" && (meta.ChunkID != "" || meta.DatasetID != "") {
+		obs.Info("routing process to native chunk handler", obs.Field{
+			"job_type":   meta.JobType,
+			"chunk_id":   meta.ChunkID,
+			"dataset_id": meta.DatasetID,
+			"plugin_id":  fullJob.PluginID,
+		})
+		return executeProcessChunk(ctx, payload)
+	}
+
 	result, err := executorInstance.ExecuteJob(ctx, execJob)
 	if err != nil {
 		return err
 	}
-	if !result.Success && result.Error != "" {
-		return fmt.Errorf("%s: %s", result.ErrorClassification, result.Error)
+	if !result.Success {
+		errMsg := result.Error
+		if errMsg == "" {
+			errMsg = "plugin execution returned failure without error details"
+		}
+		return fmt.Errorf("%s: %s", result.ErrorClassification, errMsg)
 	}
 	return nil
 }
