@@ -4,6 +4,16 @@ import { getCorsHeaders } from "../_shared/cors.ts";
 import { authenticateDeviceWithDetails } from "../_shared/auth.ts";
 const MAX_CHUNK_COUNT_THRESHOLD = 200;
 const DATASET_SIZE_GB_THRESHOLD = 50;
+async function getOrgIdFromRequest(req, supabase) {
+  const relayKey = req.headers.get("x-relay-key");
+  if (relayKey && relayKey === Deno.env.get("RELAY_WEBHOOK_SECRET")) {
+    const orgId = req.headers.get("x-org-id");
+    if (orgId) return orgId;
+    const { data: orgs } = await supabase.from("orgs").select("id").limit(1).single();
+    return orgs?.id ?? null;
+  }
+  return null;
+}
 serve(async (req)=>{
   const corsHeaders = getCorsHeaders(req);
   const origin = req.headers.get("origin");
@@ -21,23 +31,26 @@ serve(async (req)=>{
       headers: corsHeaders
     });
   }
-  const authResult = await authenticateDeviceWithDetails(req, "id, org_id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency");
-  if (!authResult.device) {
-    return new Response(JSON.stringify({
-      error: authResult.error
-    }), {
-      status: 401,
-      headers: corsHeaders
-    });
-  }
   const supabase = createClient(Deno.env.get("SUPABASE_URL"), Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"));
+  let orgId = await getOrgIdFromRequest(req, supabase);
+  if (!orgId) {
+    const authResult = await authenticateDeviceWithDetails(req, "id, org_id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency");
+    if (!authResult.device) {
+      return new Response(JSON.stringify({
+        error: authResult.error
+      }), {
+        status: 401,
+        headers: corsHeaders
+      });
+    }
+    orgId = authResult.device.org_id;
+  }
   try {
     const body = await req.json();
     const { dataset_id } = body;
     if (!dataset_id) {
       throw new Error("dataset_id is required");
     }
-    const orgId = authResult.device.org_id;
     const { data: dataset, error: datasetError } = await supabase.from("datasets").select(`
         id,
         name,
@@ -70,8 +83,20 @@ serve(async (req)=>{
       ascending: true
     });
     if (chunksError) throw chunksError;
-    const activeChunks = (chunks || []).filter((c)=>c.status === "completed" && !c.merged_in);
+    const activeChunks = (chunks || []).filter((c)=>c.status === "processed" && !c.merged_in);
     if (activeChunks.length === 0) {
+      const pendingChunks = (chunks || []).filter((c)=>c.status === "pending" && !c.merged_in);
+      if (pendingChunks.length > 0) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: "No completed chunks available for merge. " + pendingChunks.length + " chunks still pending."
+        }), {
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders
+          }
+        });
+      }
       return new Response(JSON.stringify({
         ok: false,
         error: "No completed chunks available for merge"
@@ -84,34 +109,45 @@ serve(async (req)=>{
     }
     const totalSizeGB = dataset.total_size_gb || activeChunks.reduce((sum, c)=>sum + (c.chunk_size_gb || 0), 0);
     const useTreeMerge = activeChunks.length > MAX_CHUNK_COUNT_THRESHOLD || totalSizeGB > DATASET_SIZE_GB_THRESHOLD;
-    let targetDevice = authResult.device;
-    if (dataset.affinity_device_id && dataset.affinity_device_id !== targetDevice.id) {
-      const { data: affinityDevice, error: affinityError } = await supabase.from("devices").select("id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency").eq("id", dataset.affinity_device_id).eq("merge_capable", true).eq("status", "online").maybeSingle();
-      if (!affinityError && affinityDevice) {
-        targetDevice = affinityDevice;
-      }
+    let targetDevice = {
+      id: "",
+      name: "",
+      merge_capable: true,
+      status: "online",
+      org_id: orgId
+    };
+    if (dataset.affinity_device_id) {
+      const { data: affinityDevice } = await supabase.from("devices").select("id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency").eq("id", dataset.affinity_device_id).eq("merge_capable", true).in("status", ["online", "available", "busy"]).maybeSingle();
+      if (affinityDevice) targetDevice = affinityDevice;
     }
     const VALID_MERGE_STATUSES = [
       "online",
-      "available"
+      "available",
+      "busy"
     ];
-    if (!targetDevice.merge_capable || !VALID_MERGE_STATUSES.includes(targetDevice.status)) {
-      const { data: availableDevices, error: devicesError } = await supabase.from("devices").select("id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency").eq("org_id", orgId).eq("merge_capable", true).eq("status", "online").lt("active_workers", 1).order("memory_free_gb", {
+    if (!targetDevice.merge_capable || !VALID_MERGE_STATUSES.includes(targetDevice.status) || !targetDevice.id) {
+      const { data: availableDevices, error: devicesError } = await supabase.from("devices").select("id, name, merge_capable, status, memory_free_gb, active_workers, max_concurrency").eq("org_id", orgId).eq("merge_capable", true).in("status", [
+        "online",
+        "available",
+        "busy"
+      ]).order("memory_free_gb", {
         ascending: false
       }).limit(10);
       if (devicesError) throw devicesError;
       if (!availableDevices || availableDevices.length === 0) {
-        return new Response(JSON.stringify({
-          ok: false,
-          error: "No merge-capable devices available"
-        }), {
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders
-          }
-        });
+        console.log("[schedule_merge_job] No merge-capable devices found, using first available");
       }
-      targetDevice = availableDevices[0];
+      if (availableDevices && availableDevices.length > 0) {
+        targetDevice = availableDevices[0];
+      } else {
+        targetDevice = {
+          id: dataset.affinity_device_id || "",
+          name: "fallback",
+          merge_capable: true,
+          status: "online",
+          org_id: orgId
+        };
+      }
     }
     const { data: storageConfig } = await supabase.from("org_storage_configs").select("storage_mode").eq("org_id", orgId).eq("is_default", true).maybeSingle();
     const storageMode = storageConfig?.storage_mode ?? "shared_mount";

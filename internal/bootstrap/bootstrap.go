@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	agentconfig "sentra-agent/internal/config"
 	"sentra-agent/internal/obs"
 )
 
@@ -245,3 +246,83 @@ func totalMemoryGB() float64 {
 var (
 	_ = runtime.NumCPU
 )
+
+// RedisCache holds the cached Redis config fetched from the bootstrap edge function.
+type RedisCache struct {
+	RedisURL   string `json:"redis_url"`
+	RedisToken string `json:"redis_token"`
+	CachedAt   string `json:"cached_at"`
+}
+
+const redisCacheFile = "redis_cache.json"
+
+// FetchRedisConfig calls the bootstrap edge function (with device-token auth)
+// and caches the result locally. On subsequent calls the cached value is used.
+func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, redisToken string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("cannot find home dir: %w", err)
+	}
+
+	cachePath := filepath.Join(home, ".sentra", redisCacheFile)
+
+	// Try cache first
+	if data, readErr := os.ReadFile(cachePath); readErr == nil {
+		var cached RedisCache
+		if json.Unmarshal(data, &cached) == nil && cached.RedisURL != "" && cached.RedisToken != "" {
+			return cached.RedisURL, cached.RedisToken, nil
+		}
+	}
+
+	// No valid cache, call bootstrap edge function
+	if cfg.DeviceID == "" || cfg.Token == "" {
+		return "", "", nil // not yet claimed
+	}
+
+	bootstrapURL := fmt.Sprintf("%s/functions/v1/bootstrap", cfg.BackendURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bootstrapURL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("bootstrap request failed: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+cfg.BackendAnonKey)
+	req.Header.Set("x-agent-token", cfg.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", nil
+	}
+
+	var result struct {
+		RedisURL   string `json:"redis_url"`
+		RedisToken string `json:"redis_token"`
+	}
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
+		return "", "", nil
+	}
+
+	if result.RedisURL == "" || result.RedisToken == "" {
+		return "", "", nil
+	}
+
+	// Cache locally
+	cached := RedisCache{
+		RedisURL:   result.RedisURL,
+		RedisToken: result.RedisToken,
+		CachedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if data, marshalErr := json.MarshalIndent(cached, "", "  "); marshalErr == nil {
+		dir := filepath.Dir(cachePath)
+		if dirErr := os.MkdirAll(dir, 0700); dirErr == nil {
+			os.WriteFile(cachePath, data, 0600)
+		}
+	}
+
+	return result.RedisURL, result.RedisToken, nil
+}

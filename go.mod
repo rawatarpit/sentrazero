@@ -3,7 +3,6 @@ module sentra-agent
 go 1.25
 
 require (
-	github.com/gorilla/websocket v1.5.3
 	github.com/parquet-go/parquet-go v0.25.0
 	github.com/redis/go-redis/v9 v9.4.0
 	github.com/zalando/go-keyring v0.2.3

@@ -111,18 +111,26 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err e
 
 				log.Printf("⬆️ Updating plugin %s/%s → %s", pluginName, platformKey, remote.Version)
 
-				manifest := Manifest{
-					Name:           remote.Name,
-					Version:        remote.Version,
-					Filename:       filepath.Base(remote.StoragePath),
-					URL:            remote.SignedURL,
-					Checksum:       remote.Checksum,
-					PluginType:     remote.PluginType,
-					Language:       remote.Language,
-					Trusted:        remote.Trusted,
-					Signature:      remote.Signature,
-					SignatureKeyID: remote.SignatureKeyID,
+			manifest := Manifest{
+				Name:           remote.Name,
+				Version:        remote.Version,
+				Filename:       filepath.Base(remote.StoragePath),
+				URL:            remote.SignedURL,
+				Checksum:       remote.Checksum,
+				PluginType:     remote.PluginType,
+				Language:       remote.Language,
+				Trusted:        remote.Trusted,
+				Signature:      remote.Signature,
+				SignatureKeyID: remote.SignatureKeyID,
+				Network:        remote.Network,
+				Resources:      PluginResources{},
+			}
+
+			if len(remote.Resources) > 0 {
+				if err := json.Unmarshal(remote.Resources, &manifest.Resources); err != nil {
+					log.Printf("⚠️ Failed to parse resources for %s during auto-update: %v", remote.Name, err)
 				}
+			}
 
 				if err := downloadWithRetries(ctx, remote.SignedURL, binaryPath); err != nil {
 					log.Printf("⚠️ Failed to download plugin %s/%s: %v", pluginName, platformKey, err)

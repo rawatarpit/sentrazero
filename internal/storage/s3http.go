@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -56,9 +57,9 @@ func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials)
 		bucketName: bucketName,
 		endpoint:   endpoint,
 		host:     host,
-		accessKey: creds.AccessKeyID,
-		secretKey: creds.SecretAccessKey,
-		region:   region,
+		accessKey: strings.TrimSpace(creds.AccessKeyID),
+		secretKey: strings.TrimSpace(creds.SecretAccessKey),
+		region:   strings.TrimSpace(region),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: tr,
@@ -317,7 +318,37 @@ func (b *S3HTTPBackend) ReadObject(ctx context.Context, remotePath string) (io.R
 }
 
 func (b *S3HTTPBackend) WriteObject(ctx context.Context, remotePath string, reader io.Reader) error {
-	return fmt.Errorf("WriteObject not implemented")
+	log.Printf("[storage] S3HTTP WriteObject: %s", remotePath)
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read payload: %w", err)
+	}
+
+	urlStr := b.buildURL(remotePath)
+	req, err := http.NewRequest("PUT", urlStr, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	if err := b.signRequest(req); err != nil {
+		return err
+	}
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
 }
 
 func (b *S3HTTPBackend) StatObject(ctx context.Context, remotePath string) (ObjectInfo, error) {

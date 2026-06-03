@@ -16,6 +16,7 @@ import (
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dispatcher"
 	"sentra-agent/internal/obs"
+	agentredis "sentra-agent/internal/redis"
 )
 
 type RealtimeJobPayload struct {
@@ -31,6 +32,7 @@ type RealtimeJobPayload struct {
 	OrgID            string          `json:"org_id"`
 	DatasetID        string          `json:"dataset_id"`
 	ChunkIndex       int             `json:"chunk_index"`
+	StepIndex        int             `json:"step_index"`
 	RunID            string          `json:"run_id"`
 	AttemptNumber    int             `json:"attempt_number"`
 	RuntimeType      string          `json:"runtime_type"`
@@ -72,6 +74,7 @@ type PollingClient struct {
 	client      *http.Client
 	device      auth.Device
 	cfg         *config.Config
+	redisClient *agentredis.Client
 	ctx         context.Context
 	cancel      context.CancelFunc
 	mu          sync.RWMutex
@@ -93,11 +96,13 @@ func RunPollingClient(
 	device auth.Device,
 	cfg *config.Config,
 	deviceToken string,
+	redisClient *agentredis.Client,
 ) {
 	pollingOnce.Do(func() {
 		pollingClient = &PollingClient{
 			device:      device,
 			cfg:         cfg,
+			redisClient: redisClient,
 			baseURL:     cfg.BackendURL,
 			anonKey:     cfg.BackendAnonKey,
 			deviceToken: deviceToken,
@@ -277,14 +282,20 @@ func (p *PollingClient) fetchNewJobs() {
 		}
 
 		// ============================================================
-		// Duplicate detection
+		// Duplicate detection (Redis-backed when available)
 		// ============================================================
 		
-		if _, exists := p.sentJobs.Load(jobID); exists {
-			continue
+		if p.redisClient != nil {
+			added, err := p.redisClient.MarkJobProcessed(p.ctx, jobID, sentJobsTTL)
+			if err != nil || !added {
+				continue
+			}
+		} else {
+			if _, exists := p.sentJobs.Load(jobID); exists {
+				continue
+			}
+			p.sentJobs.Store(jobID, time.Now())
 		}
-
-		p.sentJobs.Store(jobID, time.Now())
 
 		log.Printf("[realtime] new job received: %s (type: %s)", jobID, job.JobType)
 
@@ -300,6 +311,23 @@ func (p *PollingClient) fetchNewJobs() {
 		)
 
 		traceID := obs.NewTraceID()
+
+		// Merge top-level runtime_dependencies into the inner payload so the
+		// v2 executor can find them when looking for "runtime_dependencies".
+		if len(job.RuntimeDeps) > 0 {
+			var payloadMap map[string]interface{}
+			if err := json.Unmarshal(payload, &payloadMap); err == nil {
+				if _, exists := payloadMap["runtime_dependencies"]; !exists {
+					var deps interface{}
+					if err := json.Unmarshal(job.RuntimeDeps, &deps); err == nil {
+						payloadMap["runtime_dependencies"] = deps
+						if merged, err := json.Marshal(payloadMap); err == nil {
+							payload = merged
+						}
+					}
+				}
+			}
+		}
 
 		// DEBUG: Log exact values being sent to dispatcher
 		log.Printf("[DEBUG] BEFORE dispatch → job_id=%s execution_id=%s job_type=%s payload_len=%d",
@@ -324,10 +352,6 @@ func (p *PollingClient) IsRunning() bool {
 	return p.running.Load()
 }
 
-func (p *PollingClient) MarkJobSent(jobID string) {
-	p.sentJobs.Store(jobID, time.Now())
-}
-
 func StopPollingClient() {
 	if pollingClient != nil && pollingClient.cancel != nil {
 		pollingClient.cancel()
@@ -337,15 +361,17 @@ func StopPollingClient() {
 const sentJobsTTL = 10 * time.Minute
 
 func CleanupOldJobs() {
-
 	if pollingClient == nil {
+		return
+	}
+
+	if pollingClient.redisClient != nil {
 		return
 	}
 
 	now := time.Now()
 
 	pollingClient.sentJobs.Range(func(key, value interface{}) bool {
-
 		jobID, ok := key.(string)
 		if !ok {
 			pollingClient.sentJobs.Delete(key)
@@ -364,23 +390,4 @@ func CleanupOldJobs() {
 
 		return true
 	})
-}
-
-type RealtimeClientConfig struct {
-	DeviceID     string
-	OrgID        string
-	BaseURL      string
-	AnonKey      string
-	PollInterval time.Duration
-}
-
-func DefaultRealtimeClientConfig(device auth.Device, cfg *config.Config) RealtimeClientConfig {
-
-	return RealtimeClientConfig{
-		DeviceID:     device.ID,
-		OrgID:        device.OrgID,
-		BaseURL:      cfg.BackendURL,
-		AnonKey:      cfg.BackendAnonKey,
-		PollInterval: 5 * time.Second,
-	}
 }

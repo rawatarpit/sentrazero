@@ -149,7 +149,8 @@ serve(async (req)=>{
           os: p.os,
           arch: p.arch,
           plugin_group: p.plugin_group,
-          network: p.network
+          network: p.network,
+          runtime_dependencies: p.runtime_dependencies
         });
       } catch (pluginError) {
         console.error("[list_plugins_for_org] plugin error:", p.name, pluginError);

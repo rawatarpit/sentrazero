@@ -3,6 +3,7 @@ package dispatcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,12 +75,12 @@ func TestSubmitJobWithMeta_DuplicateJobRejected(t *testing.T) {
 
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 
-	err := SubmitJobWithMeta("test", payload, "job-duplicate", "org-1", "trace-1", "", "")
+	err := SubmitJobWithMeta("test", payload, "job-duplicate", "org-1", "trace-1", "", "exec-duplicate")
 	if err != nil {
 		t.Fatalf("first submission failed: %v", err)
 	}
 
-	err = SubmitJobWithMeta("test", payload, "job-duplicate", "org-1", "trace-1", "", "")
+	err = SubmitJobWithMeta("test", payload, "job-duplicate", "org-1", "trace-1", "", "exec-duplicate")
 	if err == nil {
 		t.Error("expected error for duplicate job")
 	}
@@ -179,14 +180,14 @@ func TestSubmitJobWithMeta_QueueFullDrop(t *testing.T) {
 
 	for i := 0; i < DefaultQueueSize; i++ {
 		payload, _ := json.Marshal(map[string]int{"index": i})
-		err := SubmitJobWithMeta("test", payload, "", "org-1", "", "", "")
+		err := SubmitJobWithMeta("test", payload, fmt.Sprintf("job-%d", i), "org-1", "", "", "exec-queue")
 		if err != nil {
 			t.Fatalf("submission %d failed: %v", i, err)
 		}
 	}
 
 	payload, _ := json.Marshal(map[string]string{"overflow": "true"})
-	err := SubmitJobWithMeta("test", payload, "overflow-job", "org-1", "", "", "")
+	err := SubmitJobWithMeta("test", payload, "overflow-job", "org-1", "", "", "exec-queue")
 	if err == nil {
 		t.Error("expected error when queue full")
 	}
@@ -243,12 +244,12 @@ func TestExecutionStepDedup(t *testing.T) {
 
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 
-	err := SubmitJobWithMeta("test", payload, "step-job-1", "org-1", "trace-1", "step-dedup", "")
+	err := SubmitJobWithMeta("test", payload, "step-job-1", "org-1", "trace-1", "step-dedup", "exec-dedup")
 	if err != nil {
 		t.Fatalf("first submission failed: %v", err)
 	}
 
-	err = SubmitJobWithMeta("test", payload, "step-job-2", "org-1", "trace-2", "step-dedup", "")
+	err = SubmitJobWithMeta("test", payload, "step-job-2", "org-1", "trace-2", "step-dedup", "exec-dedup")
 	if err == nil {
 		t.Error("expected error for duplicate execution step")
 	}

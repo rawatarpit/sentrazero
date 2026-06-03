@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+import sys
+import json
+import os
+import re
+import logging
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+logger = logging.getLogger("scrape")
+
+DEFAULT_USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+DEFAULT_REQUEST_TIMEOUT: int = 30
+
+COLOR_NORMALIZATION_MAP: Dict[str, str] = {
+    "navy blue": "blue", "midnight black": "black",
+    "midnight": "black", "rose gold": "gold",
+}
+
+SIZE_PATTERNS: List[Tuple[re.Pattern, Any]] = [
+    (re.compile(r"(\d+\.?\d*)\s*(ml|millilitre)", re.I), lambda m: f"{float(m.group(1))/1000:.2f}L".replace(".00", "")),
+    (re.compile(r"(\d+\.?\d*)\s*(oz|ounce)", re.I), lambda m: f"{m.group(1)}oz"),
+    (re.compile(r"(\d+\.?\d*)\s*(lb|pound)", re.I), lambda m: f"{m.group(1)}lb"),
+]
+
+TITLE_SELECTORS: Dict[str, List[str]] = {
+    "walmart": ["h1", '[data-testid="product-title"]'],
+    "amazon": ["#productTitle"],
+}
+
+BRAND_SELECTORS: Dict[str, List[str]] = {
+    "walmart": ["a[data-testid='brand-name']", "span.brand"],
+    "amazon": ["a#bylineInfo"],
+}
+
+MOCK_ATTRIBUTES: Dict[str, Any] = {
+    "title": "Tai Pei Chicken Potstickers Frozen Asian Appetizers 46.5 oz",
+    "brand": "Tai Pei",
+    "size": "46.5oz",
+    "color": "",
+    "pack_count": 1,
+    "price": 12.99,
+}
+
+
+def load_job_input() -> Dict[str, Any]:
+    try:
+        return json.load(sys.stdin)
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON input: %s", e)
+        print(json.dumps({"success": False, "error": f"Invalid JSON input: {e}"}))
+        sys.exit(1)
+
+
+def load_dataframe(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        logger.error("Input file not found: %s", path)
+        print(json.dumps({"success": False, "error": f"Input file not found: {path}"}))
+        sys.exit(1)
+    try:
+        if p.suffix == ".csv":
+            return pd.read_csv(path)
+        elif p.suffix in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+        else:
+            logger.error("Unsupported file format: %s", p.suffix)
+            print(json.dumps({"success": False, "error": f"Unsupported file format: {p.suffix}"}))
+            sys.exit(1)
+    except Exception as e:
+        logger.error("Failed to read input: %s", e)
+        print(json.dumps({"success": False, "error": f"Failed to read input: {e}"}))
+        sys.exit(1)
+
+
+def output_result(result: Dict[str, Any]) -> None:
+    print(json.dumps(result))
+    sys.exit(0)
+
+
+def extract_title(soup: BeautifulSoup, platform: str) -> str:
+    selectors = TITLE_SELECTORS.get(platform, ["h1"])
+    for sel in selectors:
+        tag = soup.select_one(sel)
+        if tag:
+            return tag.get_text(strip=True)
+    return ""
+
+
+def extract_brand(soup: BeautifulSoup, platform: str) -> str:
+    selectors = BRAND_SELECTORS.get(platform, [])
+    for sel in selectors:
+        tag = soup.select_one(sel)
+        if tag:
+            return tag.get_text(strip=True).replace("Brand:", "").replace("by ", "").strip()
+    return ""
+
+
+def normalize_size(text: str) -> str:
+    if not text:
+        return ""
+    for pattern, fmt in SIZE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return fmt(m)
+    return ""
+
+
+def normalize_color(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.lower().strip()
+    for key, val in COLOR_NORMALIZATION_MAP.items():
+        if key in normalized:
+            return val
+    return normalized
+
+
+def extract_attributes(html: str, platform: str = "generic") -> Dict[str, Any]:
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+    title = extract_title(soup, platform)
+    return {
+        "title": title,
+        "brand": extract_brand(soup, platform),
+        "size": normalize_size(title),
+        "color": normalize_color(title),
+        "pack_count": 1,
+        "price": 0.0,
+    }
+
+
+def fetch_url(
+    url: str,
+    platform: str,
+    mock: bool,
+    user_agent: str,
+    timeout: int,
+    mock_attrs: Dict[str, Any],
+) -> Dict[str, Any]:
+    if mock:
+        logger.info("Mock mode: returning synthetic data for %s", url)
+        return {"success": True, "url": url, "attributes": dict(mock_attrs)}
+    try:
+        headers = {"User-Agent": user_agent, "Accept-Language": "en-US,en;q=0.9"}
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            logger.warning("HTTP %d for %s", resp.status_code, url)
+            return {"success": False, "url": url, "error": f"HTTP {resp.status_code}"}
+        attrs = extract_attributes(resp.text, platform)
+        return {"success": True, "url": url, "attributes": attrs}
+    except requests.RequestException as e:
+        logger.error("Request failed for %s: %s", url, e)
+        return {"success": False, "url": url, "error": str(e)}
+
+
+def _handle_scrape_mode(
+    df: pd.DataFrame,
+    input_path: str,
+    payload: Dict[str, Any],
+    user_agent: str,
+    timeout: int,
+    mock: bool,
+    mock_attrs: Dict[str, Any],
+) -> None:
+    url_columns: List[str] = payload.get("url_columns") or [payload.get("url_column", "url")]
+    platforms_map: Dict[str, str] = payload.get("platforms", {})
+    output_path: str = payload.get("output_path") or str(Path(input_path).with_name(f"{Path(input_path).stem}_scraped.csv"))
+    attribute_prefix: Optional[str] = payload.get("attribute_prefix")
+    prefix_per_column: Dict[str, str] = payload.get("attribute_prefix_per_column", {})
+
+    results: List[Dict[str, Any]] = []
+    success_count: int = 0
+    for _, row in df.iterrows():
+        entry: Dict[str, Any] = row.to_dict()
+        for col in url_columns:
+            url = str(row.get(col, ""))
+            platform = platforms_map.get(col, "generic")
+            prefix = prefix_per_column.get(col) or attribute_prefix or col
+            if not url.startswith("http"):
+                entry[f"{col}_success"] = False
+                entry[f"{prefix}_attributes_json"] = "{}"
+            else:
+                result = fetch_url(url, platform, mock, user_agent, timeout, mock_attrs)
+                is_ok = result.get("success", False)
+                entry[f"{col}_success"] = is_ok
+                if is_ok:
+                    success_count += 1
+                attrs = result.get("attributes", {})
+                entry[f"{prefix}_attributes_json"] = json.dumps(attrs)
+                for attr_name, attr_value in attrs.items():
+                    entry[f"{prefix}_{attr_name}"] = attr_value
+        results.append(entry)
+
+    result_df = pd.DataFrame(results)
+    result_df.to_csv(output_path, index=False)
+    logger.info("Wrote %d scrape results to %s", len(results), output_path)
+
+    output_result({
+        "success": True,
+        "data": {
+            "processed_rows": len(results),
+            "output_path": output_path,
+            "metadata": {
+                "mode": "scrape_urls",
+                "url_columns": url_columns,
+                "success_count": success_count,
+            },
+        },
+        "error": None,
+    })
+
+
+def main() -> None:
+    input_data = load_job_input()
+    payload = input_data.get("payload", {})
+    input_path = payload.get("input_path")
+    if not input_path:
+        output_result({"success": False, "error": "Missing required payload field: input_path"})
+
+    user_agent: str = payload.get("user_agent", DEFAULT_USER_AGENT)
+    timeout: int = int(payload.get("request_timeout", DEFAULT_REQUEST_TIMEOUT))
+    mock: bool = bool(payload.get("mock_mode", os.environ.get("RISEOTB_MOCK_MODE", "false").lower() == "true"))
+    mock_attrs: Dict = payload.get("mock_attributes", MOCK_ATTRIBUTES)
+
+    logger.info("Loading data from %s", input_path)
+    df = load_dataframe(input_path)
+    logger.info("Loaded %d rows", len(df))
+
+    _handle_scrape_mode(df, input_path, payload, user_agent, timeout, mock, mock_attrs)
+
+
+if __name__ == "__main__":
+    main()

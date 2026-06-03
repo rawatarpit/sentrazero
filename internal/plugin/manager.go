@@ -18,6 +18,12 @@ import (
 )
 
 func verifyManifestSignatureFromEnv(manifest Manifest) error {
+	if manifest.Trusted && manifest.Signature == "" {
+		obs.Info("skipping signature verification for trusted plugin", obs.Field{
+			"plugin": manifest.Name,
+		})
+		return nil
+	}
 	if manifest.Signature == "" {
 		return fmt.Errorf("manifest signature is required but missing")
 	}
@@ -130,6 +136,8 @@ func verifyFileSHA256(path, expected string) error {
 		return fmt.Errorf("checksum is required but missing")
 	}
 
+	expectedHex := strings.TrimPrefix(expected, "sha256-")
+
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -142,7 +150,7 @@ func verifyFileSHA256(path, expected string) error {
 	}
 
 	got := hex.EncodeToString(h.Sum(nil))
-	if got != expected {
+	if got != expectedHex {
 		return fmt.Errorf("checksum mismatch: expected=%s got=%s", expected, got)
 	}
 	return nil
@@ -172,7 +180,15 @@ func LoadAndUpdatePlugin(
 
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return "", Manifest{}, fmt.Errorf("missing manifest for plugin %s", pluginName)
+		anyDir := filepath.Join(baseDir, pluginName, "any-any")
+		anyManifest := filepath.Join(anyDir, pluginName+".json")
+		if d, e2 := os.ReadFile(anyManifest); e2 == nil {
+			pluginDir = anyDir
+			manifestPath = anyManifest
+			data = d
+		} else {
+			return "", Manifest{}, fmt.Errorf("missing manifest for plugin %s (tried %s and %s)", pluginName, manifestPath, anyManifest)
+		}
 	}
 
 	var manifest Manifest

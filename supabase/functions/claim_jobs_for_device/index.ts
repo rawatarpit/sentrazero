@@ -39,7 +39,7 @@ serve(async (req)=>{
       }, 200, corsHeaders);
     }
     // Normalize the response to use field names that the agent expects
-    // Agent struct (ClaimedJob) expects: job_id, job_type, payload, execution_id
+    // Agent struct (ClaimedJob) expects: job_id, job_type, payload, execution_id, dataset_id, chunk_index, step_index
     const normalizedJobs = jobs.map((job)=>({
         job_id: job.job_id,
         job_type: job.job_type,
@@ -47,6 +47,7 @@ serve(async (req)=>{
         execution_id: job.exec_id,
         dataset_id: job.dataset_id,
         chunk_index: job.chunk_index,
+        step_index: job.step_index,
         lease_expires_at: job.lease_expires_at,
         is_reclaimed: job.is_reclaimed || false,
         retry_count: job.retry_count || 0

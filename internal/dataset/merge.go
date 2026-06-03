@@ -62,6 +62,7 @@ type ChunkInfo struct {
 
 type MergeConfig struct {
 	DatasetID         string        `json:"dataset_id"`
+	DatasetSlug       string        `json:"dataset_slug,omitempty"`
 	AffinityDeviceID  string        `json:"affinity_device_id"`
 	DeviceOutput      *DeviceOutput `json:"device_output"`
 	Chunks            []ChunkInfo   `json:"chunks"`
@@ -319,11 +320,15 @@ func planTreeMerge(chunks []ChunkInfo, outputDir string) [][]ChunkInfo {
 	return stages
 }
 
-func getOutputPath(deviceOutput *DeviceOutput, datasetID string) string {
+func getOutputPath(deviceOutput *DeviceOutput, datasetID, datasetSlug string) string {
 	if deviceOutput != nil && deviceOutput.File != "" {
 		return filepath.Join(deviceOutput.MountPath, deviceOutput.File)
 	}
-	filename := fmt.Sprintf("dataset_%s.merged", datasetID)
+	name := datasetID
+	if datasetSlug != "" {
+		name = datasetSlug
+	}
+	filename := fmt.Sprintf("%s.csv", name)
 	if deviceOutput != nil && deviceOutput.MountPath != "" {
 		return filepath.Join(deviceOutput.MountPath, filename)
 	}
@@ -427,7 +432,7 @@ func StreamMerge(ctx context.Context, config MergeConfig) (*MergeResult, error) 
 		return activeChunks[i].Index < activeChunks[j].Index
 	})
 
-	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID)
+	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID, config.DatasetSlug)
 	outputDir := filepath.Dir(outputPath)
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -700,7 +705,7 @@ func StreamMergeTree(ctx context.Context, config MergeConfig) (*MergeResult, err
 		"total_size_gb": totalSizeGB,
 	})
 
-	outputDir := filepath.Dir(getOutputPath(config.DeviceOutput, config.DatasetID))
+	outputDir := filepath.Dir(getOutputPath(config.DeviceOutput, config.DatasetID, config.DatasetSlug))
 	stages := planTreeMerge(config.Chunks, outputDir)
 
 	if len(stages) == 0 {
@@ -719,8 +724,13 @@ func StreamMergeTree(ctx context.Context, config MergeConfig) (*MergeResult, err
 
 		stageOutput := filepath.Join(outputDir, fmt.Sprintf("stage_%d_%s.partial", stageIdx, config.DatasetID))
 
+		stageSlug := config.DatasetID
+		if config.DatasetSlug != "" {
+			stageSlug = config.DatasetSlug
+		}
 		stageConfig := MergeConfig{
 			DatasetID:        fmt.Sprintf("%s_stage_%d", config.DatasetID, stageIdx),
+			DatasetSlug:      fmt.Sprintf("%s_stage_%d", stageSlug, stageIdx),
 			AffinityDeviceID: config.AffinityDeviceID,
 			DeviceOutput: &DeviceOutput{
 				DeviceID:  config.AffinityDeviceID,
@@ -755,6 +765,7 @@ func StreamMergeTree(ctx context.Context, config MergeConfig) (*MergeResult, err
 	if len(intermediateOutputs) > 1 {
 		stageConfig := MergeConfig{
 			DatasetID:        config.DatasetID,
+			DatasetSlug:      config.DatasetSlug,
 			AffinityDeviceID: config.AffinityDeviceID,
 			DeviceOutput:     config.DeviceOutput,
 			Chunks: func() []ChunkInfo {
@@ -790,7 +801,7 @@ func StreamMergeTree(ctx context.Context, config MergeConfig) (*MergeResult, err
 		finalOutput = finalResult.DeviceOutput.File
 	}
 
-	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID)
+	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID, config.DatasetSlug)
 	if finalOutput != outputPath {
 		finalPath := filepath.Join(outputDir, finalOutput)
 		if err := os.Rename(finalPath, outputPath); err != nil {

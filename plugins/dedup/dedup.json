@@ -1,0 +1,33 @@
+{
+  "name": "plugin_dedup",
+  "version": "1.0.0",
+  "filename": "dedup.py",
+  "checksum": "sha256-32da61e46f218e5afbff7cbb9367da844634e8d63d23465bb70095096265b575",
+  "trusted": true,
+  "language": "python",
+  "signature": "base64-ed25519-signature-here",
+  "signature_key_id": "key-dedup-001",
+  "plugin_type": "client",
+  "resources": {
+    "memory_mb": 512,
+    "cpu_seconds": 60,
+    "timeout_seconds": 300,
+    "cpu_limit": 1.0
+  },
+  "network": false,
+  "dependencies": {
+    "python": {"pandas": ">=1.3.0"},
+    "optional": {"rapidfuzz": ">=2.0.0"}
+  },
+  "configurable_fields": {
+    "match_fields": "Fields to match on (default: ['title', 'brand', 'upc'])",
+    "similarity_threshold": "Similarity threshold 0-1 (default: 0.9)",
+    "id_column": "Column containing product ID (default: product_id)",
+    "variant_fields": "Fields to check for variant detection (default: ['color','size','pack'])",
+    "variant_title_threshold": "Title similarity threshold for variant detection (default: 0.8)",
+    "field_mapping": "Dict mapping actual CSV column names to match_field names (e.g. {'walmart_title': 'title'})",
+    "pairs_output_path": "Optional path to write duplicate pair details as CSV",
+    "output_path": "Override output file path (auto-generated if omitted)"
+  },
+  "description": "Universal deduplication plugin - find duplicates based on configurable fields"
+}

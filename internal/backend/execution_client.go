@@ -29,6 +29,10 @@ type ExecutionClient struct {
 	httpc       *httpclient.Client
 }
 
+func (c *ExecutionClient) GetDeviceID() string {
+	return c.deviceID
+}
+
 func NewExecutionClient(baseURL, anonKey, deviceToken, deviceID, orgID string) *ExecutionClient {
 	return &ExecutionClient{
 		baseURL:     baseURL,
@@ -323,7 +327,8 @@ func (c *ExecutionClient) ReportJobStart(ctx context.Context, jobID string) erro
 }
 
 type StartJobResult struct {
-	Success   bool      `json:"success"`
+	Success   bool      `json:"success,omitempty"`
+	Ok        bool      `json:"ok,omitempty"`
 	JobID    string    `json:"job_id"`
 	Status   string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
@@ -336,7 +341,9 @@ func (c *ExecutionClient) StartJob(ctx context.Context, jobID string) (*StartJob
 	}
 	body, _ := json.Marshal(reqBody)
 
-	resp, err := c.httpc.Post(ctx, "/functions/v1/start_job", body)
+	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/start_job", body, func(r *http.Request) {
+		r.Header.Set("x-device-id", c.deviceID)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("start_job RPC failed: %w", err)
 	}

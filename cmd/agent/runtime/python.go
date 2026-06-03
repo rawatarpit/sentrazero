@@ -66,18 +66,29 @@ func (pr *PythonRuntime) Setup(ctx context.Context, spec RuntimeSpec) error {
 }
 
 func (pr *PythonRuntime) createVirtualEnv(ctx context.Context) error {
-	if _, err := os.Stat(pr.venvPath); err == nil {
-		return nil
+	cfgPath := filepath.Join(pr.venvPath, "pyvenv.cfg")
+
+	if _, err := os.Stat(cfgPath); err == nil {
+		data, err := os.ReadFile(cfgPath)
+		if err == nil && bytes.Contains(data, []byte("include-system-site-packages = true")) {
+			return nil
+		}
+		os.RemoveAll(pr.venvPath)
+	}
+
+	if err := os.MkdirAll(pr.venvPath, 0755); err != nil {
+		return fmt.Errorf("failed to create venv directory: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "python3", "-m", "venv", pr.venvPath)
+	cmd := exec.CommandContext(ctx, "python3", "-m", "venv", "--system-site-packages", "--without-pip", pr.venvPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		os.RemoveAll(pr.venvPath)
 		return fmt.Errorf("venv creation failed: %w", err)
 	}
 

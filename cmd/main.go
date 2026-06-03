@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -13,12 +14,14 @@ import (
 
 	"sentra-agent/internal/auth"
 	"sentra-agent/internal/backend"
+	"sentra-agent/internal/bootstrap"
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dispatcher"
 	"sentra-agent/internal/healthcheck"
 	"sentra-agent/internal/heartbeat"
 	"sentra-agent/internal/plugin"
 	"sentra-agent/internal/realtime"
+	agentredis "sentra-agent/internal/redis"
 	"sentra-agent/internal/startup"
 	"sentra-agent/internal/storage"
 )
@@ -129,6 +132,55 @@ func main() {
 	cfg.Token = token
 
 	log.Printf("🔐 Device ready: %s", cfg.DeviceID)
+
+	// ---------------------------------------------------------------------
+	// Redis (from bootstrap edge function, cached locally)
+	// ---------------------------------------------------------------------
+
+	var rdb *agentredis.Client
+	rURL, rToken, rErr := bootstrap.FetchRedisConfig(ctx, cfg)
+	if rErr == nil && rURL != "" && rToken != "" {
+		cfg.RedisURL = rURL
+		cfg.RedisToken = rToken
+
+		// Clean the URL — strip quotes and whitespace
+		rURL = strings.TrimSpace(rURL)
+		rURL = strings.Trim(rURL, `"'`)
+
+		// Extract hostname from URL (strip scheme, path, port)
+		host := rURL
+		if parsed, parseErr := url.Parse(rURL); parseErr == nil && parsed.Host != "" {
+			host = parsed.Host
+		} else {
+			host = strings.TrimPrefix(host, "https://")
+			host = strings.TrimPrefix(host, "http://")
+			host = strings.TrimPrefix(host, "tcp://")
+			host = strings.TrimPrefix(host, "rediss://")
+			host = strings.TrimPrefix(host, "redis://")
+			if idx := strings.Index(host, "/"); idx >= 0 {
+				host = host[:idx]
+			}
+		}
+		// Strip port if present — we'll add :6379 ourselves
+		if idx := strings.LastIndex(host, ":"); idx >= 0 {
+			host = host[:idx]
+		}
+
+		redisURL := &url.URL{
+			Scheme: "rediss",
+			User:   url.UserPassword("default", rToken),
+			Host:   host + ":6379",
+		}
+
+		var rInitErr error
+		rdb, rInitErr = agentredis.NewClientFromURL(redisURL.String())
+		if rInitErr != nil {
+			log.Printf("⚠️ Redis unavailable, using in-memory fallback: %v", rInitErr)
+			rdb = nil
+		} else {
+			log.Println("✅ Redis connected for job dedup")
+		}
+	}
 
 	// ---------------------------------------------------------------------
 	// Health check server (for cloud platform deployment)
@@ -327,62 +379,22 @@ func main() {
 	)
 
 	// ---------------------------------------------------------------------
-	// Availability + Realtime (WebSocket preferred, SSE as fallback)
+	// Availability + Polling (primary job delivery)
 	// ---------------------------------------------------------------------
 
 	go realtime.AnnounceAvailable(ctx, cfg)
 
-	preferredRealtime := os.Getenv("SENTRA_REALTIME_MODE")
-
-	// Default to WebSocket for lower latency; SSE available as fallback
-	if preferredRealtime == "sse" {
-		log.Println("[realtime] Using SSE for job notifications (SENTRA_REALTIME_MODE=sse)")
-		go realtime.RunSSEClient(
-			ctx,
-			auth.Device{
-				ID:    cfg.DeviceID,
-				OrgID: cfg.OrgID,
-				Token: cfg.Token,
-			},
-			cfg,
-		)
-	} else if preferredRealtime == "both" {
-		log.Println("[realtime] Using both WebSocket and SSE for job notifications (SENTRA_REALTIME_MODE=both)")
-		go realtime.RunRealtimeWS(ctx, auth.Device{
+	go realtime.RunPollingClient(
+		ctx,
+		auth.Device{
 			ID:    cfg.DeviceID,
 			OrgID: cfg.OrgID,
 			Token: cfg.Token,
-		}, cfg)
-		go realtime.RunSSEClient(
-			ctx,
-			auth.Device{
-				ID:    cfg.DeviceID,
-				OrgID: cfg.OrgID,
-				Token: cfg.Token,
-			},
-			cfg,
-		)
-	} else {
-		log.Println("[realtime] Using WebSocket for job notifications (preferred)")
-		// Start polling client alongside WebSocket to handle pending jobs
-		// WebSocket only receives jobs already assigned to this device
-		// Polling picks up new pending jobs
-		go realtime.RunPollingClient(
-			ctx,
-			auth.Device{
-				ID:    cfg.DeviceID,
-				OrgID: cfg.OrgID,
-				Token: cfg.Token,
-			},
-			cfg,
-			cfg.Token,
-		)
-		go realtime.RunRealtimeWS(ctx, auth.Device{
-			ID:    cfg.DeviceID,
-			OrgID: cfg.OrgID,
-			Token: cfg.Token,
-		}, cfg)
-	}
+		},
+		cfg,
+		cfg.Token,
+		rdb,
+	)
 
 	log.Printf(
 		"[system] Ready | Device=%s | Workers=%d",
@@ -457,5 +469,11 @@ func main() {
 	}
 
 	dispatcher.StopWorkerPool(shutdownCtx)
+
+	if rdb != nil {
+		log.Println("[system] Closing Redis connection")
+		rdb.Close()
+	}
+
 	log.Println("[system] Shutdown complete")
 }

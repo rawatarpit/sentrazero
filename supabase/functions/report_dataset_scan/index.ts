@@ -1,3 +1,4 @@
+// report_dataset_scan: receives scan results from agents
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { authenticateDeviceWithDetails } from "../_shared/auth.ts";
@@ -97,6 +98,34 @@ serve(async (req)=>{
         dataset_id: dataset_id
       }, 404);
     }
+    const { data: existingChunks } = await supabase.from("batch_chunks").select("id").eq("dataset_id", dataset_id).limit(1);
+    if (!existingChunks || existingChunks.length === 0) {
+      console.log("[report_dataset_scan] No chunks exist, triggering plan_dataset_chunks");
+      const { data: plugins } = await supabase.from("plugins").select("id, name").eq("trusted", true).limit(10);
+      const firstPluginId = plugins?.[0]?.id || "68ae2314-d0df-4c20-86c6-6d7552a30d4c";
+      const planRes = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/plan_dataset_chunks`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          dataset_id: dataset_id,
+          steps: [
+            {
+              type: "process",
+              plugin_id: firstPluginId,
+              config: {}
+            }
+          ],
+          step_index: 0
+        })
+      });
+      if (planRes.ok) {
+        console.log("[report_dataset_scan] Chunks created successfully");
+      } else {
+        console.error("[report_dataset_scan] plan_dataset_chunks failed:", await planRes.text());
+      }
+    }
     return jsonResponse({
       success: true,
       dataset_id,
@@ -104,10 +133,14 @@ serve(async (req)=>{
     });
   } catch (error) {
     console.error("[report_dataset_scan] FATAL:", error);
+    console.error("[report_dataset_scan] STACK:", error instanceof Error ? error.stack : "no stack");
+    console.error("[report_dataset_scan] SUPABASE_URL present:", !!Deno.env.get("SUPABASE_URL"));
+    console.error("[report_dataset_scan] SRK present:", !!Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"));
     return jsonResponse({
       success: false,
       error: "Internal server error",
-      details: String(error)
+      details: String(error),
+      stack: error instanceof Error ? error.stack : undefined
     }, 500);
   }
 });

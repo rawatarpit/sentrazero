@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -22,6 +23,7 @@ type Config struct {
 	Password string
 	DB       int
 	PoolSize int
+	UseTLS   bool
 }
 
 type JobQueue struct {
@@ -32,12 +34,38 @@ type JobQueue struct {
 }
 
 func NewClient(cfg *Config) (*Client, error) {
-	rdb := redis.NewClient(&redis.Options{
+	opts := &redis.Options{
 		Addr:     cfg.URL,
 		Password: cfg.Password,
 		DB:       cfg.DB,
 		PoolSize: cfg.PoolSize,
-	})
+	}
+	if cfg.UseTLS {
+		opts.TLSConfig = &tls.Config{}
+	}
+	rdb := redis.NewClient(opts)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		return nil, fmt.Errorf("redis connection failed: %w", err)
+	}
+
+	return &Client{
+		client:    rdb,
+		connected: true,
+	}, nil
+}
+
+// NewClientFromURL parses a Redis URL (redis:// or rediss://) and creates a client.
+// This handles the standard format: rediss://default:<password>@<host>:<port>/<db>
+func NewClientFromURL(redisURL string) (*Client, error) {
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Redis URL: %w", err)
+	}
+	rdb := redis.NewClient(opts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -226,4 +254,13 @@ func (c *Client) GetActiveWorkers(ctx context.Context) (map[string]interface{}, 
 
 func (c *Client) Del(ctx context.Context, keys ...string) error {
 	return c.client.Del(ctx, keys...).Err()
+}
+
+func (c *Client) MarkJobProcessed(ctx context.Context, jobID string, ttl time.Duration) (bool, error) {
+	return c.client.SetNX(ctx, "sentra:dedup:"+jobID, "1", ttl).Result()
+}
+
+func (c *Client) IsJobProcessed(ctx context.Context, jobID string) (bool, error) {
+	exists, err := c.client.Exists(ctx, "sentra:dedup:"+jobID).Result()
+	return exists == 1, err
 }

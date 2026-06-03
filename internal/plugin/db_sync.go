@@ -35,10 +35,11 @@ type DBPlugin struct {
 	Trusted           bool            `json:"trusted"`
 	RolloutPercentage int             `json:"rollout_percentage"`
 	SignedURL         string          `json:"signed_url"`
-	OS                string          `json:"os"`
-	Arch              string          `json:"arch"`
-	PluginGroup       string          `json:"plugin_group"`
-	Network           bool            `json:"network"`
+	OS                string              `json:"os"`
+	Arch              string              `json:"arch"`
+	PluginGroup       string              `json:"plugin_group"`
+	Network           bool                `json:"network"`
+	RuntimeDeps       json.RawMessage     `json:"runtime_dependencies"`
 }
 
 type PluginListResponse struct {
@@ -148,6 +149,21 @@ func SyncPluginsFromAPI(ctx context.Context) ([]DBPlugin, error) {
 			Resources:      PluginResources{},
 			Signature:      p.Signature,
 			SignatureKeyID: p.SignatureKeyID,
+		}
+
+		if len(p.RuntimeDeps) > 0 {
+			var deps []RuntimeDependency
+			if err := json.Unmarshal(p.RuntimeDeps, &deps); err == nil {
+				manifest.Dependencies = deps
+			} else {
+				var depMap map[string]string
+				if err := json.Unmarshal(p.RuntimeDeps, &depMap); err == nil {
+					for name, version := range depMap {
+						deps = append(deps, RuntimeDependency{Name: name, Version: version})
+					}
+					manifest.Dependencies = deps
+				}
+			}
 		}
 
 		if len(p.Resources) > 0 {

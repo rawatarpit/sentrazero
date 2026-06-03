@@ -1,8 +1,9 @@
 // supabase/functions/bootstrap/index.ts
 import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { timingSafeEqual, validateOrigin } from "../_shared/security.ts";
+import { validateOrigin } from "../_shared/security.ts";
 import { getCorsHeaders } from "../_shared/cors.ts";
+import { authenticateDevice } from "../_shared/auth.ts";
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 10;
 async function checkRateLimit(supabase, clientKey) {
@@ -48,16 +49,9 @@ serve(async (req)=>{
       headers: corsHeaders
     });
   }
-  const expectedToken = Deno.env.get("BOOTSTRAP_SECRET");
-  if (!expectedToken) {
-    console.error("BOOTSTRAP_SECRET missing");
-    return new Response("Server misconfigured", {
-      status: 500,
-      headers: corsHeaders
-    });
-  }
-  const bootstrapToken = req.headers.get("x-bootstrap-token");
-  if (!bootstrapToken || !await timingSafeEqual(bootstrapToken, expectedToken)) {
+  // Authenticate via device token
+  const authResult = await authenticateDevice(req);
+  if (authResult.error || !authResult.device) {
     return new Response(JSON.stringify({
       error: "Unauthorized"
     }), {
@@ -78,7 +72,9 @@ serve(async (req)=>{
   return new Response(JSON.stringify({
     backend_url: Deno.env.get("SUPABASE_URL"),
     anon_key: Deno.env.get("SUPABASE_ANON_KEY"),
-    environment: "prod"
+    environment: "prod",
+    redis_url: Deno.env.get("Redis_url"),
+    redis_token: Deno.env.get("Redis_token")
   }), {
     headers: {
       ...corsHeaders,

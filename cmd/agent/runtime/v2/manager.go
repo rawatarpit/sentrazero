@@ -42,6 +42,8 @@ type CachedEnvironment struct {
 	CreatedAt      time.Time
 	Platform       PlatformInfo
 	mu             sync.RWMutex
+	setupCh        chan struct{}
+	readych        chan struct{}
 }
 
 type PlatformInfo struct {
@@ -398,8 +400,14 @@ func (ep *EnvironmentPool) AcquireEnvironment(ctx context.Context, orgID string,
 	lockI, _ := ep.envLocks.LoadOrStore(key, &sync.Mutex{})
 	lock := lockI.(*sync.Mutex)
 	lock.Lock()
-	defer lock.Unlock()
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			lock.Unlock()
+		}
+	}()
 
+retry:
 	ep.mu.Lock()
 	if env, ok := ep.environments[key]; ok {
 		env.mu.Lock()
@@ -407,6 +415,25 @@ func (ep *EnvironmentPool) AcquireEnvironment(ctx context.Context, orgID string,
 			env.mu.Unlock()
 			ep.mu.Unlock()
 			goto createNew
+		}
+		if env.State == EnvStatePending {
+			readyCh := env.readych
+			env.mu.Unlock()
+			ep.mu.Unlock()
+			lock.Unlock()
+			lockHeld = false
+			select {
+			case <-readyCh:
+				lock.Lock()
+				lockHeld = true
+				goto retry
+			case <-time.After(120 * time.Second):
+				lock.Lock()
+				lockHeld = true
+				goto createNew
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 		if env.State == EnvStateReady || env.State == EnvStateWarm {
 			isValid := ep.isValidForRuntime(env.Path, rt)
@@ -479,6 +506,7 @@ createNew:
 		CreatedAt:      time.Now(),
 		LastUsed:       time.Now(),
 		Platform:       ep.platform,
+		readych:        make(chan struct{}),
 	}
 
 	ep.mu.Lock()
@@ -839,6 +867,9 @@ func (rm *RuntimeManager) ExecuteWithMetrics(ctx context.Context, spec RuntimeSp
 	}
 
 	rm.envPool.ReleaseEnvironment(env, keepWarm)
+
+	// Signal any waiters that the env is ready
+	close(env.readych)
 
 	go func() {
 		if env.UseCount >= 3 {

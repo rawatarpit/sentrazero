@@ -30,6 +30,16 @@ type Manifest struct {
 	Signature         string `json:"signature,omitempty"`        // Base64-encoded Ed25519/ECDSA signature
 	SignatureKeyID    string `json:"signature_key_id,omitempty"` // Key identifier for verification
 	SignatureVerified bool   `json:"signature_verified"`         // Set to true after successful verification
+
+	// Dependencies for v2 runtime (pip packages, etc.)
+	Dependencies []RuntimeDependency `json:"dependencies,omitempty"`
+}
+
+// RuntimeDependency describes a pip/npm dependency for the plugin.
+type RuntimeDependency struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	Source  string `json:"source,omitempty"`
 }
 
 // PluginResources defines hard execution limits.

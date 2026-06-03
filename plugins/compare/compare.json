@@ -1,0 +1,37 @@
+{
+  "name": "plugin_compare",
+  "version": "1.0.0",
+  "filename": "compare.py",
+  "checksum": "sha256-0ea6808ade62eb69d81eedba547be8422a73a33c70fea84b8af0ead746002277",
+  "trusted": true,
+  "language": "python",
+  "signature": "base64-ed25519-signature-here",
+  "signature_key_id": "key-compare-001",
+  "plugin_type": "client",
+  "resources": {
+    "memory_mb": 512,
+    "cpu_seconds": 120,
+    "timeout_seconds": 600,
+    "cpu_limit": 1.0
+  },
+  "network": true,
+  "dependencies": {
+    "python": {"pandas": ">=1.3.0"}
+  },
+  "configurable_fields": {
+    "url_column1": "First URL column to compare (default: walmart_url)",
+    "url_column2": "Second URL column to compare (default: comparison_url)",
+    "columns_to_compare": "Explicit list of two columns to compare",
+    "attributes_column1": "Column containing JSON attributes for product 1 (enables attribute comparison mode)",
+    "attributes_column2": "Column containing JSON attributes for product 2 (enables attribute comparison mode)",
+    "compare_method": "Comparison method: exact_match or similarity (default: similarity)",
+    "exact_match_threshold": "Confidence threshold for exact_match decision (default: 0.9)",
+    "probable_match_threshold": "Confidence threshold for probable_match decision (default: 0.7)",
+    "title_similarity_cutoff": "Title similarity threshold for string comparison (default: 0.8)",
+    "model_weight": "Weight contribution of model match (default: 0.4)",
+    "brand_weight": "Weight contribution of brand match (default: 0.3)",
+    "title_weight": "Weight contribution of title similarity (default: 0.2)",
+    "output_path": "Override output file path (auto-generated if omitted)"
+  },
+  "description": "Universal comparison plugin - compare any two URL columns"
+}

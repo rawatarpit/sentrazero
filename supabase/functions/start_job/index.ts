@@ -66,19 +66,13 @@ serve(async (req)=>{
     }
     const data = await response.json();
     console.log("[start_job] RPC success:", data);
-    if (!data || data.length === 0) {
-      return jsonResponse({
-        ok: true,
-        job_id: jobId,
-        status: "running"
-      });
-    }
+    // RPC returns single object, not array
     return jsonResponse({
-      ok: data[0].success !== false,
-      job_id: data[0].job_id || jobId,
-      status: data[0].status || "running",
-      started_at: data[0].started_at,
-      error: data[0].error
+      ok: data.success !== false,
+      job_id: data.job_id || jobId,
+      status: data.status || "running",
+      started_at: data.started_at,
+      error: data.error
     });
   } catch (error) {
     console.error("[start_job] FATAL:", error);

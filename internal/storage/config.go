@@ -438,16 +438,23 @@ func InvalidateBackend() {
 }
 
 func GetRemotePath(datasetID string, chunkIndex int, pathType string) string {
-	base := fmt.Sprintf("datasets/%s", datasetID)
+	return GetRemotePathWithSlug(datasetID, "", chunkIndex, pathType)
+}
+
+func GetRemotePathWithSlug(datasetID, datasetSlug string, chunkIndex int, pathType string) string {
+	base := datasetID
+	if datasetSlug != "" {
+		base = datasetSlug
+	}
 	switch pathType {
 	case "source":
 		return fmt.Sprintf("%s/source", base)
 	case "chunk":
 		return fmt.Sprintf("%s/chunks/chunk_%d.bin", base, chunkIndex)
 	case "result":
-		return fmt.Sprintf("%s/results/chunk_%d.out", base, chunkIndex)
+		return fmt.Sprintf("%s/chunks/chunk_%d.out", base, chunkIndex)
 	case "merged":
-		return fmt.Sprintf("%s/merged/dataset.parquet", base)
+		return fmt.Sprintf("%s.csv", base)
 	}
 	return ""
 }
@@ -468,14 +475,14 @@ func (s *StorageConfig) GetChunkPath(datasetID string, chunkIndex int) string {
 
 func (s *StorageConfig) GetResultPath(datasetID string, chunkIndex int) string {
 	if s.StorageMode == "shared_mount" {
-		return s.GetDatasetPath(datasetID) + "/results/chunk_" + strconv.Itoa(chunkIndex) + ".out"
+		return s.GetDatasetPath(datasetID) + "/chunks/chunk_" + strconv.Itoa(chunkIndex) + ".out"
 	}
 	return ""
 }
 
 func (s *StorageConfig) GetMergedPath(datasetID string) string {
 	if s.StorageMode == "shared_mount" {
-		return s.GetDatasetPath(datasetID) + "/merged/dataset.parquet"
+		return s.GetDatasetPath(datasetID) + "/" + datasetID + ".csv"
 	}
 	return ""
 }
@@ -750,7 +757,7 @@ func (c *StorageClient) GetResultPath(datasetID string, chunkIndex int) string {
 	}
 
 	if cfg.StorageMode == "shared_mount" && cfg.MountBasePath != "" {
-		return cfg.MountBasePath + "/datasets/" + datasetID + "/results/chunk_" + strconv.Itoa(chunkIndex) + ".out"
+		return cfg.MountBasePath + "/datasets/" + datasetID + "/chunks/chunk_" + strconv.Itoa(chunkIndex) + ".out"
 	}
 	return ""
 }
@@ -764,7 +771,7 @@ func (c *StorageClient) GetMergedPath(datasetID string) string {
 	}
 
 	if cfg.StorageMode == "shared_mount" && cfg.MountBasePath != "" {
-		return cfg.MountBasePath + "/datasets/" + datasetID + "/merged/dataset.parquet"
+		return cfg.MountBasePath + "/datasets/" + datasetID + "/" + datasetID + ".csv"
 	}
 	return ""
 }

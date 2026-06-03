@@ -136,7 +136,7 @@ func ResumeMergeFromRecovery(ctx context.Context, config MergeConfig) (*MergeRes
 		}
 	}
 
-	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID)
+	outputPath := getOutputPath(config.DeviceOutput, config.DatasetID, config.DatasetSlug)
 
 	if len(chunksToMerge) == 0 {
 		obs.Info("all chunks already merged, verifying output", obs.Field{

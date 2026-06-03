@@ -253,7 +253,7 @@ func executeJobSafe(id int, req jobRequest) {
 		// Transition job to running state in DB
 		if startResult, err := execClient.StartJob(ctx, req.jobID); err != nil {
 			log.Printf("[dispatcher] ⚠️ start_job failed: %v", err)
-		} else if !startResult.Success {
+		} else if !startResult.Success && !startResult.Ok {
 			log.Printf("[dispatcher] ⚠️ start_job returned false: %s", startResult.Error)
 		} else {
 			log.Printf("[dispatcher] ✅ job started: %s status=%s", req.jobID, startResult.Status)
@@ -302,21 +302,18 @@ func executeJobSafe(id int, req jobRequest) {
 		}
 	}
 
-	// ---- Extract execution_id from payload if not provided ----
-	// NOTE: This is a fallback - execution_id should already be validated at enqueue
-	if req.executionID == "" && len(req.payload) > 0 {
+	// ---- Extract execution_id from payload (overrides job-level value) ----
+	// The agent_job.execution_id may differ from the pipeline execution_id stored in the payload.
+	// Always prefer the payload's execution_id since it is the source of truth for pipeline flow.
+	if len(req.payload) > 0 {
 		var payload struct {
 			ExecutionID string `json:"execution_id"`
 		}
 		if err := json.Unmarshal(req.payload, &payload); err == nil && payload.ExecutionID != "" {
-			log.Printf("[DEBUG] extracted execution_id from payload: %s", payload.ExecutionID)
+			if payload.ExecutionID != req.executionID {
+				log.Printf("[DEBUG] overriding execution_id from payload: %s (was %s)", payload.ExecutionID, req.executionID)
+			}
 			req.executionID = payload.ExecutionID
-			obs.Debug("extracted execution_id from payload", obs.Field{
-				"job_id":       req.jobID,
-				"execution_id": req.executionID,
-			})
-		} else {
-			log.Printf("[DEBUG] failed to extract execution_id from payload or empty - payload=%s", string(req.payload))
 		}
 	}
 

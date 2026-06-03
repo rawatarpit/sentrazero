@@ -99,16 +99,6 @@ serve(async (req)=>{
         details: "Missing access_key_id or secret_access_key"
       });
     }
-    if (secret.provider !== "s3") {
-      console.error("[decrypt_vault_secret] stage: validation failed", {
-        provider: secret.provider
-      });
-      return response({
-        ok: false,
-        error: "UNSUPPORTED_PROVIDER",
-        details: "Only s3 provider supported"
-      });
-    }
     console.log("[decrypt_vault_secret] stage: complete", {
       provider: secret.provider
     });

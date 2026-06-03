@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,18 +89,29 @@ func (pr *PythonRuntime) Setup(ctx context.Context, spec RuntimeSpec, envPath st
 }
 
 func (pr *PythonRuntime) createVirtualEnv(ctx context.Context, pythonCmd string) error {
-	if _, err := os.Stat(pr.venvPath); err == nil {
-		return nil
+	cfgPath := filepath.Join(pr.venvPath, "pyvenv.cfg")
+
+	if _, err := os.Stat(cfgPath); err == nil {
+		data, err := os.ReadFile(cfgPath)
+		if err == nil && bytes.Contains(data, []byte("include-system-site-packages = true")) {
+			return nil
+		}
+		os.RemoveAll(pr.venvPath)
+	}
+
+	if err := os.MkdirAll(pr.venvPath, 0755); err != nil {
+		return fmt.Errorf("failed to create venv directory: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, pythonCmd, "-m", "venv", pr.venvPath)
+	cmd := exec.CommandContext(ctx, pythonCmd, "-m", "venv", "--system-site-packages", "--without-pip", pr.venvPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		os.RemoveAll(pr.venvPath)
 		return fmt.Errorf("venv creation failed: %w", err)
 	}
 
@@ -121,7 +133,14 @@ func (pr *PythonRuntime) InstallDeps(ctx context.Context, deps []Dependency, env
 	pipDeps := make([]string, len(deps))
 	for i, dep := range deps {
 		if dep.Version != "" {
-			pipDeps[i] = fmt.Sprintf("%s==%s", dep.Name, dep.Version)
+			if strings.HasPrefix(dep.Version, ">=") || strings.HasPrefix(dep.Version, "<=") ||
+				strings.HasPrefix(dep.Version, "==") || strings.HasPrefix(dep.Version, "!=") ||
+				strings.HasPrefix(dep.Version, "~=") || strings.HasPrefix(dep.Version, ">") ||
+				strings.HasPrefix(dep.Version, "<") {
+				pipDeps[i] = fmt.Sprintf("%s%s", dep.Name, dep.Version)
+			} else {
+				pipDeps[i] = fmt.Sprintf("%s==%s", dep.Name, dep.Version)
+			}
 		} else {
 			pipDeps[i] = dep.Name
 		}
@@ -206,6 +225,26 @@ func (pr *PythonRuntime) Run(ctx context.Context, input ExecutionInput, envPath 
 		"metadata": input.Metadata,
 	}
 
+	// Copy input data file to envPath so it's accessible to the plugin
+	if inputPath, ok := input.Input["input_path"].(string); ok && inputPath != "" {
+		chunkIdx := 0
+		if ci, ok := input.Input["chunk_index"].(float64); ok {
+			chunkIdx = int(ci)
+		}
+		localInputPath := filepath.Join(envPath, fmt.Sprintf("chunk_%d.bin", chunkIdx))
+		if _, err := os.Stat(inputPath); err == nil {
+			if copyErr := copyFile(inputPath, localInputPath); copyErr == nil {
+				input.Input["input_path"] = localInputPath
+				payload["input"] = input.Input
+			}
+		}
+		if outputPath, ok := input.Input["output_path"].(string); ok && outputPath != "" {
+			localOutputPath := filepath.Join(envPath, fmt.Sprintf("chunk_%d.out", chunkIdx))
+			input.Input["output_path"] = localOutputPath
+			payload["input"] = input.Input
+		}
+	}
+
 	inputFile := filepath.Join(envPath, "input.json")
 	if err := writeJSONFile(inputFile, payload); err != nil {
 		return &ExecutionOutput{
@@ -221,50 +260,91 @@ import json
 import sys
 import time
 import traceback
+import io
 
 start_time = time.time()
+
+result = {
+    "success": True,
+    "data": {},
+    "error": None,
+    "items_processed": 0,
+    "duration_ms": 0
+}
 
 try:
     with open("input.json", "r") as f:
         data = json.load(f)
-    
+
     input_data = data.get("input", {})
     config = data.get("config", {})
     metadata = data.get("metadata", {})
-    
-    result = {
-        "success": True,
-        "data": {},
-        "error": None,
-        "items_processed": 0,
-        "duration_ms": 0
-    }
-    
+
+    # Pipe input as stdin for Docker-style plugins
+    stdin_payload = {"payload": input_data} if input_data else {"payload": config}
+    sys.stdin = io.StringIO(json.dumps(stdin_payload))
+
     exec_globals = {
         "__name__": "__sentra_plugin__",
         "input": input_data,
         "config": config,
         "metadata": metadata,
     }
-    
+
     with open("plugin.py", "r") as f:
         plugin_code = f.read()
-    
-    exec(plugin_code, exec_globals)
-    
-    if "main" in exec_globals:
-        output = exec_globals["main"](input_data, config, metadata)
-        if isinstance(output, dict):
-            result["data"] = output
-            result["items_processed"] = output.get("items_processed", 0)
-        else:
-            result["data"] = {"result": output}
-    
+
+    # Capture stdout so plugins using output_result() + sys.exit work
+    stdout_capture = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = stdout_capture
+
+    try:
+        exec(plugin_code, exec_globals)
+        if "main" in exec_globals:
+            try:
+                output = exec_globals["main"]()
+            except TypeError:
+                output = exec_globals["main"](input_data, config, metadata)
+            if isinstance(output, dict):
+                result["data"] = output
+                result["items_processed"] = output.get("items_processed", 0)
+            elif output is not None:
+                result["data"] = {"result": output}
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            raise
+    finally:
+        sys.stdout = old_stdout
+
+    captured = stdout_capture.getvalue()
+    if not result["data"] and captured:
+        try:
+            result["data"] = json.loads(captured)
+        except json.JSONDecodeError:
+            result["data"] = {"raw_output": captured}
+
     result["duration_ms"] = int((time.time() - start_time) * 1000)
-    
+
     with open("output.json", "w") as f:
         json.dump(result, f)
-        
+
+except SystemExit as e:
+    code = e.code if e.code is not None else 0
+    if code == 0:
+        result["duration_ms"] = int((time.time() - start_time) * 1000)
+        with open("output.json", "w") as f:
+            json.dump(result, f)
+    else:
+        error_result = {
+            "success": False,
+            "data": {},
+            "error": f"plugin exited with code {code}",
+            "items_processed": 0,
+            "duration_ms": int((time.time() - start_time) * 1000)
+        }
+        with open("output.json", "w") as f:
+            json.dump(error_result, f)
 except Exception as e:
     error_result = {
         "success": False,
@@ -384,4 +464,21 @@ func writeJSONFile(path string, data interface{}) error {
 		return err
 	}
 	return os.WriteFile(path, content, 0644)
+}
+
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }

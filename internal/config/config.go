@@ -40,6 +40,10 @@ type Config struct {
 	DeviceID string
 	Token    string
 
+	// --- Redis ---
+	RedisURL   string
+	RedisToken string
+
 	// --- Concurrency ---
 	MaxConcurrency       int32
 	MaxConcurrencyAtomic atomic.Int32

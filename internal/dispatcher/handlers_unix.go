@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,6 +81,7 @@ type MergeChunk struct {
 
 type MergePayload struct {
 	DatasetID         string                `json:"dataset_id"`
+	DatasetSlug       string                `json:"dataset_slug,omitempty"`
 	AffinityDeviceID  string                `json:"affinity_device_id"`
 	DeviceOutput      *dataset.DeviceOutput `json:"device_output"`
 	Strategy          MergeStrategy         `json:"strategy"`
@@ -329,7 +331,13 @@ func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string
 	}
 
 	httpc := httpclient.NewClient(supabaseBaseURL, supabaseAnonKey, deviceToken)
-	resp, err := httpc.DoWithReq(ctx, "POST", "/functions/v1/report_dataset_scan", payloadBytes, nil)
+	resp, err := httpc.DoWithReq(ctx, "POST", "/functions/v1/report_dataset_scan", payloadBytes, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+supabaseAnonKey)
+		r.Header.Set("x-agent-token", deviceToken)
+		if execClient != nil {
+			r.Header.Set("x-device-id", execClient.GetDeviceID())
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("failed to call report_dataset_scan: %w", err)
 	}
@@ -364,66 +372,75 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 	if mergePayload.DatasetID == "" {
 		return errors.New("missing dataset_id")
 	}
-	if mergePayload.AffinityDeviceID == "" && mergePayload.DeviceOutput == nil {
+	if mergePayload.AffinityDeviceID == "" && mergePayload.DeviceOutput == nil && !mergePayload.IsPartial {
 		return errors.New("missing affinity_device_id or device_output")
 	}
-	if len(mergePayload.Chunks) == 0 {
+	if len(mergePayload.Chunks) == 0 && !mergePayload.IsPartial {
 		return errors.New("no chunks provided")
 	}
 
 	storageMode := string(mergePayload.Strategy)
 	backend := GetStorageBackend()
 
-	chunks := make([]dataset.ChunkInfo, 0, len(mergePayload.Chunks))
-	for _, chunk := range mergePayload.Chunks {
-		resolvedPath := chunk.Path
+	useS3Merge := backend != nil && storageMode != "shared_mount" && storageMode != "affinity"
 
-		switch mergePayload.Strategy {
-		case StrategyAffinity:
-			if !filepath.IsAbs(resolvedPath) {
-				return fmt.Errorf("affinity strategy requires absolute path for chunk %s", chunk.ChunkID)
-			}
-		case StrategySharedMount:
-			if !filepath.IsAbs(resolvedPath) && mergePayload.MountPath != "" {
-				resolvedPath = filepath.Join(mergePayload.MountPath, resolvedPath)
-			}
-		}
+	var chunks []dataset.ChunkInfo
 
-		info, err := os.Stat(resolvedPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				if mergePayload.IsPartial {
-					chunks = append(chunks, dataset.ChunkInfo{
-						ChunkID:   chunk.ChunkID,
-						Path:      resolvedPath,
-						Index:     len(chunks),
-						IsSkipped: true,
-					})
-					continue
+	if !useS3Merge {
+		// Local-file strategies (shared_mount / affinity): validate chunk files exist
+		chunks = make([]dataset.ChunkInfo, 0, len(mergePayload.Chunks))
+		for _, chunk := range mergePayload.Chunks {
+			resolvedPath := chunk.Path
+
+			switch mergePayload.Strategy {
+			case StrategyAffinity:
+				if !filepath.IsAbs(resolvedPath) {
+					return fmt.Errorf("affinity strategy requires absolute path for chunk %s", chunk.ChunkID)
 				}
-				return fmt.Errorf("missing chunk file (not declared as skipped): %s", resolvedPath)
+			case StrategySharedMount:
+				if !filepath.IsAbs(resolvedPath) && mergePayload.MountPath != "" {
+					resolvedPath = filepath.Join(mergePayload.MountPath, resolvedPath)
+				}
 			}
-			return fmt.Errorf("failed to access chunk file %s: %w", resolvedPath, err)
-		}
-		if info.IsDir() {
-			return fmt.Errorf("chunk path is a directory, expected file: %s", resolvedPath)
-		}
 
-		compressed := dataset.IsCompressed(resolvedPath)
-		chunks = append(chunks, dataset.ChunkInfo{
-			ChunkID:    chunk.ChunkID,
-			Path:       resolvedPath,
-			Index:      len(chunks),
-			SizeBytes:  info.Size(),
-			Compressed: compressed,
-			IsSkipped:  chunk.IsSkipped,
-		})
+			info, err := os.Stat(resolvedPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					if mergePayload.IsPartial {
+						chunks = append(chunks, dataset.ChunkInfo{
+							ChunkID:   chunk.ChunkID,
+							Path:      resolvedPath,
+							Index:     len(chunks),
+							IsSkipped: true,
+						})
+						continue
+					}
+					return fmt.Errorf("missing chunk file (not declared as skipped): %s", resolvedPath)
+				}
+				return fmt.Errorf("failed to access chunk file %s: %w", resolvedPath, err)
+			}
+			if info.IsDir() {
+				return fmt.Errorf("chunk path is a directory, expected file: %s", resolvedPath)
+			}
+
+			compressed := dataset.IsCompressed(resolvedPath)
+			chunks = append(chunks, dataset.ChunkInfo{
+				ChunkID:    chunk.ChunkID,
+				Path:       resolvedPath,
+				Index:      len(chunks),
+				SizeBytes:  info.Size(),
+				Compressed: compressed,
+				IsSkipped:  chunk.IsSkipped,
+			})
+		}
+		// (fall through to deviceOutput / local merge below)
 	}
 
-	if backend != nil && storageMode != "shared_mount" && storageMode != "affinity" {
+	if useS3Merge {
+		datasetSlug := mergePayload.DatasetSlug
 		chunkReaders := make([]io.Reader, 0, len(mergePayload.Chunks))
 		for _, chunk := range mergePayload.Chunks {
-			chunkKey := storage.GetRemotePath(mergePayload.DatasetID, chunk.ChunkIndex, "result")
+			chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, "result")
 			objReader, err := backend.ReadObject(ctx, chunkKey)
 			if err != nil {
 				return fmt.Errorf("failed to read chunk %s: %w", chunk.ChunkID, err)
@@ -432,7 +449,7 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 			chunkReaders = append(chunkReaders, objReader)
 		}
 
-		mergedKey := storage.GetRemotePath(mergePayload.DatasetID, 0, "merged")
+		mergedKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, 0, "merged")
 		mergedReader, err := dataset.MergeReaders(ctx, chunkReaders)
 		if err != nil {
 			return fmt.Errorf("failed to merge readers: %w", err)
@@ -440,6 +457,21 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 
 		if err := backend.WriteObject(ctx, mergedKey, mergedReader); err != nil {
 			return fmt.Errorf("failed to write merged result: %w", err)
+		}
+
+		// Clean up chunks after successful merge
+		if mergePayload.DeleteChunksAfter {
+			for _, chunk := range mergePayload.Chunks {
+				chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, "result")
+				if err := backend.DeleteObject(ctx, chunkKey); err != nil {
+					obs.Warn("failed to delete chunk after merge", obs.Field{
+						"chunk_key": chunkKey,
+						"error":     err.Error(),
+					})
+				} else {
+					obs.Info("deleted chunk after merge", obs.Field{"chunk_key": chunkKey})
+				}
+			}
 		}
 
 		return nil
@@ -459,6 +491,7 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 
 	mergeConfig := dataset.MergeConfig{
 		DatasetID:         mergePayload.DatasetID,
+		DatasetSlug:       mergePayload.DatasetSlug,
 		AffinityDeviceID:  mergePayload.AffinityDeviceID,
 		DeviceOutput:      deviceOutput,
 		Chunks:            chunks,
@@ -516,6 +549,7 @@ type ProcessPayload struct {
 	InputPath   string          `json:"input_path,omitempty"`
 	OutputPath  string          `json:"output_path,omitempty"`
 	DatasetID   string          `json:"dataset_id"`
+	DatasetSlug string          `json:"dataset_slug,omitempty"`
 	ChunkIndex  int             `json:"chunk_index,omitempty"`
 	StorageMode string          `json:"storage_mode,omitempty"`
 	Rows        int             `json:"rows,omitempty"`
@@ -552,12 +586,20 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	datasetID := processPayload.DatasetID
+	datasetSlug := processPayload.DatasetSlug
 	chunkIndex := processPayload.ChunkIndex
 
-	chunkKey := storage.GetRemotePath(datasetID, chunkIndex, "chunk")
-	resultKey := storage.GetRemotePath(datasetID, chunkIndex, "result")
+	chunkKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "chunk")
+	resultKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
 
-	workDir, cleanup, err := plugin.PrepareJobWorkDir(job.ID)
+	workDirID := job.ID
+	if workDirID == "" {
+		workDirID = processPayload.ChunkID
+	}
+	if workDirID == "" {
+		workDirID = processPayload.DatasetID
+	}
+	workDir, cleanup, err := plugin.PrepareJobWorkDir(workDirID)
 	if err != nil {
 		return fmt.Errorf("failed to prepare work dir: %w", err)
 	}
@@ -573,15 +615,17 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		if inputPath == "" && datasetID != "" {
 			if stepIndex > 0 {
 				// Chain from previous step's output
-				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "results", fmt.Sprintf("chunk_%d.out", chunkIndex))
+				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
 			} else {
 				// First step: read from chunks
 				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
 			}
 		}
 		if outputPath == "" && datasetID != "" {
-			outputPath = filepath.Join(mountBasePath, "datasets", datasetID, "results", fmt.Sprintf("chunk_%d.out", chunkIndex))
+			outputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
 		}
+		processPayload.InputPath = inputPath
+		processPayload.OutputPath = outputPath
 	} else {
 		// S3/object storage: download input based on step index
 		inputKey := chunkKey
@@ -606,6 +650,9 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		}
 
 		outputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
+
+		processPayload.InputPath = inputPath
+		processPayload.OutputPath = outputPath
 	}
 
 	if inputPath == "" {
@@ -675,6 +722,11 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	if storageMode != "shared_mount" {
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err == nil {
+				os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+			}
+		}
 		outputFile, err := os.Open(outputPath)
 		if err != nil {
 			return fmt.Errorf("failed to open output file: %w", err)
@@ -721,8 +773,8 @@ func deriveDatasetPaths(datasetID, storageMode, mountBasePath string) (sourcePat
 		}
 		sourcePath = filepath.Join(basePath, "datasets", datasetID, "source")
 		chunksPath = filepath.Join(basePath, "datasets", datasetID, "chunks")
-		resultsPath = filepath.Join(basePath, "datasets", datasetID, "results")
-		mergedPath = filepath.Join(basePath, "datasets", datasetID, "merged")
+		resultsPath = filepath.Join(basePath, "datasets", datasetID, "chunks")
+		mergedPath = filepath.Join(basePath, "datasets", datasetID)
 	}
 	return sourcePath, chunksPath, resultsPath, mergedPath
 }
@@ -739,9 +791,9 @@ func deriveChunkPath(datasetID string, chunkIndex int, pathType string, storageM
 		case "chunk":
 			return filepath.Join(basePath, "chunks", "chunk_"+strconv.Itoa(chunkIndex)+".bin")
 		case "result":
-			return filepath.Join(basePath, "results", "chunk_"+strconv.Itoa(chunkIndex)+".out")
+			return filepath.Join(basePath, "chunks", "chunk_"+strconv.Itoa(chunkIndex)+".out")
 		case "merged":
-			return filepath.Join(basePath, "merged", "dataset.parquet")
+			return filepath.Join(basePath, datasetID+".csv")
 		}
 	}
 	return ""
@@ -762,13 +814,13 @@ func deriveMountBasePath(storageMode string) string {
 
 func normalizeStorageModeForJob(mode string) string {
 	switch mode {
-	case "s3", "aws_s3", "s3_compatible":
+	case "s3", "aws_s3", "s3_compatible", "object_storage":
 		return "s3"
 	case "gcs", "google_cloud_storage":
 		return "gcs"
 	case "azure_blob":
 		return "azure_blob"
-	case "shared_mount", "local", "object_storage":
+	case "shared_mount", "local":
 		return "shared_mount"
 	default:
 		return mode
@@ -1496,6 +1548,7 @@ func fallbackToV2Runtime(
 		PluginID:         job.PluginID,
 		PluginCode:       string(pluginCode),
 		RuntimeType:      string(rtType),
+		RuntimeDeps:      mapDepsToV2(manifest.Dependencies),
 		ExecutionID:      job.ExecutionID,
 		ExecutionStepID:  job.ExecutionStepID,
 		OrgID:            job.OrgID,
@@ -1533,4 +1586,19 @@ func fallbackToV2Runtime(
 		Output:     outputJSON,
 		DurationMs: execResult.DurationMs,
 	}, nil
+}
+
+func mapDepsToV2(deps []plugin.RuntimeDependency) []runtimev2.Dependency {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]runtimev2.Dependency, len(deps))
+	for i, d := range deps {
+		out[i] = runtimev2.Dependency{
+			Name:    d.Name,
+			Version: d.Version,
+			Source:  d.Source,
+		}
+	}
+	return out
 }

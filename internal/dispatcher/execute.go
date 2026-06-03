@@ -258,16 +258,36 @@ func ExecuteJob(
 		return executeMergeDataset(ctx, payload)
 	}
 
-	// Route process jobs through native handler when they have chunk-level fields
-	// and no inline plugin_code — these are pipeline chunk jobs that use cached plugins
-	if meta.JobType == "process" && fullJob.PluginCode == "" && (meta.ChunkID != "" || meta.DatasetID != "") {
-		obs.Info("routing process to native chunk handler", obs.Field{
-			"job_type":   meta.JobType,
+	// Route chunk-level process jobs through native handler when they have
+	// chunk-level fields and no inline plugin_code
+	if meta.JobType == "process" && fullJob.PluginCode == "" && meta.ChunkID != "" {
+		obs.Info("routing chunk-level process to native handler", obs.Field{
 			"chunk_id":   meta.ChunkID,
 			"dataset_id": meta.DatasetID,
 			"plugin_id":  fullJob.PluginID,
 		})
+		// Inject job_id into payload so native handler can use it
+		if fullJob.ID != "" {
+			var payloadMap map[string]interface{}
+			if err := json.Unmarshal(payload, &payloadMap); err == nil {
+				payloadMap["job_id"] = fullJob.ID
+				if injected, err := json.Marshal(payloadMap); err == nil {
+					return executeProcessChunk(ctx, injected)
+				}
+			}
+		}
 		return executeProcessChunk(ctx, payload)
+	}
+
+	// Step-level process_dataset jobs (no chunk_id) — they are coordination markers.
+	// The actual chunk work is done via batch_chunks trigger → chunk-level agent_jobs.
+	// Completing immediately lets advance_pipeline proceed to plan_dataset_chunks.
+	if meta.JobType == "process" && meta.ChunkID == "" && meta.DatasetID != "" {
+		obs.Info("step-level process_dataset job — no chunk data, completing immediately", obs.Field{
+			"dataset_id": meta.DatasetID,
+			"plugin_id":  fullJob.PluginID,
+		})
+		return nil
 	}
 
 	result, err := executorInstance.ExecuteJob(ctx, execJob)

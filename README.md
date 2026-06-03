@@ -1,2635 +1,1521 @@
-# Sentra Agent - Distributed Compute Runtime
+# SentraZero - Distributed Compute Platform
 
-A decentralized compute network that transforms idle developer machines and servers into a distributed processing cluster. Instead of relying on expensive cloud infrastructure, organizations can leverage their existing compute resources to run data pipelines, ML inference, and batch processing workloads.
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![Supabase](https://img.shields.io/badge/Supabase-3ECF8E?style=flat&logo=supabase)](https://supabase.com)
+[![License](https://img.shields.io/badge/License-Proprietary-red?style=flat)]()
+
+A decentralized compute platform that transforms idle developer machines, servers, and workstations into a distributed processing cluster. Organizations can run data pipelines, ML inference, ETL jobs, and batch processing workloads across their own infrastructure—without expensive cloud compute costs.
+
+---
 
 ## Table of Contents
-- [What is Sentra?](#what-is-sentra)
-- [Core Value Proposition](#core-value-proposition)
-- [Quick Start](#quick-start)
-- [Zero-Config Architecture](#zero-config-architecture)
-- [Database Schema](#database-schema)
-- [Functions](#functions)
-- [Triggers](#triggers)
-- [Edge Functions](#edge-functions)
-- [Go Codebase Structure](#go-codebase-structure)
-- [Job Types & Lifecycle](#job-types--lifecycle)
-- [Architecture](#architecture)
-- [Components](#components)
-- [Security](#security)
-- [API Reference](#api-reference)
-- [Monitoring](#monitoring)
-- [Troubleshooting](#troubleshooting)
+
+1. [What is SentraZero?](#what-is-sentrazero)
+2. [Core Concepts](#core-concepts)
+3. [End-to-End Architecture](#end-to-end-architecture)
+4. [Complete Data Flow](#complete-data-flow)
+5. [Quick Start](#quick-start)
+6. [Database Schema](#database-schema)
+7. [Edge Functions API](#edge-functions-api)
+8. [Go Agent Architecture](#go-agent-architecture)
+9. [Plugin System](#plugin-system)
+10. [Security Model](#security-model)
+11. [Configuration Reference](#configuration-reference)
+12. [Monitoring & Observability](#monitoring--observability)
+13. [Deployment Guide](#deployment-guide)
+14. [Testing](#testing)
+15. [Troubleshooting](#troubleshooting)
+16. [API Reference](#api-reference)
 
 ---
 
-## What is Sentra?
+## What is SentraZero?
 
-Sentra is a **decentralized compute network** that transforms idle developer machines and servers into a distributed processing cluster. Organizations can run:
-- **Data pipeline jobs** (scanning, processing, merging datasets)
-- **ML inference** (embedding generation, model inference)
-- **Batch processing** (ETL, transformations, chunk-based operations)
+SentraZero is a **self-hosted distributed compute platform** that enables organizations to:
 
----
+- **Run data pipelines** across idle machines (scanning, processing, merging datasets)
+- **Execute ML workloads** (embedding generation, model inference, data transformations)
+- **Process batch jobs** (ETL, transformations, chunk-based operations)
+- **Scale horizontally** by adding more agent devices to your fleet
+- **Maintain data sovereignty** by keeping data within your infrastructure
 
-## Core Value Proposition
+### Key Differentiators
 
 | Feature | Benefit |
 |---------|---------|
-| **Zero-Config Setup** | Single binary, claim code activation - no env vars needed |
-| **Auto-scaling** | Jobs automatically distributed to available devices |
-| **Plugin-based** | Extend functionality via dynamically loaded plugins |
-| **Warm pools** | Pre-warmed runtime environments for fast job startup |
-| **Graceful shutdown** | Drain in-flight jobs before termination |
-| **Redis-powered** | Multi-agent coordination with Redis Streams |
-| **Vector Similarity** | Smart device selection using pgvector |
+| **Zero-Config Setup** | Single binary with claim code activation—no environment variables needed |
+| **Auto-Scaling** | Jobs automatically distributed to available devices based on capability vectors |
+| **Plugin Ecosystem** | Extend functionality via signed, sandboxed plugins (Python, Node.js, native) |
+| **Warm Runtime Pools** | Pre-warmed Python/Node environments for <1s job startup |
+| **Graceful Shutdown** | Agents drain in-flight jobs before termination |
+| **Vector Similarity Matching** | Smart device-job matching using pgvector (16-dim device vectors) |
+| **Multi-Tenant** | Complete org isolation via PostgreSQL RLS policies |
+| **Storage Agnostic** | Supports S3, GCS, Azure Blob, or local filesystem |
+
+---
+
+## Core Concepts
+
+### 1. Organizations (`orgs`)
+The top-level entity. Each org has:
+- A unique ID and claim secret for device registration
+- Quotas (max devices, concurrent jobs) based on plan
+- Isolated data (datasets, jobs, plugins) via RLS
+
+### 2. Devices (`devices`)
+Agent machines that process jobs:
+- Register using a **claim code** from the org admin
+- Report capabilities (CPU, RAM, GPU, runtimes supported)
+- Have a **profile vector** (16 dimensions) for smart job matching
+- Can be online/offline/available/busy/draining/error
+
+### 3. Datasets (`datasets`)
+Data to be processed:
+- Stored in configured backend (S3, local, GCS)
+- Scanned to extract metadata (file count, size, columns)
+- Split into **chunks** (`batch_chunks`) for parallel processing
+- Processed through pipelines or direct job execution
+
+### 4. Jobs (`agent_jobs`)
+Atomic units of work:
+- **Types**: `scan_dataset`, `process`, `preprocess`, `merge_dataset`, `plan_chunks`, `embedding`, `validate`
+- **Two levels**: Step-level coordination jobs (no `chunk_id`) → immediately completed as markers; Chunk-level processing jobs (with `chunk_id`) → routed to native plugin handler
+- **Lifecycle**: `pending` → `assigned` → `running` → `completed`/`failed`
+- **Lease-based**: Devices acquire leases to prevent duplicate processing
+- **Retry logic**: Automatic retry with exponential backoff (max 3 by default)
+
+### 5. Pipelines (`pipeline_templates` + `executions`)
+Multi-step data processing workflows:
+- **Template**: Reusable definition with ordered steps
+- **Execution**: Instance of a template running against a dataset
+- **Steps**: Can be built-in handlers or plugins
+- **Auto-advance**: Completing a step triggers the next automatically
+
+### 6. Plugins (`plugins`)
+Extensible, signed code modules:
+- **Languages**: Python, Node.js, Go, Rust, or native binaries
+- **Signing**: Ed25519 signatures verified before execution
+- **Sandboxing**: Resource limits (memory, CPU time, timeout) enforced
+- **Rollout control**: Percentage-based gradual deployment per device
+
+---
+
+## End-to-End Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           DASHBOARD (Web UI)                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Datasets │  │ Devices  │  │ Pipelines│  │ Plugins  │       │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+│       │              │              │              │                  │
+└───────┼──────────────┼──────────────┼──────────────┼──────────────────┘
+        │              │              │              │
+        ▼              ▼              ▼              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      SUPABASE BACKEND                                │
+│  ┌──────────────────────────────────────────────────────────┐        │
+│  │  PostgreSQL Database (30+ tables, 100+ functions)     │        │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐             │        │
+│  │  │ Devices  │ │ Jobs     │ │Datasets  │  ...         │        │
+│  │  └──────────┘ └──────────┘ └──────────┘             │        │
+│  │  RLS Policies: Org-level isolation enforced            │        │
+│  │  pgvector: 16-dim device vectors, 384-dim chunks     │        │
+│  │  Two-tier chunking: pre-chunk (historical) →         │        │
+│  │    resize at pipeline time (live CPU/memory/disk)    │        │
+│  └──────────────────────────────────────────────────────────┘        │
+│  ┌──────────────────────────────────────────────────────────┐        │
+│  │  Edge Functions (51 Deno/TypeScript functions)         │        │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐             │        │
+│  │  │device mgmt│ │job mgmt  │ │pipeline  │  ...         │        │
+│  │  └──────────┘ └──────────┘ └──────────┘             │        │
+│  │  SSE: agent_stream for real-time job delivery         │        │
+│  └──────────────────────────────────────────────────────────┘        │
+│  ┌──────────────────────────────────────────────────────────┐        │
+│  │  Supabase Vault (Encrypted secrets storage)              │        │
+│  │  - Storage credentials (S3 keys, etc.)                  │        │
+│  │  - Plugin signing keys (Ed25519 private keys)           │        │
+│  └──────────────────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+        ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+        │  Agent 1     │ │  Agent 2     │ │  Agent N     │
+        │  (Go Binary) │ │  (Go Binary) │ │  (Go Binary) │
+        │              │ │              │ │              │
+        │ ┌──────────┐ │ │ ┌──────────┐ │ │ ┌──────────┐ │
+        │ │Runtime Mgr│ │ │ │Runtime Mgr│ │ │ │Runtime Mgr│ │
+        │ │(Py/Node) │ │ │ │(Py/Node) │ │ │ │(Py/Node) │ │
+        │ └──────────┘ │ │ └──────────┘ │ │ └──────────┘ │
+        │ ┌──────────┐ │ │ ┌──────────┐ │ │ ┌──────────┐ │
+        │ │Dispatcher │ │ │ │Dispatcher │ │ │ │Dispatcher │ │
+        │ │(WorkerPool)│ │ │ │(WorkerPool)│ │ │ │(WorkerPool)│ │
+        │ └──────────┘ │ │ └──────────┘ │ │ └──────────┘ │
+        │ ┌──────────┐ │ │ ┌──────────┐ │ │ ┌──────────┐ │
+        │ │  Plugin   │ │ │ │  Plugin   │ │ │ │  Plugin   │ │
+        │ │ Executor  │ │ │ │ Executor  │ │ │ │ Executor  │ │
+        │ └──────────┘ │ │ └──────────┘ │ │ └──────────┘ │
+        └──────────────┘ └──────────────┘ └──────────────┘
+                    │               │               │
+                    └───────────────┼───────────────┘
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │  Storage Backend               │
+                    │  - S3 / GCS / Azure / Local   │
+                    │  - Dataset files               │
+                    │  - Processed outputs           │
+                    │  - Plugin binaries             │
+                    └───────────────────────────────┘
+```
+
+---
+
+## Complete Data Flow
+
+### Flow 1: Organization Setup
+
+```
+Org Admin                          Supabase
+    │                                   │
+    │ 1. Create account                 │
+    ├──────────────────────────────────►│
+    │                                   │ CREATE org in `orgs`
+    │                                   │ Generate claim_secret
+    │                                   │ Create default quotas
+    │                                   │ Generate Ed25519 signing key
+    │                                   │ Store private key in Vault
+    │                                   │ Store public key in `plugin_signing_keys`
+    │                                   │
+    │ 2. Get claim code (from dashboard)│
+    │◄──────────────────────────────────┤
+    │                                   │
+    │ 3. Configure storage              │
+    ├──────────────────────────────────►│
+    │   (S3 bucket, credentials)       │ INSERT into `org_storage_configs`
+    │                                   │ Encrypt creds → Store in Vault
+    │                                   │
+    │ 4. Invite team members           │
+    ├──────────────────────────────────►│
+    │                                   │ `invite_member` function
+    │                                   │ Send invitation email
+    │                                   │
+```
+
+### Flow 2: Device Registration (Zero-Config)
+
+```
+Device Operator                     Agent Binary                    Supabase
+    │                                   │                              │
+    │ Run: sentra --claim-code=ABC123  │                              │
+    │──────────────────────────────────►│                              │
+    │                                   │ 1. Call /bootstrap           │
+    │                                   ├────────────────────────────►│
+    │                                   │                             │ Verify claim code
+    │                                   │                             │ CREATE device in `devices`
+    │                                   │                             │ Generate access_token
+    │                                   │                             │ Hash token → store
+    │                                   │◄───────────────────────────┤
+    │                                   │ Receive: device_id, token   │
+    │                                   │         org_id, config      │
+    │                                   │                             │
+    │                                   │ 2. Save config to ~/.sentra │
+    │                                   │                             │
+    │                                   │ 3. Connect to SSE stream    │
+    │                                   ├────────────────────────────►│
+    │                                   │   /agent_stream             │ Verify token
+    │                                   │                             │ Register for events
+    │                                   │◄───────────────────────────┤
+    │                                   │ Receive: hello event         │
+    │                                   │                             │
+    │                                   │ 4. Report system info      │
+    │                                   │   (CPU, RAM, OS, etc.)     │
+    │                                   │                             │
+    │                                   │ 5. Call /agent_health_     │
+    │                                   │   policy                   │
+    │                                   ├────────────────────────────►│
+    │                                   │                             │ Calculate concurrency
+    │                                   │◄───────────────────────────┤
+    │                                   │ Receive: {concurrency: 4}  │
+    │                                   │                             │
+    │                                   │ 6. Start worker pool       │
+    │                                   │   (4 workers)              │
+    │                                   │                             │
+    │                                   │ 7. Poll for jobs:          │
+    │                                   │   GET /assign_agent_job    │
+    │                                   ├────────────────────────────►│
+    │                                   │                             │ Find pending job
+    │                                   │                             │ Match with device vector
+    │                                   │                             │ Assign + lease
+    │                                   │◄───────────────────────────┤
+    │                                   │ Receive: job details        │
+    │                                   │                             │
+    │                                   │ 8. Execute job             │
+    │                                   │   (plugin or builtin)      │
+    │                                   │                             │
+    │                                   │ 9. Report completion:      │
+    │                                   │   POST /complete_job       │
+    │                                   ├────────────────────────────►│
+    │                                   │                             │ Update job status
+    │                                   │                             │ Trigger pipeline advance
+    │                                   │                             │ Archive if complete
+    │                                   │◄───────────────────────────┤
+    │                                   │ Receive: {success: true}    │
+    │                                   │                             │
+```
+
+### Flow 3: Dataset Processing Pipeline (Two-Tier Chunking)
+
+```
+Data Engineer                  Dashboard              Supabase            Agent
+    │                              │                    │                  │
+    │ 1. Upload dataset files     │                    │                  │
+    ├────────────────────────────►│                    │                  │
+    │   to storage (S3/local)    │                    │                  │
+    │                              │                    │                  │
+    │ 2. Create dataset record   │                    │                  │
+    ├────────────────────────────►│                    │                  │
+    │                              │ POST /api/datasets │                  │
+    │                              ├───────────────────►│                  │
+    │                              │                    │ INSERT `datasets`  │
+    │                              │                    │ TRIGGER:           │
+    │                              │                    │ trg_create_scan_  │
+    │                              │                    │ job_on_insert    │
+    │                              │                    │ → creates scan   │
+    │                              │                    │   agent_job      │
+    │                              │◄───────────────────┤                  │
+    │                              │                    │                  │
+    │ 3. Agent picks up scan job  │                    │                  │
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │  SSE: job event  │
+    │                              │                    │                  │ Run builtin:scan
+    │                              │                    │                  │ Scan files, metadata
+    │                              │                    │                  │
+    │ 4. Report scan complete     │                    │                  │
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │ POST /report_     │
+    │                              │                    │  dataset_scan    │
+    │                              │                    │                  │
+    │    === TIER 1: PRE-CHUNK (Historical, Automatic) ===              │
+    │                              │                    │                  │
+    │                              │                    │ TRIGGER:          │
+    │                              │                    │ auto_progress_   │
+    │                              │                    │ after_scan       │
+    │                              │                    │ → SQL: pre_chunk_│
+    │                              │                    │   dataset_smart()│
+    │                              │                    │ Creates chunks   │
+    │                              │                    │ with historical  │
+    │                              │                    │ device hints     │
+    │                              │                    │ No agent_jobs    │
+    │                              │                    │ created          │
+    │                              │                    │                  │
+    │ 5. Create pipeline & run    │                    │                  │
+    ├────────────────────────────►│ run_pipeline()      │                  │
+    │                              ├───────────────────►│                  │
+    │                              │                    │ activate_pipeline│
+    │                              │                    │ → 1 agent_job   │
+    │                              │                    │   per step       │
+    │                              │                    │                  │
+    │    === TIER 2: LIVE RESIZE (Pipeline-Time) ===                    │
+    │                              │                    │                  │
+    │                              │                    │ plan_dataset_    │
+    │                              │                    │ chunks()         │
+    │                              │                    │ → SQL: resize_   │
+    │                              │                    │   chunks_for_    │
+    │                              │                    │   pipeline()     │
+    │                              │                    │ Reassigns chunks │
+    │                              │                    │ using LIVE CPU%  │
+    │                              │                    │ memory_free_gb   │
+    │                              │                    │ available_disk_gb│
+    │                              │                    │ active_jobs      │
+    │                              │                    │                  │
+    │ 6. Agent claims step job    │                    │                  │
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │ claim_jobs_for_  │
+    │                              │                    │ device (no       │
+    │                              │                    │ rechunk)         │
+    │                              │                    │                  │
+    │ 7. Agent processes chunks   │                    │                  │
+    │                              │                    │                  │ Reads chunks where
+    │                              │                    │                  │ assigned_device_id
+    │                              │                    │                  │ = device_id
+    │                              │                    │                  │ Process via plugin
+    │                              │                    │                  │
+    │ 8. Step completes → advance │                    │                  │
+    │                              │                    │ advance_pipeline │
+    │                              │                    │ → next step      │
+    │                              │                    │ → plan_dataset_  │
+    │                              │                    │   chunks again   │
+    │                              │                    │                  │
+    │ 9. All steps done → merge   │                    │                  │
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │                  │ Execute merge step
+    │                              │                    │                  │ Output final data
+    │                              │                    │                  │
+    │ 10. Pipeline complete       │◄───────────────────┤                  │
+    │                              │ dataset → 'ready'  │                  │
+    │                              │                    │                  │
+    │ 11. Download result         │                    │                  │
+    ├────────────────────────────►│                    │                  │
+    │                              │ GET /api/download │                  │
+    │                              ├───────────────────►│                  │
+    │                              │                    │ Generate presigned│
+    │                              │                    │ URL from storage  │
+    │                              │◄───────────────────┤                  │
+    │◄────────────────────────────┤                    │                  │
+    │ Receive download URL        │                    │                  │
+    │                              │                    │                  │
+```
+
+### Flow 4: Plugin Execution
+
+```
+Plugin Developer               Dashboard           Edge Function         Agent
+    │                              │                    │                  │
+    │ 1. Create plugin (Python)   │                    │                  │
+    │   - manifest.json            │                    │                  │
+    │   - plugin code             │                    │                  │
+    │                              │                    │                  │
+    │ 2. Upload plugin           │                    │                  │
+    ├────────────────────────────►│                    │                  │
+    │                              │ POST /register_    │                  │
+    │                              │ plugin             │                  │
+    │                              ├───────────────────►│                  │
+    │                              │                    │ 1. Verify JWT    │
+    │                              │                    │    (admin role)  │
+    │                              │                    │                  │
+    │                              │                    │ 2. Upload binary │
+    │                              │                    │    to storage    │
+    │                              │                    │                  │
+    │                              │                    │ 3. Get org's    │
+    │                              │                    │    signing key   │
+    │                              │                    │    from Vault    │
+    │                              │                    │                  │
+    │                              │                    │ 4. Hash binary │
+    │                              │                    │    (SHA-256)    │
+    │                              │                    │                  │
+    │                              │                    │ 5. Sign hash   │
+    │                              │                    │    (Ed25519)    │
+    │                              │                    │                  │
+    │                              │                    │ 6. INSERT       │
+    │                              │                    │    `plugins`     │
+    │                              │                    │    (trusted=true)│
+    │                              │                    │                  │
+    │                              │                    │ 7. Enable for   │
+    │                              │                    │    org (100%)    │
+    │                              │◄───────────────────┤                  │
+    │                              │ Receive: plugin_id │                  │
+    │                              │                    │                  │
+    │                              │                    │                  │
+    │ Later, when job runs...       │                    │                  │
+    │                              │                    │                  │
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │  GET /get_plugin │
+    │                              │                    │  (job has        │
+    │                              │                    │   plugin_id)    │
+    │                              │                    │                  │
+    │                              │                    │ 1. Fetch plugin │
+    │                              │                    │    record        │
+    │                              │                    │                  │
+    │                              │                    │ 2. Download     │
+    │                              │                    │    binary from   │
+    │                              │                    │    storage      │
+    │                              │                    │                  │
+    │                              │                    │ 3. Compute      │
+    │                              │                    │    SHA-256 of    │
+    │                              │                    │    binary       │
+    │                              │                    │                  │
+    │                              │                    │ 4. Fetch public │
+    │                              │                    │    key from      │
+    │                              │                    │    plugin_signing│
+    │                              │                    │    _keys       │
+    │                              │                    │                  │
+    │                              │                    │ 5. Verify       │
+    │                              │                    │    signature     │
+    │                              │                    │                  │
+    │                              │                    │ 6. Send plugin  │
+    │                              │                    │    + signature   │
+    │                              │◄───────────────────┤                  │
+    │                              │                    │                  │
+    │                              │                    │                  │ 1. Receive plugin
+    │                              │                    │                  │
+    │                              │                    │                  │ 2. Verify signature
+    │                              │                    │                  │    (again)
+    │                              │                    │                  │
+    │                              │                    │                  │ 3. Check resource
+    │                              │                    │                  │    limits present
+    │                              │                    │                  │
+    │                              │                    │                  │ 4. Select runtime
+    │                              │                    │                  │    (Python/Node/native)
+    │                              │                    │                  │
+    │                              │                    │                  │ 5. Execute in
+    │                              │                    │                  │    sandbox with
+    │                              │                    │                  │    resource limits
+    │                              │                    │                  │
+    │                              │                    │                  │ 6. Capture output
+    │                              │                    │                  │
+    │                              │                    │                  │ 7. Report job
+    │                              │                    │                  │    complete
+    │                              │                    │  ◄───────────────┤
+    │                              │                    │  POST /complete_ │
+    │                              │                    │  job            │
+    │                              │◄───────────────────┤                  │
+    │                              │ Dashboard updated  │                  │
+    │                              │ via SSE            │                  │
+    │                              │                    │                  │
+```
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- PostgreSQL database with Supabase (for metadata and jobs)
-- Redis (optional, for multi-agent coordination)
-- Python 3.8+ or Node.js 18+ (if using runtime plugins)
 
-### Start the Agent
+- **Go 1.25+** (to build the agent)
+- **Supabase project** with database and edge functions enabled
+- **PostgreSQL** with pgvector extension
+- **Redis** (optional, for multi-agent coordination)
+- **Python 3.8+** or **Node.js 18+** (if using runtime plugins)
+
+### 1. Set Up Supabase Backend
 
 ```bash
-# Run with claim code (recommended - zero setup required)
-./bin/sentra-agent --claim-code YOUR_CLAIM_CODE
+# Clone this repository
+git clone https://github.com/your-org/sentrazero.git
+cd sentrazero
 
-# Or agent will prompt for claim code if not provided
-./bin/sentra-agent
+# Link to your Supabase project
+supabase login
+supabase link --project-ref your-project-ref
+
+# Apply database migrations
+supabase db push
+
+# Deploy all edge functions (51 functions)
+supabase functions deploy
 ```
 
-That's it! The agent will:
-1. Claim itself to your organization using the claim code
-2. Fetch configuration from the backend automatically
-3. Connect to Redis (if configured)
-4. Start processing jobs
+### 2. Configure Your Organization
 
-### Docker Deployment
+```sql
+-- In Supabase SQL Editor:
+INSERT INTO orgs (name, plan) VALUES ('My Org', 'pro');
+
+-- Get the claim code for device registration:
+SELECT id, claim_secret FROM orgs WHERE name = 'My Org';
+```
+
+### 3. Build and Run the Agent
+
+```bash
+# Build the agent binary
+make build
+
+# Run with claim code (zero-config mode)
+./bin/sentra --claim-code YOUR_CLAIM_CODE
+
+# The agent will:
+# 1. Register itself with your organization
+# 2. Receive backend configuration automatically
+# 3. Start processing jobs
+```
+
+### 4. Deploy with Docker
 
 ```bash
 docker run -d \
   --name sentra-agent \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  sentra/agent:latest \
-  --claim-code YOUR_CLAIM_CODE
+  -e SENTRA_CLAIM_CODE=YOUR_CLAIM_CODE \
+  sentra/agent:latest
 ```
-
----
-
-## Zero-Config Architecture
-
-The agent is designed to run with **zero environment variables**:
-
-```
-User runs: ./sentra-agent --claim-code ABC123
-
-Agent does automatically:
-1. Call claim_device API → gets device_id, token, backend_url
-2. Call health_policy API → gets max_workers, redis_url
-3. Saves config to ~/.sentra/config.json
-4. Starts polling for jobs
-```
-
-### Optional Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SENTRA_CLAIM_CODE` | No* | - | Claim code (*required on first run) |
-| `SENTRA_BACKEND_URL` | No | auto-detect | Supabase project URL |
-| `SENTRA_REDIS_URL` | No | - | Redis URL for job queue |
-
-*The claim code can also be provided via CLI flag `--claim-code` or the agent will prompt for it.
-
-### CLI Flags & Environment Variables
-
-| Flag/Env | Required | Default | Description |
-|----------|---------|---------|-------------|
-| `--claim-code` | No* | - | Claim code (required on first run) |
-| `SENTRA_BACKEND_URL` | No | auto | Backend URL |
-| `SENTRA_REDIS_URL` | No | - | Redis URL |
-| `ENVIRONMENT_POOL_MAX_SIZE` | No | 10 | Max env pools |
-| `ENVIRONMENT_MAX_COUNT` | No | 50 | Max environments |
 
 ---
 
 ## Database Schema
 
-### Tables
+The database has **30+ tables** with **100+ functions** and **20+ triggers**.
 
-#### `agent_jobs` - Main job queue table
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Job ID (PK), default gen_random_uuid() |
-| `agent_id` | uuid | Assigned device ID |
-| `job_type` | text | Job type: scan_dataset, process, preprocess, merge, plan_chunks |
-| `payload` | jsonb | Job configuration and data |
-| `status` | text | pending, assigned, running, completed, failed, dead |
-| `completed` | boolean | Completion flag |
-| `error` | text | Error message |
-| `started_at` | timestamptz | Job start time |
-| `finished_at` | timestamptz | Job finish time |
-| `org_id` | uuid | Organization ID (NOT NULL) |
-| `assigned_at` | timestamptz | Assignment time |
-| `duration_ms` | double precision | Job duration in milliseconds |
-| `throughput` | double precision | Job throughput |
-| `output_token` | text | Job output token |
-| `plugin_id` | text | Associated plugin ID |
-| `plugin_version` | text | Plugin version |
-| `updated_at` | timestamptz | Last update time |
-| `retry_count` | integer | Retry count, default 0 |
-| `lease_expires_at` | timestamptz | Lease expiration |
-| `last_error` | text | Last error message |
-| `dead_lettered` | boolean | Dead letter flag |
-| `execution_id` | uuid | Pipeline execution ID |
-| `execution_step_id` | uuid | Execution step ID |
-| `max_retries` | integer | Max retries, default 3 |
-| `job_dataset_id` | uuid | Generated from payload->dataset_id |
-| `job_chunk_id` | uuid | Generated from payload->chunk_id |
-| `last_transition_at` | timestamptz | Last state transition |
-| `runtime_type` | text | python, node, native (default: python) |
-| `runtime_dependencies` | jsonb | Runtime dependencies |
-| `entrypoint` | text | Job entrypoint |
-| `execution_mode` | text | native, docker, runtime |
-| `environment_strict` | boolean | Strict environment mode |
-| `execution_timeout_seconds` | integer | Timeout in seconds (default: 300) |
-| `dependency_lock_hash` | text | Hash of dependencies |
-| `idempotency_key` | text | Idempotency key |
-| `checkpoint_id` | uuid | Checkpoint ID |
-| `environment_id` | uuid | Runtime environment ID |
-| `run_id` | uuid | Run ID for deduplication |
-| `attempt_number` | integer | Attempt number (default: 1) |
-| `output_data` | jsonb | Output data |
-| `output_size_bytes` | bigint | Output size |
-| `log_size_bytes` | bigint | Log size |
-| `failure_classification` | text | infra_error, dependency_error, user_code_error, timeout_error, memory_error, unknown |
-| `actual_execution_mode` | text | Actual mode used |
-| `fallback_reason` | text | Fallback reason |
-| `heartbeat_at` | timestamptz | Job heartbeat |
+### Entity Relationship Diagram
 
-**Constraints:**
-- `agent_jobs_assignment_valid`: (assigned_at IS NULL) OR (agent_id IS NOT NULL)
-- `agent_jobs_execution_mode_check`: execution_mode IN ('docker', 'runtime', 'native')
-- `agent_jobs_failure_classification_check`: failure_classification IN ('infra_error', 'dependency_error', 'user_code_error', 'timeout_error', 'memory_error', 'unknown')
+```
+orgs (1) ────── (∞) devices
+  │                         │
+  │                         │ (device_id)
+  │                         │
+  ├────── (∞) datasets     │
+  │       │                 │
+  │       │ (dataset_id)    │
+  │       ▼                 ▼
+  │  batch_chunks ──── (∞) agent_jobs
+  │       │                 │
+  │       │                 │ (execution_id)
+  │       │                 ▼
+  │       │            executions ──── (∞) execution_steps
+  │       │                 │
+  │       │                 │ (pipeline_template_id)
+  │       │                 ▼
+  │       │            pipeline_templates
+  │       │
+  ├────── (∞) plugins
+  │       │
+  │       │ (org_id)
+  ▼       ▼
+org_plugins ──── (∞) plugin_execution_history
+```
 
-#### `agent_jobs_archive` - Archived completed jobs
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Job ID (PK) |
-| `agent_id` | uuid | Assigned device |
-| `job_type` | text | Job type |
-| `payload` | jsonb | Job payload |
-| `created_at` | timestamptz | Creation time |
-| `status` | text | Final status |
-| `completed` | boolean | Completion flag |
-| `error` | text | Error message |
-| `started_at` | timestamptz | Start time |
-| `finished_at` | timestamptz | Finish time |
-| `org_id` | uuid | Organization |
-| `assigned_at` | timestamptz | Assignment time |
-| `duration_ms` | double precision | Duration |
-| `throughput` | double precision | Throughput |
-| `output_token` | text | Output |
-| `plugin_id` | text | Plugin ID |
-| `plugin_version` | text | Plugin version |
-| `updated_at` | timestamptz | Update time |
-| `retry_count` | integer | Retry count |
-| `lease_expires_at` | timestamptz | Lease expiry |
-| `last_error` | text | Last error |
-| `dead_lettered` | boolean | Dead letter flag |
-| `execution_id` | uuid | Execution ID |
-| `execution_step_id` | uuid | Step ID |
-| `processed_path` | text | Processed path |
-
-#### `agent_jobs_dead_letter` - Failed jobs beyond max retries
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Entry ID (PK) |
-| `org_id` | uuid | Organization |
-| `dataset_id` | uuid | Dataset |
-| `job_type` | text | Job type |
-| `payload` | jsonb | Job payload |
-| `retry_count` | integer | Final retry count |
-| `last_error` | text | Final error |
-| `original_job_id` | uuid | Original job ID |
-| `failed_at` | timestamptz | Failure time |
-| `created_at` | timestamptz | Creation time |
-
-#### `agent_metrics` - Device performance metrics
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Metric ID (PK) |
-| `device_id` | uuid | Device |
-| `org_id` | uuid | Organization |
-| `metrics` | jsonb | Metrics data |
-| `concurrency_returned` | integer | Concurrency |
-| `load_factor` | numeric(4,3) | Load factor |
-| `source` | text | Source (default: agent_health_policy) |
-| `created_at` | timestamptz | Creation time |
-
-#### `agent_worker_activity` - Worker activity log
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Activity ID (PK) |
-| `job_id` | uuid | Job |
-| `device_id` | uuid | Device |
-| `worker_id` | integer | Worker ID |
-| `job_type` | text | Job type |
-| `started_at` | timestamptz | Start time |
-| `finished_at` | timestamptz | Finish time |
-| `duration_ms` | integer | Duration |
-| `status` | text | Status |
-| `error` | text | Error |
-
-#### `alert_history` - Alert notifications history
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Alert ID (PK) |
-| `alert_rule_id` | uuid | Rule |
-| `org_id` | uuid | Organization |
-| `triggered_at` | timestamptz | Trigger time |
-| `condition_type` | text | Condition type |
-| `actual_value` | numeric | Actual value |
-| `threshold_value` | numeric | Threshold |
-| `notification_sent` | boolean | Notification flag |
-| `notification_sent_at` | timestamptz | Notification time |
-
-#### `alert_rules` - Configurable alert rules
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Rule ID (PK) |
-| `org_id` | uuid | Organization (NOT NULL) |
-| `name` | text | Rule name (NOT NULL) |
-| `condition_type` | text | stuck_jobs, device_offline, job_failure_rate, merge_failure, pipeline_failed, device_error |
-| `threshold_value` | numeric | Threshold (NOT NULL) |
-| `threshold_window_minutes` | integer | Window (default: 5) |
-| `channel` | text | email, webhook, slack (NOT NULL) |
-| `channel_config` | jsonb | Channel config |
-| `enabled` | boolean | Enabled flag (default: true) |
-| `created_at` | timestamptz | Creation time |
-| `created_by` | uuid | Creator |
-
-#### `batch_chunks` - Dataset chunks for processing
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Chunk ID (PK) |
-| `batch_id` | uuid | Batch ID |
-| `org_id` | uuid | Organization |
-| `chunk_index` | integer | Chunk index |
-| `status` | text | pending, processing, processed, failed, skipped |
-| `embedding` | vector(384) | Embedding vector |
-| `processed_at` | timestamptz | Processing time |
-| `metadata` | jsonb | Chunk metadata |
-| `created_at` | timestamptz | Creation time |
-| `job_type` | text | preprocess, process |
-| `merged_in` | boolean | Merge flag |
-| `similarity_score` | double precision | Similarity |
-| `chunk_size_gb` | double precision | Size in GB |
-| `required_io` | double precision | IO requirement |
-| `parallel_ratio` | double precision | Parallelization |
-| `dynamic_size` | boolean | Dynamic sizing (default: true) |
-| `type` | text | preprocess, process |
-| `assigned_device_id` | uuid | Assigned device |
-| `dataset_id` | uuid | Dataset |
-| `chunk_vector` | vector(16) | 16-dim vector for device matching |
-| `assigned_at` | timestamptz | Assignment time |
-
-**Comment:** Stores dataset chunks assigned to Kickin agents for processing. When `dynamic_size` is TRUE, chunk can be re-sized dynamically based on device capabilities.
-
-#### `bootstrap_rate_limits` - Rate limiting for bootstrap
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Entry ID (PK) |
-| `client_key` | text | Client identifier (NOT NULL) |
-| `created_at` | timestamptz | Creation time |
-
-#### `chunk_complexity_cache` - Complexity scores cache
-| Column | Type | Description |
-|--------|------|-------------|
-| `dataset_id` | uuid | Dataset (NOT NULL) |
-| `chunk_id` | uuid | Chunk (NOT NULL) |
-| `complexity_score` | numeric(5,2) | Complexity |
-| `last_used_at` | timestamptz | Last use |
-
-#### `chunk_profiles` - Chunk profiles with vectors
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Profile ID (PK) |
-| `chunk_id` | uuid | Chunk |
-| `dataset_id` | uuid | Dataset |
-| `complexity_vector` | vector(16) | 16-dim vector |
-| `metadata` | jsonb | Profile metadata |
-| `created_at` | timestamptz | Creation time |
-
-#### `dataset_merge_locks` - Merge operation locks
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Lock ID (PK) |
-| `dataset_id` | uuid | Dataset (NOT NULL) |
-| `agent_id` | uuid | Agent |
-| `device_id` | uuid | Device (NOT NULL) |
-| `acquired_at` | timestamptz | Acquisition time |
-| `heartbeat_at` | timestamptz | Heartbeat time |
-| `expires_at` | timestamptz | Expiration (NOT NULL) |
-| `status` | text | active, expired, released, cancelled (NOT NULL) |
-| `created_at` | timestamptz | Creation time |
-| `updated_at` | timestamptz | Update time |
-
-**Constraint:** `dataset_merge_locks_status_canonical`: status IN ('active', 'expired', 'released', 'cancelled')
-
-#### `datasets` - Dataset registry
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Dataset ID (PK) |
-| `org_id` | uuid | Organization |
-| `name` | text | Dataset name |
-| `file_type` | text | File type |
-| `total_size_gb` | double precision | Total size |
-| `file_count` | bigint | File count |
-| `avg_file_size_mb` | double precision | Average file size |
-| `status` | text | registered, scanning, scanned, chunked, processing, merge_pending, merging, merged, failed |
-| `created_at` | timestamptz | Creation time |
-| `scan_assigned_device` | uuid | Device doing scan |
-| `scan_assigned_at` | timestamptz | Scan assignment |
-| `scanned_at` | timestamptz | Scan completion |
-| `storage_type` | text | local, s3, gcs (default: local) |
-| `job_type` | text | preprocess, embedding, merge, scan, index, validate |
-| `updated_at` | timestamptz | Update time |
-| `metadata` | jsonb | Dataset metadata |
-| `merged_output_verified` | boolean | Verification flag |
-| `merged_at` | timestamptz | Merge time |
-| `merged_size_gb` | double precision | Merged size |
-| `merge_time_ms` | double precision | Merge duration |
-| `affinity_device_id` | uuid | Preferred device |
-| `dataset_checksum` | text | Checksum |
-| `disk_space_check_enabled` | boolean | Disk check (default: true) |
-| `merge_strategy` | text | auto, sequential, tree (default: auto) |
-| `merge_started_at` | timestamptz | Merge start |
-| `merge_completed_at` | timestamptz | Merge completion |
-| `merge_error` | text | Merge error |
-| `storage_config_id` | uuid | Storage config |
-| `source_path` | text | Source path |
-| `detected_columns` | jsonb | Detected columns |
-| `scan_completed` | boolean | Scan completion flag |
-
-**Constraints:**
-- `datasets_job_type_check`: job_type IN ('preprocess', 'embedding', 'merge', 'scan', 'index', 'validate')
-- `datasets_merge_strategy_check`: merge_strategy IN ('auto', 'sequential', 'tree')
-- `datasets_status_check`: status IN ('registered', 'scanning', 'scanned', 'chunked', 'processing', 'merge_pending', 'merging', 'merged', 'failed')
-
-#### `device_benchmarks` - Device performance benchmarks
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Benchmark ID |
-| `device_id` | uuid | Device |
-| `org_id` | uuid | Organization |
-| `test_name` | text | Test name |
-| `latency_ms` | double precision | Latency |
-| `throughput` | double precision | Throughput |
-| `status` | text | Status |
-| `duration_ms` | integer | Duration |
-| `created_at` | timestamptz | Creation time |
-| `updated_at` | timestamptz | Update time |
-
-#### `device_claims` - Device claim records
-| Column | Type | Description |
-|--------|------|-------------|
-| Columns defined in schema (referenced by triggers) |
-
-#### `device_events` - Device event log
-| Column | Type | Description |
-|--------|------|-------------|
-| Device event tracking |
-
-#### `device_job_performance` - Per-device job performance
-| Column | Type | Description |
-|--------|------|-------------|
-| `device_id` | uuid | Device |
-| `org_id` | uuid | Organization |
-| `job_type` | text | Job type |
-| `duration_ms` | numeric | Duration |
-| `throughput` | numeric | Throughput |
-| `success` | boolean | Success flag |
-| `created_at` | timestamptz | Creation time |
-
-#### `device_job_type_stats` - Aggregated stats by job type
-| Column | Type | Description |
-|--------|------|-------------|
-| `device_id` | uuid | Device |
-| `org_id` | uuid | Organization |
-| `job_type` | text | Job type |
-| `avg_duration_ms` | numeric | Average duration |
-| `avg_throughput` | numeric | Average throughput |
-| `job_count` | bigint | Job count |
-| `success_count` | bigint | Success count |
-| `last_updated` | timestamptz | Last update |
-
-#### `device_learning_history` - Device vector learning history
-| Column | Type | Description |
-|--------|------|-------------|
-| `device_id` | uuid | Device |
-| `profile_vector` | vector(16) | Profile vector |
-| `recorded_at` | timestamptz | Recording time |
-
-#### `device_vectors` - Device profile vectors for matching
-| Column | Type | Description |
-|--------|------|-------------|
-| `device_id` | uuid | Device (PK) |
-| `org_id` | uuid | Organization |
-| `profile_vector` | vector(16) | 16-dim profile vector |
-| `last_updated` | timestamptz | Last update |
-
-#### `devices` - Registered agent devices
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Device ID (PK) |
-| `org_id` | uuid | Organization |
-| `name` | text | Device name |
-| `status` | text | online, offline, available, busy, error, draining |
-| `type` | text | Device type |
-| `access_token_hash` | text | Token hash |
-| `environment_type` | text | Local, docker |
-| `storage_type` | text | local, s3, gcs |
-| `os` | text | Operating system |
-| `arch` | text | Architecture |
-| `cpu_cores_free` | integer | Free CPU cores |
-| `total_cpu_cores` | integer | Total CPU cores |
-| `memory_free_gb` | numeric | Free memory |
-| `total_memory_gb` | numeric | Total memory |
-| `gpu_available` | boolean | GPU availability |
-| `gpu_model` | text | GPU model |
-| `benchmark_score` | numeric | Benchmark score |
-| `max_concurrency` | integer | Max concurrent jobs |
-| `active_jobs` | integer | Active job count |
-| `last_heartbeat` | timestamptz | Last heartbeat |
-| `cpu_usage_percent` | integer | CPU usage |
-| `memory_usage_percent` | integer | Memory usage |
-| `network_latency_ms` | integer | Network latency |
-| `io_bandwidth_mb_s` | numeric | IO bandwidth |
-| `network_zone` | text | Network zone |
-| `merge_capable` | boolean | Merge capability |
-| `preferred_chunk_size_gb` | real | Preferred chunk size |
-| `runtime_supported` | jsonb | Supported runtimes |
-| `docker_available` | boolean | Docker availability |
-| `capabilities` | text[] | Capabilities array |
-| `specs` | jsonb | Full specifications |
-| `active_job_count` | integer | Active job count |
-| `token_rotate_fail_count` | integer | Token rotation failures |
-| `last_policy_update` | timestamptz | Last policy update |
-| `total_jobs` | integer | Total jobs processed |
-| `embedding` | vector(16) | Device embedding |
-| `region` | text | Device region |
-| `platform` | text | Platform identifier |
-| `runtime_cache` | jsonb | Runtime cache |
-| `deleted_at` | timestamptz | Deletion time |
-
-**Enums:**
-- `device_status_enum`: online, offline, available, busy, error, draining
-
-#### `device_policies` - Device-specific policies
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Policy ID |
-| `org_id` | uuid | Organization |
-| `device_id` | uuid | Device (NULLable) |
-| `max_concurrency` | integer | Max concurrency |
-| `enabled` | boolean | Enabled flag |
-| `created_at` | timestamptz | Creation time |
-
-#### `device_routing_rules` - Job-to-device routing rules
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Rule ID |
-| `org_id` | uuid | Organization |
-| `device_id` | uuid | Target device (NULLable) |
-| `job_type` | text | Job type |
-| `action` | text | prefer, exclude, require |
-| `priority` | integer | Rule priority |
-| `enabled` | boolean | Enabled flag |
-
-#### `dismissed_alerts` - Dismissed alerts tracking
-| Column | Type | Description |
-|--------|------|-------------|
-| Alert dismissal records |
-
-#### `enterprise_integrations` - Enterprise integration configs
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Integration ID |
-| `org_id` | uuid | Organization |
-| `provider` | text | Provider name |
-| `credentials` | jsonb | Credentials |
-| `vault_secret_name` | text | Vault secret name |
-
-#### `environment_cache` - Runtime environment cache
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Cache ID |
-| `org_id` | uuid | Organization |
-| `device_id` | uuid | Device |
-| `runtime_type` | text | Runtime type |
-| `runtime_version` | text | Runtime version |
-| `dependency_hash` | text | Dependency hash |
-| `environment_path` | text | Environment path |
-| `last_used_at` | timestamptz | Last use |
-| `invalidated_at` | timestamptz | Invalidation time |
-
-#### `execution_policies` - Job execution policies
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Policy ID |
-| `org_id` | uuid | Organization |
-| `name` | text | Policy name |
-| `max_retries` | integer | Max retries |
-| `retry_backoff_seconds` | integer | Backoff seconds |
-| `default_timeout_seconds` | integer | Default timeout |
-| `hard_timeout_seconds` | integer | Hard timeout |
-| `retryable_errors` | jsonb | Retryable errors |
-| `fatal_errors` | jsonb | Fatal errors |
-| `mode_priority` | jsonb | Mode priority |
-| `enabled` | boolean | Enabled flag |
-
-#### `execution_steps` - Pipeline execution steps
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Step ID (PK) |
-| `execution_id` | uuid | Execution |
-| `step_index` | integer | Step index |
-| `step_type` | text | Step type |
-| `plugin_id` | uuid | Plugin |
-| `script_id` | text | Script ID |
-| `config` | jsonb | Step config |
-| `status` | text | pending, running, completed, failed |
-| `error` | text | Error message |
-| `started_at` | timestamptz | Start time |
-| `completed_at` | timestamptz | Completion time |
-
-#### `executions` - Pipeline execution tracking
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Execution ID (PK) |
-| `org_id` | uuid | Organization |
-| `dataset_id` | uuid | Dataset |
-| `pipeline_template_id` | uuid | Pipeline template |
-| `status` | text | pending, running, completed, failed |
-| `current_step_index` | integer | Current step |
-| `total_steps` | integer | Total steps |
-| `output` | jsonb | Execution output |
-| `error_message` | text | Error message |
-| `created_by` | uuid | Creator |
-| `created_at` | timestamptz | Creation time |
-| `completed_at` | timestamptz | Completion time |
-| `updated_at` | timestamptz | Update time |
-
-#### `http_queue` - HTTP request queue for async operations
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Queue ID (PK) |
-| `url` | text | Target URL |
-| `body` | jsonb | Request body |
-| `headers` | jsonb | Request headers |
-| `processed` | boolean | Processed flag |
-| `processed_at` | timestamptz | Processing time |
-| `status_code` | integer | HTTP status |
-| `result` | text | Result |
-| `retry_count` | integer | Retry count |
-| `retry_at` | timestamptz | Next retry |
-| `idempotency_key` | text | Idempotency key |
-| `created_at` | timestamptz | Creation time |
-| `org_id` | uuid | Organization |
-
-#### `job_checkpoints` - Job checkpoint data
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Checkpoint ID |
-| `job_id` | uuid | Job |
-| `step_index` | integer | Step index |
-| `checkpoint_data` | jsonb | Checkpoint data |
-| `progress_percent` | numeric | Progress % |
-| `checkpointed_at` | timestamptz | Checkpoint time |
-| `is_completed` | boolean | Completion flag |
-
-#### `job_notification_queue` - Job event notifications
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Notification ID (PK) |
-| `job_id` | uuid | Job |
-| `agent_id` | uuid | Device/Agent |
-| `event_type` | text | Event type |
-| `payload` | jsonb | Event payload |
-| `processed` | boolean | Processed flag |
-| `created_at` | timestamptz | Creation time |
-| `org_id` | uuid | Organization |
-
-#### `leases` - Job leases for concurrency control
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Lease ID (PK) |
-| `job_id` | uuid | Job (unique when active) |
-| `device_id` | uuid | Device |
-| `lease_expires_at` | timestamptz | Expiration |
-| `status` | text | active, cancelled |
-
-#### `org_members` - Organization membership
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Membership ID |
-| `org_id` | uuid | Organization |
-| `user_id` | uuid | User |
-| `role` | text | admin, member |
-| `member_name` | text | Member name |
-| `created_at` | timestamptz | Creation time |
-
-#### `org_plugins` - Organization plugin access
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Entry ID |
-| `org_id` | uuid | Organization |
-| `plugin_id` | uuid | Plugin |
-| `enabled` | boolean | Enabled flag |
-| `rollout_percentage` | integer | Rollout % |
-
-#### `org_quotas` - Organization resource quotas
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Quota ID |
-| `org_id` | uuid | Organization |
-| `max_devices` | integer | Max devices |
-| `max_concurrent_jobs` | integer | Max concurrent jobs |
-| `max_environments` | integer | Max environments |
-
-#### `org_storage_configs` - Organization storage configurations
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Config ID (PK) |
-| `org_id` | uuid | Organization |
-| `name` | text | Config name |
-| `storage_mode` | text | Mode |
-| `provider` | text | s3, gcs, azure |
-| `bucket_name` | text | Bucket name |
-| `region` | text | Region |
-| `endpoint` | text | Custom endpoint |
-| `mount_base_path` | text | Mount path |
-| `is_default` | boolean | Default flag |
-| `created_at` | timestamptz | Creation time |
-
-#### `org_usage` - Organization usage tracking
-| Column | Type | Description |
-|--------|------|-------------|
-| Usage metrics |
+### Core Tables
 
 #### `orgs` - Organizations
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | uuid | Org ID (PK) |
-| `name` | text | Org name |
+| `id` | uuid (PK) | Organization ID |
+| `name` | text | Organization name |
+| `plan` | text | `free`, `pro`, `enterprise` |
+| `claim_secret` | text | Secret for device registration |
 | `team_size` | integer | Team size |
-| `plan` | text | free, pro, enterprise |
 | `created_at` | timestamptz | Creation time |
 
-#### `pipeline_templates` - Reusable pipeline definitions
+#### `devices` - Agent Devices
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | uuid | Template ID (PK) |
-| `org_id` | uuid | Organization |
+| `id` | uuid (PK) | Device ID |
+| `org_id` | uuid (FK) | Organization |
+| `name` | text | Device name |
+| `status` | enum | `online`, `offline`, `available`, `busy`, `error`, `draining` |
+| `access_token_hash` | text | SHA-256 hash of access token |
+| `benchmark_score` | numeric | Performance score (0-10) |
+| `max_concurrency` | integer | Max concurrent jobs |
+| `runtime_supported` | jsonb | `["python", "node"]` |
+| `docker_available` | boolean | Docker support |
+| `capabilities` | text[] | Capability tags |
+| `embedding` | vector(16) | 16-dim profile vector |
+| `total_cpu_cores` | integer | Total CPU cores |
+| `total_memory_gb` | numeric | Total RAM |
+| `gpu_available` | boolean | GPU availability |
+| `last_heartbeat` | timestamptz | Last heartbeat |
+
+#### `datasets` - Dataset Registry
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid (PK) | Dataset ID |
+| `org_id` | uuid (FK) | Organization |
+| `name` | text | Dataset name |
+| `status` | text | `registered`, `scanning`, `scanned`, `chunked`, `processing`, `merge_pending`, `merging`, `merged`, `failed` |
+| `storage_type` | text | `local`, `s3`, `gcs` |
+| `total_size_gb` | double precision | Total size |
+| `file_count` | bigint | Number of files |
+| `source_path` | text | Source location |
+| `dataset_checksum` | text | Integrity checksum |
+| `merge_strategy` | text | `auto`, `sequential`, `tree` |
+
+#### `agent_jobs` - Main Job Queue
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid (PK) | Job ID |
+| `org_id` | uuid (FK) | Organization |
+| `agent_id` | uuid (FK) | Assigned device |
+| `job_type` | text | `scan_dataset`, `process`, `merge_dataset`, etc. |
+| `status` | text | `pending`, `assigned`, `running`, `completed`, `failed` |
+| `payload` | jsonb | Job configuration |
+| `lease_expires_at` | timestamptz | Lease expiration |
+| `execution_id` | uuid (FK) | Pipeline execution |
+| `execution_mode` | text | `native`, `docker`, `runtime` |
+| `runtime_type` | text | `python`, `node`, `native` |
+| `retry_count` | integer | Current retry attempt |
+| `max_retries` | integer | Max retries (default: 3) |
+| `failure_classification` | text | `infra_error`, `dependency_error`, `user_code_error`, `timeout_error`, `memory_error` |
+
+#### `batch_chunks` - Dataset Chunks
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid (PK) | Chunk ID |
+| `dataset_id` | uuid (FK) | Parent dataset |
+| `chunk_index` | integer | Chunk sequence number |
+| `status` | text | `pending`, `processing`, `processed`, `failed`, `skipped` |
+| `embedding` | vector(384) | 384-dim embedding |
+| `chunk_vector` | vector(16) | 16-dim for device matching |
+| `chunk_size_gb` | double precision | Chunk size |
+| `assigned_device_id` | uuid (FK) | Processing device |
+
+#### `pipeline_templates` - Reusable Pipelines
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | uuid (PK) | Template ID |
+| `org_id` | uuid (FK) | Organization |
 | `name` | text | Template name |
-| `description` | text | Description |
-| `dataset_id` | uuid | Dataset |
-| `steps` | jsonb | Pipeline steps (array) |
-| `created_at` | timestamptz | Creation time |
-| `updated_at` | timestamptz | Update time |
+| `steps` | jsonb | Array of step definitions |
+| `description` | text | Template description |
 
-#### `plan_limits` - Plan-based limits
+#### `executions` - Pipeline Instances
 | Column | Type | Description |
 |--------|------|-------------|
-| `plan_name` | text | Plan name |
-| `max_devices` | integer | Max devices |
-| `max_concurrent_jobs` | integer | Max jobs |
+| `id` | uuid (PK) | Execution ID |
+| `org_id` | uuid (FK) | Organization |
+| `dataset_id` | uuid (FK) | Target dataset |
+| `pipeline_template_id` | uuid (FK) | Template used |
+| `status` | text | `pending`, `running`, `completed`, `failed` |
+| `current_step_index` | integer | Current step (0-based) |
+| `total_steps` | integer | Total steps |
 
-#### `plugin_execution_history` - Plugin execution tracking
+#### `plugins` - Plugin Registry
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | uuid | Execution ID (PK) |
-| `org_id` | uuid | Organization |
-| `plugin_id` | uuid | Plugin |
-| `job_id` | uuid | Job |
-| `device_id` | uuid | Device |
-| `status` | text | started, completed, failed |
-| `started_at` | timestamptz | Start time |
-| `finished_at` | timestamptz | Finish time |
-| `error` | text | Error message |
-| `execution_duration_ms` | integer | Duration |
-
-#### `plugin_signing_keys` - Plugin signing keys
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Key ID (PK) |
-| `org_id` | uuid | Organization |
-| `public_key` | text | Public key |
-| `revoked_at` | timestamptz | Revocation time |
-| `created_at` | timestamptz | Creation time |
-
-#### `plugins` - Available plugins
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Plugin ID (PK) |
-| `org_id` | uuid | Organization |
+| `id` | uuid (PK) | Plugin ID |
+| `org_id` | uuid (FK) | Organization |
 | `name` | text | Plugin name |
-| `version` | text | Version |
-| `language` | text | python, node |
-| `plugin_type` | text | Type |
-| `description` | text | Description |
-| `category` | text | Category |
-| `storage_path` | text | Storage path |
-| `checksum` | text | Checksum |
+| `version` | text | Version string |
+| `language` | text | `python`, `node`, `go`, `rust`, etc. |
+| `storage_path` | text | Binary location |
+| `checksum` | text | SHA-256 of binary |
 | `signature` | bytea | Ed25519 signature |
-| `signature_key_id` | text | Key ID |
-| `resources` | jsonb | Resources |
-| `trusted` | boolean | Trusted flag |
-| `os` | text | Operating system |
-| `arch` | text | Architecture |
-| `plugin_group` | text | Plugin group |
-| `network` | boolean | Network access |
-| `config_schema` | jsonb | Config schema |
-| `input_schema` | jsonb | Input schema |
-| `output_schema` | jsonb | Output schema |
-| `created_at` | timestamptz | Creation time |
+| `trusted` | boolean | Trusted flag (required for execution) |
+| `resources` | jsonb | Resource limits |
 
-#### `runtime_environments` - Cached runtime environments
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Environment ID (PK) |
-| `org_id` | uuid | Organization |
-| `device_id` | uuid | Device |
-| `runtime_type` | text | python, node |
-| `runtime_version` | text | Version |
-| `dependency_hash` | text | Dependency hash |
-| `platform` | text | Platform |
-| `environment_path` | text | Path |
-| `last_used_at` | timestamptz | Last use |
-| `invalidated_at` | timestamptz | Invalidation |
-| `created_at` | timestamptz | Creation time |
+### Key Database Functions
 
-#### `step_outputs` - Execution step outputs
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Output ID (PK) |
-| `execution_step_id` | uuid | Step |
-| `output_key` | text | Output key |
-| `output_value` | jsonb | Output value |
-| `created_at` | timestamptz | Creation time |
+#### Job Management
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `assign_best_job_to_best_device` | `(p_org_id)` → jsonb | Match best job to best device using vectors |
+| `claim_jobs_for_device` | `(p_device_id, p_org_id, p_limit, p_lease_ttl)` → table | Batch claim jobs — returns dataset_id, chunk_index, step_index as top-level columns |
+| `acquire_lease` | `(p_job_id, p_org_id, p_device_id, p_ttl)` → boolean | Acquire job lease |
+| `cleanup_stuck_jobs` | `(p_max_retries, p_org_id)` → jsonb | Recover stuck jobs |
+| `complete_job_idempotent` | `(p_job_id, p_status, ...)` → boolean | Idempotent completion |
 
-#### `system_config` - System configuration
-| Column | Type | Description |
-|--------|------|-------------|
-| `key` | text | Config key (PK) |
-| `value` | text | Config value |
+#### Device Management
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `select_best_device` | `(p_org_id, p_job_type, p_chunk_vector)` → uuid | Find best device |
+| `match_best_device` | `(p_org_id, p_chunk_vector, p_job_type)` → table | Device ranking with scores |
+| `recalcualte_device_vector` | `(p_device_id)` → void | Recalculate profile vector |
+| `record_benchmark` | records benchmark | Update device score |
 
-#### `system_logs` - System event logs
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Log ID (PK) |
-| `event_type` | text | Event type |
-| `message` | text | Log message |
-| `org_id` | uuid | Organization |
-| `created_at` | timestamptz | Creation time |
+#### Pipeline & Chunking
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `pre_chunk_dataset_smart` | `(p_dataset_id, p_org_id)` → jsonb | Tier 1: Create chunks with historical device hints |
+| `resize_chunks_for_pipeline` | `(p_dataset_id, p_org_id, p_job_type)` → jsonb | Tier 2: Reassign chunks using live device metrics |
+| `rechunk_for_device` | `(p_dataset_id, p_device_id, p_org_id, p_job_type)` → jsonb | Legacy — no longer called (deprecated) |
+| `activate_pipeline` | `(p_template_id, p_dataset_id, p_org_id)` → jsonb | Start pipeline execution |
+| `get_execution_detail` | `(p_execution_id)` → table | Execution details |
 
-#### `vector_batches` - Vector batch operations
-| Column | Type | Description |
-|--------|------|-------------|
-| Vector batch data |
+### Active Triggers
 
-#### `vector_datasets` - Vector dataset tracking
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Dataset ID |
-| `org_id` | uuid | Organization |
-| `name` | text | Name |
-| `dimensions` | integer | Vector dimensions |
-| `created_at` | timestamptz | Creation time |
+| Trigger | Table | Event | Function | Purpose |
+|---------|-------|-------|----------|---------|
+| `trg_create_scan_job_on_insert` | `datasets` | AFTER INSERT | `create_scan_job_on_dataset_insert` | Creates scan agent_job automatically |
+| `trg_auto_progress_after_scan` | `datasets` | AFTER UPDATE OF status | `auto_progress_after_scan` | Calls pre_chunk_dataset_smart() on →'scanned' |
+| `trg_cleanup_leases_on_offline` | `devices` | AFTER UPDATE OF status | `cleanup_leases_on_offline` | Deletes active leases when device goes offline |
+| `touch_device_vector_trigger` | `device_benchmarks` | AFTER INSERT | `touch_device_vector` | Recalculates device 16-dim profile vector |
+| `trg_calculate_optimal_chunk_size` | `device_benchmarks` | AFTER INSERT | `invoke_optimal_chunk_size_calculation` | Invokes chunk size calculation |
+| `set_org_id_on_insert` (×8 tables) | Various | BEFORE INSERT | Various `set_*_org_id_trigger` | Auto-fills org_id from user context |
+| `increment_vector_count` | `vector_store` | AFTER INSERT | `update_vector_dataset_count` | Tracks vector count |
+| `org_storage_configs_updated_at` | `org_storage_configs` | BEFORE UPDATE | `update_org_storage_configs_updated_at` | Updates updated_at |
+| `update_pipeline_timestamp` | `pipeline_templates` | BEFORE UPDATE | `update_pipeline_timestamp` | Updates updated_at |
 
-#### `vector_store` - Vector storage
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | uuid | Vector ID |
-| `dataset_id` | uuid | Dataset |
-| `embedding` | vector | Embedding |
-| `metadata` | jsonb | Metadata |
+### Ghost Triggers (Defined Functions but NOT Wired)
+
+The following trigger functions exist in the schema but have **no `CREATE TRIGGER`** attached. The operations they'd perform are handled by edge functions or pipeline flow instead.
+
+| Unwired Function | Purpose | Reason Not Wired |
+|------------------|---------|-----------------|
+| `assign_chunk_job_on_insert` | Auto-create agent_jobs from batch_chunks with merged payload | **Chunk job creation handled by `plan_dataset_chunks` edge function directly** |
+| `auto_create_agent_job` | Auto-create merge job when chunks processed | Merge is a pipeline step, not auto-triggered |
+| `advance_pipeline_on_job_complete` | Insert notification on job completion | Pipeline advancement handled by edge function |
+| `on_merge_job_finished` | Set dataset ready on merge complete | Merge completion flows through pipeline |
+| `enqueue_device_online_event` | Queue event on device online | Event queue not currently used |
+| `handle_dataset_scan_trigger` | Handle dataset INSERT with scan | Replaced by wired `create_scan_job_on_dataset_insert` |
+| `handle_job_failure` | Handle job failure side effects | Handled by edge function `report_job_error` |
+| `notify_agent_on_dataset_register` | Notify on dataset register | Newer version of wired `create_scan_job_on_dataset_insert` |
+| `on_agent_job_failed` | Handle agent job failure | Handled by edge function `report_job_error` |
+| `queue_job_notification` | Queue notification on INSERT | Handled by `job_notification_queue` directly |
+| `manage_agent_job_state` | Enforce state machine transitions | Handled by edge functions + RPCs |
+| `prevent_overassign_agent_job` | Prevent over-assignment | Handled by `claim_jobs_for_device` RPC |
 
 ---
 
-## Functions
-
-### Job Management Functions
-
-#### `acquire_dataset_merge_lock(p_dataset_id, p_agent_id, p_device_id, p_org_id, p_duration_minutes)` → `jsonb`
-Acquire merge lock for a dataset. Requires p_org_id to verify device ownership. Returns `{success, lock_id, expires_at}`.
-
-#### `acquire_lease(p_job_id, p_org_id, p_device_id, p_ttl_seconds)` → `boolean`
-Acquire lease for a job. Validates org_id ownership and device assignment.
-
-#### `activate_pipeline(p_pipeline_template_id, p_dataset_id, p_org_id, p_created_by)` → `jsonb`
-Activate a pipeline template for a dataset. Creates execution record and job steps.
-
-#### `assign_agent_job(p_org_id)` → `jsonb`
-Assign best job to best device using vector similarity matching.
-
-#### `assign_agent_job(p_org_id, p_agent_id)` → `table(ok, job_id, job_type, payload, error)`
-Assign a specific job to a specific device.
-
-#### `assign_agent_job(p_job_id, p_agent_id, p_org_id)` → `boolean`
-Force-assign a specific job to a device. **Requires org_id** to prevent cross-org attacks.
-
-#### `assign_best_job_to_best_device(p_org_id)` → `jsonb`
-Atomic function that finds the best pending job and best available device, then assigns them.
-
-#### `assign_chunk_job_on_insert()` → `trigger`
-Trigger function that automatically assigns a chunk processing job when a new batch_chunk is inserted.
-
-#### `batch_assign_jobs_atomic(p_device_id, p_org_id, p_limit, p_job_type_filter)` → `jsonb`
-Atomically assign multiple jobs to a device in a single transaction.
-
-#### `claim_job_with_compatibility(p_org_id, p_device_id)` → `table(ok, job_id, job_type, payload, runtime_type, runtime_dependencies, entrypoint, execution_mode, ...)`
-Claim a job with runtime and execution mode compatibility checking. Supports warm environment detection.
-
-#### `claim_jobs_for_device(p_device_id, p_org_id, p_limit, p_lease_ttl_seconds)` → `table(job_id, job_type, job_payload, exec_id)`
-Claim multiple jobs for a specific device with re-chunking support.
-
-#### `claim_next_job_for_device(p_org_id, p_device_id)` → `table(ok, job_id, job_type, payload, runtime_type, runtime_dependencies, entrypoint, execution_mode, error)`
-Claim the next available job compatible with the device.
-
-#### `cleanup_stuck_jobs(p_max_retries, p_org_id)` → `jsonb`
-Recover stuck jobs (assigned/running beyond timeout). Re-queue or move to dead letter.
-
-#### `cleanup_old_agent_jobs()`
-Delete completed/failed jobs older than 30 days.
-
-#### `complete_job_idempotent(p_job_id, p_status, p_duration_ms, p_result, p_device_id, p_org_id)` → `boolean`
-Idempotent job completion with lease validation. Prevents duplicate completions.
-
-#### `force_assign_job(p_job_id, p_agent_id, p_org_id)` → `boolean`
-Force-assign job to device. **SECURITY: Requires org_id validation**.
-
-#### `lease_agent_job(p_job_id, p_org_id, p_agent_id, p_ttl_secs)` → `boolean`
-Lease an agent job with atomic upsert.
-
-#### `reclaim_jobs_from_device(p_device_id)` → `jsonb`
-Reclaim all jobs from a device and cancel its leases.
-
-#### `reconcile_device_stale_jobs(p_device_id, p_org_id)` → `integer`
-Reconcile stale jobs on device restart.
-
-#### `recover_stuck_jobs(_timeout_minutes, _max_retries)` → `jsonb`
-Find assigned/running jobs older than timeout → re-queue or fail (safe).
-
-#### `record_agent_job_result(_job_id, _status, _duration_ms, _throughput, _output_token, _plugin_id, _plugin_version, _metrics)` → `void`
-Production-safe result recorder: updates job status and stores metrics into agent_metrics.
-
-#### `start_job(p_job_id, p_agent_id)` → `json`
-Start a job (transition from pending to running).
-
-#### `record_job_performance(p_device_id, p_org_id, p_job_type, p_duration_ms, p_throughput, p_success)` → `void`
-Record job performance metrics for a device.
-
-### Device Management Functions
-
-#### `check_and_set_policy_cooldown(p_device_id)` → `jsonb`
-Atomic cooldown check for agent health policy updates (5-second cooldown).
-
-#### `device_has_warm_environment(p_device_id, p_runtime_type, p_runtime_version, p_dependency_lock_hash)` → `boolean`
-Check if device has a warm (cached) runtime environment.
-
-#### `device_matches_requirements(p_device_id, p_runtime_type, p_min_python_version, p_required_arch, p_required_os)` → `boolean`
-Check if device matches job requirements.
-
-#### `device_supports_execution_mode(p_device_id, p_mode)` → `boolean`
-Check if device supports execution mode (docker, runtime, native).
-
-#### `device_supports_runtime(p_device_id, p_runtime_type)` → `boolean`
-Check if device supports a runtime type.
-
-#### `elect_merge_device(_org_id, _affinity_device_id, _preferred_network_zone)` → `uuid`
-Select best device for merge operations using strategy: affinity → fastest online.
-
-#### `get_agent_job_stats(p_agent_id)` → `table(total_jobs, completed_jobs, failed_jobs, running_jobs, success_rate, avg_duration_ms, avg_jobs_per_day, last_job_at)`
-Get comprehensive job statistics for a device.
-
-#### `get_agent_metrics_aggregate(p_agent_id, p_time_range, p_interval)` → `table(period, avg_cpu, avg_memory_free_gb, max_cpu, min_memory_free_gb, metric_count)`
-Get aggregated metrics for a device over time.
-
-#### `get_device_by_id(p_device_id)` → `table(id, name, status, environment_type, storage_type, os, arch, cpu_cores_free, ...)`
-Get detailed device information.
-
-#### `get_device_job_history(p_device_id, p_limit)` → `table(job_id, job_type, status, created_at, started_at, finished_at, duration_ms, error)`
-Get job history for a device.
-
-#### `get_device_job_stats(p_device_id, p_job_type, p_window_hours)` → `table(avg_duration_ms, avg_throughput, success_rate, job_count)`
-Get job statistics by type for a device.
-
-#### `get_device_rankings(org_id, job_type, chunk_vector)` → `table(id, name, capabilities, similarity)`
-Get device rankings using vector similarity.
-
-#### `get_fleet_health()` → `table(id, name, status, health_score, cpu_usage, memory_usage_gb, memory_total_gb, active_workers, max_concurrency, last_heartbeat, gpu_available, environment_type)`
-Get health status of all devices in the fleet.
-
-#### `get_or_create_runtime_environment(p_org_id, p_runtime_type, p_runtime_version, p_dependency_hash, p_device_id)` → `uuid`
-Get or create a runtime environment for caching.
-
-#### `match_best_device(_org_id, _chunk_vector, _job_type)` → `table(id, device_id, score)`
-Find best device using vector similarity and load balancing.
-
-#### `match_best_execution_target(p_org_id, p_job_vector, p_job_type, p_runtime_type, p_execution_mode)` → `table(device_id, execution_mode, compatibility_score)`
-Match best execution target with compatibility scoring.
-
-#### `recalcualte_device_vector(p_device_id)` → `void`
-Recalculate device profile vector from benchmarks.
-
-#### `rotate_agent_token(p_device_id, p_org_id)` → `void`
-Rotate agent token with archive of old token.
-
-#### `select_best_device(p_org_id, p_job_type, p_chunk_vector)` → `uuid`
-Select best device for job. Includes busy devices if they have capacity.
-
-#### `set_device_vector(p_device_id, p_vec_literal)` → `void`
-Set device profile vector.
-
-### Dataset Management Functions
-
-#### `auto_create_agent_job()` → `trigger`
-Trigger to create a single merge agent_job when batch_chunks complete for a dataset.
-
-#### `auto_progress_after_scan()` → `trigger`
-Trigger to notify on dataset scan completion.
-
-#### `create_chunks_from_plan_job()` → `trigger`
-Create chunks when plan_chunks job completes.
-
-#### `create_scan_job_on_dataset_insert()` → `trigger`
-Create scan_dataset job when dataset status is 'registered'.
-
-#### `get_dataset_executions(p_dataset_id, p_limit)` → `table(id, status, created_at, completed_at, current_step_index, total_steps)`
-Get all executions for a dataset.
-
-#### `handle_dataset_scan_trigger()` → `trigger`
-Handle dataset scan trigger - create scan job and update status.
-
-#### `notify_agent_on_dataset_register()` → `trigger`
-Create scan_dataset job when dataset is registered.
-
-#### `pre_chunk_dataset_smart(p_dataset_id, p_org_id)` → `jsonb`
-Smart chunking based on device capabilities.
-
-#### `rechunk_for_device(p_dataset_id, p_device_id, p_org_id, p_job_type)` → `jsonb`
-Re-chunk dataset specifically for a device's capabilities.
-
-#### `update_dataset_merge_metadata(p_dataset_id, p_merge_time_ms, p_merged_size_gb, p_verified)` → `void`
-Update dataset metadata after merge.
-
-#### `update_dataset_scan(p_dataset_id, p_scan_metadata)` → `jsonb`
-Update dataset after scan completion.
-
-### Pipeline Management Functions
-
-#### `advance_pipeline_on_job_complete()` → `trigger`
-Advance pipeline when a job completes - inserts into job_notification_queue.
-
-#### `get_execution_detail(p_execution_id)` → `table(execution_id, execution_status, execution_created_at, execution_completed_at, dataset_id, dataset_name, current_step_index, total_steps, step_id, step_index, step_status, step_type, step_error, step_completed_at)`
-Get detailed execution information with step details.
-
-#### `get_pipeline_status(p_org_id)` → `table(pending_count, running_count, completed_count, failed_count, total_count)`
-Get pipeline status counts.
-
-#### `get_pipeline_template(p_template_id)` → `table(id, name, description, dataset_id, steps, created_at, updated_at, dataset_name)`
-Get pipeline template details.
-
-#### `list_pipeline_templates(p_org_id, p_limit)` → `table(id, name, description, dataset_id, dataset_name, step_count, created_at, updated_at)`
-List pipeline templates.
-
-#### `update_dataset_status_on_merge_complete()` → `trigger`
-Update dataset status to 'merged' when merge job completes.
-
-### Plugin Management Functions
-
-#### `calculate_dependency_hash(p_runtime_type, p_runtime_dependencies)` → `text`
-Calculate SHA-256 hash of runtime dependencies.
-
-#### `compute_agent_job_hashes()` → `trigger`
-Compute dependency hash when runtime_type changes.
-
-#### `compute_dependency_lock_hash()` → `trigger`
-Compute dependency lock hash from runtime_dependencies.
-
-#### `compute_job_lock_hash()` → `trigger`
-Compute job lock hash and set defaults for run_id, attempt_number.
-
-#### `get_org_plugins(p_org_id, p_os, p_arch)` → `table(plugin_id, name, version, language, plugin_type, storage_path, checksum, signature, signature_key_id, resources, trusted, rollout_percentage, os, arch, plugin_group, network)`
-Get plugins available to an organization.
-
-#### `get_plugin_by_id(p_plugin_id)` → `table(id, name, version, language, plugin_type, description, category, trusted, created_at, config_schema, input_schema, output_schema)`
-Get plugin details by ID.
-
-#### `record_plugin_execution_start(p_org_id, p_plugin_id, p_job_id, p_device_id)` → `uuid`
-Record plugin execution start, returns execution_id.
-
-#### `record_plugin_execution_end(p_execution_id, p_status, p_error)` → `jsonb` / `void`
-Record plugin execution end.
-
-#### `register_plugin()` (Edge Function)
-Register a new plugin with Ed25519 signature.
-
-#### `should_run_plugin(p_device_id, p_rollout_percentage)` → `boolean`
-Determine if a device should run a plugin based on rollout percentage.
-
-#### `should_run_plugin_for_device(p_device_id, p_rollout_percentage)` → `boolean`
-Determine if device should run plugin using MD5 hash.
-
-### Organization & Auth Functions
-
-#### `create_org_with_owner(org_name, team_size, member_name)` → `uuid`
-Create organization and attach user as admin.
-
-#### `get_current_org_id()` → `uuid`
-Get current user's organization ID from JWT.
-
-#### `get_user_org_role(p_user_id)` → `table(org_id, role)`
-Get user's role in their organization.
-
-#### `is_org_admin(_org_id)` → `boolean`
-Check if current user is org admin.
-
-#### `is_org_member(_org_id)` → `boolean`
-Check if current user is org member.
-
-#### `check_org_quota(p_org_id, p_quota_type, p_value)` → `boolean`
-Check if organization is within quota limits (devices, jobs, environments).
-
-#### `check_plan_limit(p_org_id, p_limit_type, p_increment)` → `boolean`
-Check if organization is within plan limits.
-
-### Storage & Vault Functions
-
-#### `decrypt_vault_secret(secret_name)` → `text`
-Decrypt a secret from Supabase Vault.
-
-#### `get_org_storage_configs(p_org_id)` → `table(id, name, storage_mode, provider, bucket_name, region, endpoint, mount_base_path, is_default, created_at)`
-Get organization's storage configurations.
-
-#### `get_storage_config` (Edge Function)
-Get storage backend configuration.
-
-#### `migrate_enterprise_credentials_to_vault()` → `void`
-Migrate enterprise credentials from table to Vault.
-
-#### `set_default_storage_config(p_org_id, p_config_id)` → `table(updated_id)`
-Set default storage configuration for org.
-
-#### `store_s3_credentials_to_vault(p_org_id, p_access_key_id, p_secret_access_key, p_provider, p_secret_name)` → `jsonb`
-Store S3 credentials in Vault.
-
-#### `test_storage_connection` (Edge Function)
-Test storage connection.
-
-### Notification & Event Functions
-
-#### `enqueue_device_online_event()` → `trigger`
-Enqueue device online event to notification queue.
-
-#### `get_org_audit_log(p_org_id, p_limit, p_event_type_filter)` → `table(id, event_type, message, created_at)`
-Get organization audit log.
-
-#### `get_audit_event_types()` → `text[]`
-Get list of valid audit event types.
-
-#### `insert_device_agent_metric()` → `trigger`
-Insert device metric on update.
-
-#### `notify_job_queue()` → `void`
-Notify job queue via PostgreSQL NOTIFY.
-
-#### `notify_merge_complete(p_dataset_id)` → `void`
-Notify merge completion via pg_notify.
-
-#### `notify_new_job(p_org_id, p_job_id, p_device_id)` → `void`
-Notify new job via pg_notify.
-
-#### `relay_job_event` (Edge Function)
-Relay job events to notification queue.
-
-### System & Maintenance Functions
-
-#### `auto_rotate_stale_tokens()` → `void`
-Rotate tokens for devices with stale tokens (older than 7 days).
-
-#### `cleanup_agent_worker_activity(p_days_old)` → `integer`
-Cleanup old agent worker activity records.
-
-#### `cleanup_duplicate_cron_jobs()` → `void`
-Remove duplicate cron jobs.
-
-#### `cleanup_expired_merge_locks(p_org_id)` → `integer`
-Cleanup expired merge locks.
-
-#### `cleanup_job_notification_queue(p_days_old)` → `integer`
-Cleanup old processed notifications.
-
-#### `cleanup_leases_on_offline()` → `trigger`
-Cleanup leases when device goes offline.
-
-#### `cleanup_offline_device_leases(p_org_id)` → `jsonb`
-Cleanup all leases for offline devices.
-
-#### `cleanup_old_benchmarks()` → `void`
-Cleanup benchmarks older than 30 days.
-
-#### `evaluate_alert_rules()` → `void`
-Evaluate alert rules (cron job).
-
-#### `get_dashboard_stats(p_org_id)` → `table(total_jobs, running_jobs, completed_jobs, failed_jobs, pending_jobs, total_datasets, active_datasets, total_devices, online_devices, busy_devices, total_executions, running_executions, completed_executions, failed_executions)`
-Get dashboard statistics.
-
-#### `get_dashboard_summary()` → `table(total_jobs, running_jobs, completed_jobs, failed_jobs, queued_jobs, success_rate, total_datasets, total_storage_gb, total_files, total_agents, online_agents, busy_agents, gpu_agents, avg_benchmark_score)`
-Get overall dashboard summary.
-
-#### `get_recent_activity(p_limit)` → `table(id, job_type, status, created_at, finished_at, duration_ms, agent_name, dataset_name, error)`
-Get recent job activity.
-
-#### `global_search(p_org_id, p_query, p_type, p_limit)` → `table(result_type, id, name, status, created_at)`
-Global search across jobs, datasets, and devices.
-
-#### `mark_offline_devices()` → `void`
-Mark devices as offline if no heartbeat in 10 minutes.
-
-#### `prune_old_agent_metrics()` → `void`
-Prune agent metrics older than 30 days.
-
-#### `prune_old_system_logs()` → `void`
-Prune system logs older than 90 days.
-
-#### `system_health_heartbeat(_stale_device_minutes, _recovery_timeout, _max_retries)` → `jsonb`
-System health check: mark stale devices offline, recover stuck jobs, try assign per org.
-
-#### `consolidated_dispatch()` → `void`
-Consolidated dispatch via HTTP queue.
-
-#### `dispatch_http_jobs_secure()` → `void`
-Secure HTTP job dispatch.
-
-#### `process_http_queue(p_limit, p_max_retries)` → `integer`
-Process HTTP queue items with retry logic.
-
-#### `safe_http_post(target_url, payload, headers)` → `void`
-Safe HTTP POST with error handling (doesn't interrupt parent transaction).
-
-#### `log_agent_error(p_device_id, p_job_id, p_error_message)` → `void`
-Log agent error with message sanitization (removes paths, IPs, emails).
-
-### Utility Functions
-
-#### `calculate_retry_backoff(p_retry_count, p_base_delay_seconds, p_max_delay_seconds, p_multiplier)` → `interval`
-Calculate retry backoff with exponential growth.
-
-#### `check_http_queue_depth()` → `boolean`
-Check HTTP queue depth and trigger alerts if threshold exceeded.
-
-#### `check_platform_signing_configured()` → `boolean`
-Check if platform signing key is configured.
-
-#### `encode_plugin_signature(sig)` → `text`
-Encode plugin signature to base64.
-
-#### `get_advisory_lock_key(p_uuid)` → `bigint`
-Get advisory lock key from UUID using hashtextextended.
-
-#### `get_constraints_report()` → `table(constraint_name, constraint_definition)`
-Get constraint definitions for datasets table.
-
-#### `get_edge_url()` → `text`
-Get edge function base URL from system_config.
-
-#### `get_functions_report()` → `table(routine_name, routine_type)`
-Get list of functions with 'chunk' in name.
-
-#### `get_triggers_report()` → `table(table_name, trigger_name, event_manipulation, action_timing)`
-Get triggers report for main tables.
-
-#### `list_public_functions()` → `table(function_name, arguments, return_type, language, function_code)`
-List all public functions with their source code.
-
-#### `run_all_validation_tests()` → `table(test_name, passed, details)`
-Run all validation test cases.
-
-#### `safe_cast_uuid(input)` → `uuid`
-Safely cast text to UUID (returns NULL on failure).
-
-#### `set_org_id_from_record()` → `trigger`
-Set org_id from related records (datasets, batch_chunks).
-
-#### `touch_device_vector()` → `trigger`
-Update device vector last_updated timestamp.
-
-### Validation Test Functions
-
-#### `test_case_1_device_available()` → `table(test_name, passed, details)`
-Test: Device available → job assigned immediately.
-
-#### `test_case_2_no_device()` → `table(test_name, passed, details)`
-Test: No device → job queued as pending.
-
-#### `test_case_3_multiple_chunks()` → `table(test_name, passed, details)`
-Test: Multiple chunks → each gets independent job.
-
-#### `test_case_4_state_machine()` → `table(test_name, passed, details)`
-Test: State machine transitions (NULL→assigned→running→completed, terminal states blocked).
-
-#### `test_case_5_no_duplicates()` → `table(test_name, passed, details)`
-Test: No duplicate jobs created for same chunk.
-
----
-
-## Triggers
-
-| Trigger Name | Table | Event | Function | Description |
-|-------------|-------|-------|----------|-------------|
-| `assign_chunk_job_on_insert` | `batch_chunks` | INSERT | `assign_chunk_job_on_insert()` | Auto-assign chunk job on insert |
-| `auto_assign_merge_job` | `datasets` | UPDATE | `auto_assign_merge_job()` | Auto-assign merge job via HTTP queue |
-| `auto_create_agent_job` | `batch_chunks` | UPDATE | `auto_create_agent_job()` | Create merge job when chunks complete |
-| `auto_progress_after_scan` | `datasets` | UPDATE | `auto_progress_after_scan()` | Notify after dataset scan |
-| `advance_pipeline_on_job_complete` | `agent_jobs` | UPDATE | `advance_pipeline_on_job_complete()` | Advance pipeline on job completion |
-| `cleanup_leases_on_offline` | `devices` | UPDATE | `cleanup_leases_on_offline()` | Cleanup leases when device offline |
-| `create_scan_job_on_dataset_insert` | `datasets` | INSERT | `create_scan_job_on_dataset_insert()` | Create scan job on dataset insert |
-| `compute_agent_job_hashes` | `agent_jobs` | UPDATE | `compute_agent_job_hashes()` | Compute dependency hash |
-| `compute_dependency_lock_hash` | `agent_jobs` | INSERT/UPDATE | `compute_dependency_lock_hash()` | Compute lock hash |
-| `compute_job_lock_hash` | `agent_jobs` | INSERT | `compute_job_lock_hash()` | Compute job hash and defaults |
-| `enqueue_device_online_event` | `devices` | UPDATE | `enqueue_device_online_event()` | Notify device online |
-| `handle_dataset_scan_trigger` | `datasets` | INSERT/UPDATE | `handle_dataset_scan_trigger()` | Handle dataset scan |
-| `handle_job_failure` | `agent_jobs` | UPDATE | `handle_job_failure()` | Move to dead letter on max retries |
-| `insert_device_agent_metric` | `devices` | UPDATE | `insert_device_agent_metric()` | Insert device metric |
-| `invoke_optimal_chunk_size_calculation` | `device_job_performance` | INSERT | `invoke_optimal_chunk_size_calculation()` | Update chunk complexity cache |
-| `manage_agent_job_state` | `agent_jobs` | INSERT/UPDATE | `manage_agent_job_state()` | Enforce state machine rules |
-| `on_agent_job_failed` | `agent_jobs` | UPDATE | `on_agent_job_failed()` | Log agent job failure |
-| `on_merge_job_finished` | `agent_jobs` | UPDATE | `on_merge_job_finished()` | Update dataset on merge complete |
-| `prevent_overassign_agent_job` | `agent_jobs` | INSERT | `prevent_overassign_agent_job()` | Prevent over-assignment |
-| `queue_assign_scan_job` | `agent_jobs` | INSERT | `queue_assign_scan_job()` | Assign scan job to org |
-| `queue_job_notification` | `agent_jobs` | INSERT | `queue_job_notification()` | Queue job notification |
-| `recalcualte_device_vector` | `device_benchmarks` | INSERT | - | Recalculate vector on benchmark |
-| `set_alert_rules_org_id_trigger` | `alert_rules` | INSERT/UPDATE | `set_alert_rules_org_id_trigger()` | Set org_id from context |
-| `set_enterprise_integrations_org_id_trigger` | `enterprise_integrations` | INSERT/UPDATE | `set_enterprise_integrations_org_id_trigger()` | Set org_id |
-| `set_execution_policies_org_id_trigger` | `execution_policies` | INSERT/UPDATE | `set_execution_policies_org_id_trigger()` | Set org_id |
-| `set_http_queue_org_id_trigger` | `http_queue` | INSERT/UPDATE | `set_http_queue_org_id_trigger()` | Set org_id |
-| `set_job_notification_queue_org_id` | `job_notification_queue` | - | `set_job_notification_queue_org_id()` | Set org_id from job |
-| `set_org_id_from_record` | `agent_jobs/batch_chunks` | INSERT/UPDATE | `set_org_id_from_record()` | Set org_id from related record |
-| `set_plugin_execution_history_org_id_trigger` | `plugin_execution_history` | INSERT/UPDATE | `set_plugin_execution_history_org_id_trigger()` | Set org_id |
-| `set_plugin_signing_keys_org_id_trigger` | `plugin_signing_keys` | INSERT/UPDATE | `set_plugin_signing_keys_org_id_trigger()` | Set org_id |
-| `set_runtime_environments_org_id` | `runtime_environments` | - | `set_runtime_environments_org_id()` | Set org_id from device |
-| `set_runtime_environments_org_id_trigger` | `runtime_environments` | INSERT/UPDATE | `set_runtime_environments_org_id_trigger()` | Set org_id |
-| `set_vector_datasets_org_id_trigger` | `vector_datasets` | INSERT/UPDATE | `set_vector_datasets_org_id_trigger()` | Set org_id |
-| `touch_device_vector` | `device_vectors` | UPDATE | `touch_device_vector()` | Update last_updated |
-| `trg_cleanup_leases_on_offline` | `devices` | UPDATE | `trg_cleanup_leases_on_offline()` | Cleanup leases on offline |
-| `update_dataset_merge_metadata` | `datasets` | - | `update_dataset_merge_metadata()` | Update metadata after merge |
-| `update_dataset_status_on_merge_complete` | `agent_jobs` | UPDATE | `update_dataset_status_on_merge_complete()` | Update dataset on merge |
-| `update_dataset_status_on_scan_complete` | `datasets` | UPDATE | `update_dataset_status_on_scan_complete()` | Update dataset on scan |
-
----
-
-## Edge Functions
-
-Edge Functions run on Supabase Edge Runtime (Deno) and provide the API layer for the agent.
+## Edge Functions API
 
 ### Authentication
-All functions (except `claim_device` and `register_device`) require:
-- `Authorization: Bearer <access_token>` header (Supabase JWT)
-- `x-agent-token: <token>` header (device token)
 
-### Edge Function List
+Edge functions use one of the following auth mechanisms:
 
-#### `advance_pipeline` (`/functions/v1/advance_pipeline`)
-Advance pipeline execution. Validates org access.
+| Mechanism | Header / Method | Used By |
+|-----------|----------------|---------|
+| **Device Token** | `x-agent-token: <token>` → HMAC-hashed, compared to stored hash | Agent-facing endpoints (claim jobs, start/complete, heartbeat, etc.) |
+| **Relay Key** | `x-relay-key: <secret>` | Internal pipeline functions (`run_pipeline`, `advance_pipeline`, `plan_dataset_chunks`) |
+| **Cron Secret** | `Authorization: Bearer <cron_secret>` | Cron-triggered functions (`cleanup_stuck_jobs`, `dispatch_http_jobs`) |
+| **Bootstrap Token** | `x-bootstrap-token: <token>` | Only `/bootstrap` |
+| **None (service_role)** | Service role key used directly in code | Many admin/internal functions (`register_plugin`, `get_plugin`, `decrypt_vault_secret`, `get_storage_config`, `delete_org`, `invite_member`, `create-user`, etc.) |
 
-#### `agent_health_policy` (`/functions/v1/agent_health_policy`)
-Reports device health and receives concurrency policy.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ total_cpu_cores?, total_memory_gb?, cpu_cores_free?, memory_free_gb?, cpu_usage_percent?, network_latency_ms?, gpu_available?, incoming_workload_weight? }`
-- **Response**: `{ ok, concurrency, load_factor }`
+> **Note:** Several functions use the service_role key directly with no request-level auth validation (see table below). This is a security consideration for production deployments.
 
-#### `agent_stream` (`/functions/v1/agent_stream`)
-Server-Sent Events stream for real-time job delivery.
-- **Method**: GET
-- **Auth**: Device token
-- **Events**:
-  - `hello`: `{ device_id, org_id, realtime_enabled }`
-  - `job`: `{ id, job_type, status, payload }`
-  - `sync`: `{ jobs_sent, timestamp }`
+### Complete Function List (48 Functions)
 
-#### `approve_dataset_and_plan_chunks` (`/functions/v1/approve_dataset_and_plan_chunks`)
-Approve dataset and trigger chunk planning.
-- **Method**: POST
-- **Auth**: Internal
-- **Body**: `{ dataset_id }`
-- **Response**: `{ ok, message }`
+#### Device Management (6 functions)
 
-#### `assign_agent_job` (`/functions/v1/assign_agent_job`)
-Request a job assignment from the backend.
-- **Method**: GET/POST
-- **Auth**: Device token
-- **Response**: `{ ok, result: { job_id, job_type, payload, execution_id } }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `claim_device` | POST | None (claim_code in body) | First-time registration with claim code |
+| `register_device` | POST | None (service_role) | Register with existing org using claim code |
+| `verifyAgentToken` | POST | Agent Token (x-agent-token + Authorization) | Verify device token |
+| `bootstrap` | **GET** | Bootstrap Token (x-bootstrap-token) | Get backend config (zero-config) |
+| `agent_health_policy` | POST | Agent Token | Report health, get concurrency (5s cooldown) |
+| `reconcile_agent` | POST | Agent Token | Reconcile state on restart |
 
-#### `auto_assign_best_device` (`/functions/v1/auto_assign_best_device`)
-Automatically assign best device for a dataset.
-- **Method**: POST
-- **Auth**: Internal
-- **Body**: `{ dataset_id }`
+#### Job Management (8 functions)
 
-#### `batch_assign_jobs` (`/functions/v1/batch_assign_jobs`)
-Batch assign multiple jobs to a device.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ limit?, lease_ttl_seconds? }`
-- **Response**: `{ ok, jobs: [...], assigned }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `assign_agent_job` | POST | Agent Token | Request job assignment (POST only, not GET) |
+| `claim_jobs_for_device` | POST | Agent Token | Batch claim multiple jobs — returns dataset_id, chunk_index, step_index |
+| `batch_assign_jobs` | POST | Agent Token | Atomic batch assignment (max 10 per call) |
+| `start_job` | POST | Agent Token | Mark job as running (bypasses Supabase client JWT — calls REST API directly with service_role) |
+| `complete_job` | POST | Agent Token | Report job completion. Does NOT directly trigger pipeline advancement. |
+| `report_job_error` | POST | Agent Token | Report job error (sanitizes paths/IPs/emails, dead-letters after 3 retries) |
+| `verify_job_lease` | POST | Agent Token | Verify lease validity (checks leases table, falls back to agent_jobs.lease_expires_at) |
+| `cleanup_stuck_jobs` | POST | Bearer (CRON_SECRET) | Recover stuck jobs |
 
-#### `bootstrap` (`/functions/v1/bootstrap`)
-Bootstrap new device with rate limiting.
-- **Method**: POST
-- **Auth**: Bearer token (claim code)
-- **Body**: `{ claim_code, sysinfo?: { hostname?, type?, cpu_cores?, memory_gb?, benchmark_score?, environment?, storage?, network_zone?, merge_capable? } }`
-- **Response**: `{ ok, device_id, agent_token, org_id }`
+#### Pipeline & Dataset (9 functions)
 
-#### `calculate_optimal_chunk_size` (`/functions/v1/calculate_optimal_chunk_size`)
-Calculate optimal chunk size based on device capabilities.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id }`
-- **Response**: `{ ok, chunk_size_gb, strategy }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `run_pipeline` | POST | Relay Key (x-relay-key) | Activate pipeline |
+| `advance_pipeline` | POST | Relay Key (x-relay-key) | Advance to next step |
+| `plan_dataset_chunks` | POST | Relay Key (x-relay-key) | Plan chunking strategy (creates/resizes chunks, generates 16-dim chunk_vectors) |
+| `pre_chunk_dataset` | POST | Relay Key (x-relay-key) | Create chunk records via pre_chunk_dataset_smart |
+| `calculate_optimal_chunk_size` | POST | Agent Token | Calculate chunk size based on device benchmarks |
+| `approve_dataset_and_plan_chunks` | POST | Relay Key (x-relay-key) | Approve dataset scan and plan chunks |
+| `report_dataset_scan` | POST | Agent Token | Report scan results |
+| `record_dataset_metadata` | POST | Agent Token | Record dataset metadata after scan, then calls plan_dataset_chunks |
+| `schedule_merge_job` | POST | Agent Token | Schedule dataset merge (selects merge-capable device, acquires merge lock) |
 
-#### `claim_device` (`/functions/v1/claim_device`)
-First-time device registration via claim code. **No auth required.**
-- **Method**: POST
-- **Body**: `{ claim_code, sysinfo?: { hostname?, type?, cpu_cores?, memory_gb?, benchmark_score?, environment?, storage?, network_zone?, merge_capable? } }`
-- **Response**: `{ ok, device_id, agent_token, org_id }`
+#### Plugin Management (7 functions)
 
-#### `claim_jobs_for_device` (`/functions/v1/claim_jobs_for_device`)
-Claim multiple jobs for the authenticated device.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ limit?, lease_ttl_seconds? }`
-- **Response**: `{ ok, jobs: [...] }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `register_plugin` | POST | None (service_role) | Register new plugin (no JWT/admin validation — uses first org in DB) |
+| `get_plugin` | POST | None (service_role) | Retrieve plugin record by ID |
+| `list_plugins_for_org` | GET/POST | None (service_role) | List org plugins with signed URLs |
+| `list_all_plugins` | GET/POST | Optional JWT | List all plugins |
+| `get_plugin_signing_key` | POST | Agent Token | Get signing key by key_id (returns 410 Gone if expired) |
+| `list_plugin_signing_keys` | POST | Agent Token | List active signing keys for org |
+| `decrypt_vault_secret` | POST | None (service_role) | Decrypt secrets from Vault |
 
-#### `cleanup_job_notification_queue` (`/functions/v1/cleanup_job_notification_queue`)
-Cleanup old job notifications.
-- **Method**: POST
-- **Response**: `{ success, error? }`
+#### Storage & Config (4 functions)
 
-#### `cleanup_stuck_jobs` (`/functions/v1/cleanup_stuck_jobs`)
-Cleanup stuck jobs (cron job).
-- **Method**: POST
-- **Auth**: Internal (cron secret)
-- **Response**: `{ ok, reclaimed?, dead_lettered?, fixed_inconsistent? }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `get_storage_config` | POST | None (service_role) | Get storage config (decrypts credentials from Vault) |
+| `store_storage_credentials` | POST | None (service_role) | Store S3 credentials (calls store_s3_credentials_to_vault RPC) |
+| `test_storage_connection` | POST | None (service_role) | Validate input fields only — does NOT actually test connectivity |
+| `delete_org` | POST | None (service_role) | **DESTRUCTIVE** — deletes org and all related data (no auth validation) |
 
-#### `complete_job` (`/functions/v1/complete_job`)
-Report job completion.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ execution_id?, status: "completed"|"failed"|"cancelled", duration_ms?, output?, error?, device_id? }`
-- **Response**: `{ success, execution }`
+#### Real-time & Events (5 functions)
 
-#### `create-user` (`/functions/v1/create-user`)
-Create new user and organization.
-- **Method**: POST
-- **Body**: `{ email, password, org_name, team_size?, member_name? }`
-- **Response**: `{ ok, user_id, org_id }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `agent_stream` | GET | Agent Token | SSE job stream (polls every 30s inside ReadableStream, not WebSocket) |
+| `relay_job_event` | POST | Dual: Relay Key OR Device Token | Relay events to agents (supports process_dataset and assign_job dispatch types) |
+| `notify_available_device` | POST | Agent Token | Notify availability (updates metrics, derives busy/available status) |
+| `dispatch_http_jobs` | POST | Cron Secret (x-cron-secret) | Process http_queue (5 retries, exponential backoff, max 50 per batch) |
+| `cleanup_job_notification_queue` | POST | None (service_role) | Clean old notifications (>24h) |
 
-#### `decrypt_vault_secret` (`/functions/v1/decrypt_vault_secret`)
-Decrypt a vault secret.
-- **Method**: POST
-- **Body**: `{ secret_name }`
-- **Response**: `{ ok, value }`
+#### Admin & Utility (7 functions)
 
-#### `delete_org` (`/functions/v1/delete_org`)
-Delete an organization and all associated data.
-- **Method**: POST
-- **Body**: `{ org_id }`
-- **Response**: `{ success }`
+| Function | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `invite_member` | POST | None (service_role) | Invite team member (creates auth invite + org_members) |
+| `create-user` | POST | None (rate-limited by IP) | Create user + org + signing key (atomic, deletes user on failure) |
+| `record_benchmark` | POST | Agent Token | Record benchmark |
+| `check_data` | POST | Internal | Data validation |
+| `verify_triggers` | POST | Internal | Verify triggers |
+| `test_rpc` | POST | Internal | Test RPC functions |
+| `upload_complete` | POST | Agent Token | Notify upload done |
 
-#### `dispatch_http_jobs` (`/functions/v1/dispatch_http_jobs`)
-Dispatch HTTP jobs from queue (cron job).
-- **Auth**: Internal (cron secret)
-- **Response**: `{ processed }`
+### SSE Events (agent_stream)
 
-#### `get_plugin` (`/functions/v1/get_plugin`)
-Retrieve plugin code.
-- **Method**: POST
-- **Body**: `{ plugin_id }`
-- **Response**: `{ plugin }`
+```
+Event: hello
+Data: { "device_id": "uuid", "org_id": "uuid", "realtime_enabled": true }
 
-#### `get_plugin_signing_key` (`/functions/v1/get_plugin_signing_key`)
-Get plugin signing key for organization.
-- **Method**: POST
-- **Auth**: Device token
-- **Response**: `{ ok, key }`
+Event: job
+Data: { "id": "uuid", "job_type": "process", "status": "assigned", "payload": {...} }
 
-#### `get_storage_config` (`/functions/v1/get_storage_config`)
-Get storage backend configuration.
-- **Method**: POST
-- **Body**: `{ storage_type? }`
-- **Response**: `{ config }`
-
-#### `invite_member` (`/functions/v1/invite_member`)
-Invite a member to the organization.
-- **Method**: POST
-- **Body**: `{ email, role, org_id }`
-- **Response**: `{ success }`
-
-#### `list_all_plugins` (`/functions/v1/list_all_plugins`)
-List all plugins available to user's organization.
-- **Method**: GET
-- **Response**: `{ ok, plugins: [...] }`
-
-#### `list_plugin_signing_keys` (`/functions/v1/list_plugin_signing_keys`)
-List plugin signing keys.
-- **Method**: GET
-- **Auth**: Device token
-- **Response**: `{ ok, keys }`
-
-#### `list_plugins_for_org` (`/functions/v1/list_plugins_for_org`)
-List plugins for organization.
-- **Method**: GET/POST
-- **Response**: `{ ok, plugins }`
-
-#### `notify_available_device` (`/functions/v1/notify_available_device`)
-Notify that a device is available for work.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id?, job_type? }`
-- **Response**: `{ ok, assigned? }`
-
-#### `plan_dataset_chunks` (`/functions/v1/plan_dataset_chunks`)
-Plan dataset chunks using vector embeddings.
-- **Method**: POST
-- **Auth**: Internal
-- **Body**: `{ dataset_id }`
-- **Response**: `{ ok, chunks_created, chunk_size_gb }`
-
-#### `pre_chunk_dataset` (`/functions/v1/pre_chunk_dataset`)
-Pre-chunk dataset for processing.
-- **Method**: POST
-- **Auth**: Internal
-- **Body**: `{ dataset_id, chunk_size? }`
-- **Response**: `{ ok, chunks_created }`
-
-#### `reconcile_agent` (`/functions/v1/reconcile_agent`)
-Reconcile agent state on restart.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ stale_job_timeout_minutes? }`
-- **Response**: `{ ok, reclaimed, fixed }`
-
-#### `record_benchmark` (`/functions/v1/record_benchmark`)
-Record device benchmark scores.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ test_name?, latency_ms?, device_id? }`
-- **Response**: `{ ok }`
-
-#### `record_dataset_metadata` (`/functions/v1/record_dataset_metadata`)
-Record dataset metadata after scan.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id, metadata }`
-- **Response**: `{ ok }`
-
-#### `register_device` (`/functions/v1/register_device`)
-Device registration (alternative to claim_device with Bearer auth).
-- **Method**: POST
-- **Auth**: Bearer token
-- **Body**: `{ name?, specs?, environment_type?, storage_type?, capabilities?, benchmark_score?, force_reclaim? }`
-- **Response**: `{ ok, device_id, access_token }`
-
-#### `register_plugin` (`/functions/v1/register_plugin`)
-Register a new plugin with Ed25519 signature.
-- **Method**: POST
-- **Body**: `{ org_id, name, version, language, plugin_type, storage_path, signature, signature_key_id?, resources?, trusted?, os?, arch?, network? }`
-- **Response**: `{ ok, plugin_id }`
-
-#### `relay_job_event` (`/functions/v1/relay_job_event`)
-Relay job events to notification queue.
-- **Method**: POST
-- **Auth**: Device token or Internal
-- **Body**: `{ job_id, event_type, payload }`
-- **Response**: `{ ok }`
-
-#### `report_dataset_scan` (`/functions/v1/report_dataset_scan`)
-Report dataset scan completion.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id, metadata }`
-- **Response**: `{ ok }`
-
-#### `report_job_error` (`/functions/v1/report_job_error`)
-Report job execution error.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ job_id, error, failure_classification?: "transient"|"permanent"|"resource"|"configuration" }`
-- **Response**: `{ ok }`
-
-#### `run_pipeline` (`/functions/v1/run_pipeline`)
-Run a pipeline template.
-- **Method**: POST
-- **Auth**: Internal
-- **Body**: `{ pipeline_template_id, dataset_id, org_id }`
-- **Response**: `{ ok, execution_id }`
-
-#### `schedule_merge_job` (`/functions/v1/schedule_merge_job`)
-Schedule a merge job for a dataset.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id }`
-- **Response**: `{ ok, job_id? }`
-
-#### `start_job` (`/functions/v1/start_job`)
-Start a job (transition to running state).
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ job_id }`
-- **Response**: `{ ok, job_id, status }`
-
-#### `store_storage_credentials` (`/functions/v1/store_storage_credentials`)
-Store encrypted storage credentials.
-- **Method**: POST
-- **Body**: `{ storage_type, credentials, encryption_key? }`
-- **Response**: `{ ok }`
-
-#### `test_rpc` (`/functions/v1/test_rpc`)
-Test RPC function calls.
-- **Response**: `{ results: { start_job?, get_pipeline_status?, ... } }`
-
-#### `test_storage_connection` (`/functions/v1/test_storage_connection`)
-Test storage connection.
-- **Method**: POST
-- **Body**: `{ org_id, provider, endpoint?, bucket_name?, region?, access_key_id?, secret_access_key? }`
-- **Response**: `{ success }`
-
-#### `upload_complete` (`/functions/v1/upload_complete`)
-Notify upload completion.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ dataset_id, upload_path }`
-- **Response**: `{ ok }`
-
-#### `verifyAgentToken` (`/functions/v1/verifyAgentToken`)
-Verify agent token (shared module).
-- **Exported function**: `verifyAgentToken(req)`
-- **Returns**: `{ device?, error? }`
-
-#### `verify_job_lease` (`/functions/v1/verify_job_lease`)
-Verify job lease is still valid.
-- **Method**: POST
-- **Auth**: Device token
-- **Body**: `{ job_id, device_id }`
-- **Response**: `{ valid }`
-
-#### `verify_triggers` (`/functions/v1/verify_triggers`)
-Verify all triggers are properly installed.
-- **Method**: POST
-- **Auth**: Internal
-- **Response**: `{ ok, triggers: [...] }`
+Event: sync
+Data: { "jobs_sent": 3, "timestamp": "2026-05-06T14:30:00Z" }
+```
 
 ---
 
-## Go Codebase Structure
+## Go Agent Architecture
+
+### Directory Structure
 
 ```
-sentra-agent/
+sentrazero/
 ├── cmd/
-│   ├── main.go                    # Agent entry point
-│   ├── sentra/main.go            # CLI tool entry point
+│   ├── sentra/main.go              # CLI entry point (run, debug, replay, version)
 │   └── agent/
 │       ├── runtime/                # Runtime environments
 │       │   ├── runtime.go         # Runtime interface
 │       │   ├── python.go         # Python runtime
 │       │   ├── node.go           # Node.js runtime
-│       │   └── v2/                # Runtime v2 (warm pools)
-│       │       ├── manager.go      # Runtime manager
-│       │       ├── python.go      # Python v2 runtime
-│       │       ├── node.go        # Node.js v2 runtime
-│       │       └── types.go       # Type definitions
-│       ├── executor/               # Plugin execution
+│       │   └── v2/              # Runtime v2 (warm pools)
+│       │       ├── manager.go    # Pool manager
+│       │       ├── python.go     # Python v2 with caching
+│       │       └── node.go       # Node.js v2 with caching
+│       ├── executor/             # Job executor
 │       │   ├── executor.go      # Executor interface
-│       │   └── v2/                # Executor v2
-│       │       └── executor.go   # V2 executor with sandbox
-│       └── sandbox/               # Sandbox management
-│           └── sandbox.go       # Sandbox isolation
+│       │   └── v2/             # Executor v2 with sandbox
+│       └── sandbox/              # Sandbox isolation
+│           └── sandbox.go       # Resource limits
 │
-├── internal/
-│   ├── auth/                     # Authentication
-│   │   ├── identity.go          # Device identity
-│   │   ├── claim.go            # Device claiming
-│   │   └── token_store.go      # Token storage
+├── internal/                      # Core packages
+│   ├── auth/                    # Authentication
+│   │   ├── identity.go         # Device identity
+│   │   ├── claim.go           # Device claiming
+│   │   └── token_store.go     # Token storage (keyring/file)
 │   │
-│   ├── backend/                  # Backend client (Supabase)
-│   ├── bootstrap/                # Zero-config bootstrap
-│   │   └── bootstrap.go        # Bootstrap logic
+│   ├── backend/                 # Supabase client
+│   │   └── client.go          # HTTP client for edge functions
 │   │
-│   ├── config/                   # Configuration
-│   │   ├── config.go           # Config loading
-│   │   ├── defaults.go         # Default values
-│   │   └── config_test.go      # Config tests
+│   ├── bootstrap/               # Zero-config bootstrap
+│   │   └── bootstrap.go       # Initial setup logic
+│   │
+│   ├── config/                  # Configuration
+│   │   ├── config.go          # Config loading
+│   │   └── defaults.go        # Default values
 │   │
 │   ├── dataset/                 # Dataset operations
-│   │   ├── artifact.go         # Artifact handling
-│   │   ├── recovery.go        # Recovery logic
-│   │   ├── merge.go           # Merge operations
-│   │   └── lock.go            # Dataset locking
+│   │   ├── merge.go           # Merge logic
+│   │   ├── lock.go            # Merge locks
+│   │   └── recovery.go       # Recovery logic
 │   │
-│   ├── dispatcher/              # Job dispatching
-│   │   ├── dispatcher_unix.go       # Unix dispatcher
-│   │   ├── dispatcher_unix_cgo.go  # CGo dispatcher
-│   │   ├── dispatcher_unix_nocgo.go # No CGo
-│   │   ├── worker_pool.go          # Worker pool
-│   │   ├── execute.go              # Job execution
-│   │   ├── job.go                 # Job handling
-│   │   ├── job_dedup.go           # Job deduplication
-│   │   ├── choose_mode.go          # Mode selection
-│   │   ├── native_runner.go       # Native runner
-│   │   ├── native_runner_stub.go  # Stub for non-cgo
-│   │   ├── handlers_unix.go       # Unix handlers
-│   │   └── introspection.go      # Introspection
+│   ├── dispatcher/              # Job dispatcher
+│   │   ├── worker_pool.go     # Worker pool management + backpressure
+│   │   ├── execute.go         # Job execution — five-way routing
+│   │   ├── job.go             # Job definitions
+│   │   ├── job_dedup.go       # Persistent job dedup across restarts
+│   │   ├── plugin_lookup.go   # UUID plugin_id → human plugin_name map
+│   │   ├── handlers_unix.go   # executeProcessChunk, step chaining, v2 fallback
+│   │   ├── choose_mode.go     # Execution mode selection
+│   │   ├── native_runner.go   # Native binary execution (CGO)
+│   │   ├── native_runner_stub.go # No-CGO stub
+│   │   └── introspection.go   # Metrics (worker count, queue length, etc.)
 │   │
-│   ├── healthcheck/              # Health endpoint
-│   │   └── server.go            # Health server
-│   │
-│   ├── heartbeat/                # Device heartbeat
-│   │   └── heartbeat.go        # Heartbeat logic
-│   │
-│   ├── httpclient/               # HTTP client
-│   │   └── client.go           # HTTP client wrapper
-│   │
-│   ├── models/                   # Data models
-│   │   ├── models.go          # Model definitions
-│   │   └── failure.go         # Failure models
-│   │
-│   ├── obs/                      # Observability
-│   │   ├── logger.go          # Logger
-│   │   └── trace.go           # Tracing
-│   │
-│   ├── plugin/                   # Plugin system
+│   ├── plugin/                  # Plugin system
 │   │   ├── manager.go         # Plugin manager
-│   │   ├── executor.go        # Plugin executor
 │   │   ├── manifest.go        # Manifest handling
-│   │   ├── key_fetcher.go    # Signing key fetcher
-│   │   ├── db_sync.go         # DB synchronization
-│   │   ├── update.go          # Plugin updates
-│   │   ├── fetch.go           # Plugin fetching
-│   │   ├── sandbox.go         # Plugin sandbox
-│   │   └── bundled/           # Bundled plugins
+│   │   ├── key_fetcher.go    # Signing key fetching
+│   │   └── sandbox.go         # Plugin sandbox
 │   │
-│   ├── redis/                    # Redis client
-│   │   └── client.go           # Redis connection
+│   ├── redis/                   # Redis client
+│   │   └── client.go          # Connection pooling
 │   │
-│   ├── realtime/                 # Real-time communication
-│   │   ├── realtime_ws.go     # WebSocket client
-│   │   ├── supabase_realtime.go # Supabase Realtime
-│   │   ├── sse_client.go      # SSE client
-│   │   └── available.go       # Availability check
+│   ├── realtime/                # Real-time communication
+│   │   ├── supabase_realtime.go # Polling client (5s interval)
+│   │   ├── realtime_ws.go     # Supabase Realtime WebSocket
+│   │   ├── sse_client.go      # SSE client + circuit breaker
+│   │   └── available.go       # Announce available at startup
 │   │
-│   ├── reporter/                 # Job reporting
-│   │   └── reporter.go        # Report sending
+│   ├── storage/                 # Storage backends
+│   │   ├── config.go          # Storage configuration
+│   │   └── s3http.go         # S3 HTTP transport
 │   │
-│   ├── sandbox/                  # Resource limits
-│   │   ├── limits.go          # Generic limits
-│   │   ├── limits_unix.go     # Unix limits
-│   │   ├── limits_linux.go    # Linux limits
-│   │   └── limits_darwin.go   # macOS limits
-│   │   └── limits_windows.go  # Windows limits
+│   ├── obs/                     # Observability
+│   │   ├── logger.go         # Structured logging
+│   │   └── trace.go          # Distributed tracing
 │   │
-│   ├── startup/                  # Startup routines
-│   │   ├── validate.go        # Validation
-│   │   ├── reconcile.go       # Reconciliation
-│   │   ├── cgo_enabled.go    # CGo enabled
-│   │   └── cgo_disabled.go   # CGo disabled
-│   │
-│   ├── storage/                  # Storage backends
-│   │   ├── config.go           # Storage config
-│   │   └── s3http.go          # S3 HTTP transport
-│   │
-│   ├── sysinfo/                  # System information
-│   │   └── sysinfo.go          # System specs
-│   │
-│   └── system/                   # Environment detection
-│       ├── env.go              # Environment vars
-│       ├── env_cgo.go         # CGo environment
-│       └── env_nocgo.go       # No CGo environment
+│   └── healthcheck/             # Health endpoint
+│       └── server.go          # HTTP health server
 │
 ├── supabase/
-│   ├── functions/                # Edge Functions (Deno)
-│   │   ├── _shared/              # Shared utilities
-│   │   │   ├── auth.ts          # Authentication helpers
-│   │   │   ├── cors.ts          # CORS headers
-│   │   │   └── security.ts     # Security utilities
-│   │   ├── advance_pipeline/
-│   │   ├── agent_health_policy/
-│   │   ├── agent_stream/
-│   │   ├── approve_dataset_and_plan_chunks/
-│   │   ├── assign_agent_job/
-│   │   ├── auto_assign_best_device/
-│   │   ├── batch_assign_jobs/
-│   │   ├── bootstrap/
-│   │   ├── calculate_optimal_chunk_size/
-│   │   ├── claim_device/
-│   │   ├── claim_jobs_for_device/
-│   │   ├── cleanup_job_notification_queue/
-│   │   ├── cleanup_stuck_jobs/
-│   │   ├── complete_job/
-│   │   ├── create-user/
-│   │   ├── decrypt_vault_secret/
-│   │   ├── delete_org/
-│   │   ├── dispatch_http_jobs/
-│   │   ├── get_plugin/
-│   │   ├── get_plugin_signing_key/
-│   │   ├── get_storage_config/
-│   │   ├── invite_member/
-│   │   ├── list_all_plugins/
-│   │   ├── list_plugin_signing_keys/
-│   │   ├── list_plugins_for_org/
-│   │   ├── notify_available_device/
-│   │   ├── plan_dataset_chunks/
-│   │   ├── pre_chunk_dataset/
-│   │   ├── reconcile_agent/
-│   │   ├── record_benchmark/
-│   │   ├── record_dataset_metadata/
-│   │   ├── register_device/
-│   │   ├── register_plugin/
-│   │   ├── relay_job_event/
-│   │   ├── report_dataset_scan/
-│   │   ├── report_job_error/
-│   │   ├── run_pipeline/
-│   │   ├── schedule_merge_job/
-│   │   ├── start_job/
-│   │   ├── store_storage_credentials/
-│   │   ├── test_rpc/
-│   │   ├── test_storage_connection/
-│   │   ├── upload_complete/
-│   │   ├── verifyAgentToken/
-│   │   ├── verify_job_lease/
-│   │   └── verify_triggers/
-│   └── migrations/               # Database migrations
+│   ├── functions/               # 48 Edge Functions (Deno/TypeScript)
+│   │   ├── _shared/           # Shared utilities
+│   │   │   ├── auth.ts       # Authentication helpers
+│   │   │   ├── cors.ts       # CORS headers
+│   │   │   └── security.ts   # Security utilities
+│   │   ├── agent_stream/     # SSE streaming
+│   │   ├── complete_job/     # Job completion
+│   │   └── ...              # (48 functions total)
+│   └── migrations/            # SQL migrations
 │
-├── Dockerfile
-├── Makefile
-└── bin/                        # Built binaries
+├── Dockerfile                   # Docker build
+├── Makefile                     # Build automation
+└── go.mod / go.sum             # Go dependencies
 ```
+
+### Key Go Interfaces
+
+#### Runtime Interface
+```go
+type Runtime interface {
+    Type() string                    // "python", "node", "native"
+    Setup(env map[string]string) error
+    InstallDeps(deps []Dependency) error
+    Run(code string, env map[string]string) (*Result, error)
+    Cleanup() error
+}
+```
+
+#### Executor Interface
+```go
+type Executor interface {
+    Execute(job *agent.Job) (*ExecutionResult, error)
+    SupportsMode(mode string) bool
+    Sandbox() *Sandbox
+}
+```
+
+#### Dispatcher
+```go
+type Dispatcher struct {
+    pool      *WorkerPool
+    backend   *BackendClient
+    pluginMgr *PluginManager
+    redis     *RedisClient
+}
+
+func (d *Dispatcher) SubmitJob(job *agent.Job) error
+func (d *Dispatcher) PollForJobs() ([]*agent.Job, error)
+func (d *Dispatcher) ReportCompletion(job *agent.Job, result *ExecutionResult) error
+```
+
+### Job Execution Flow (`internal/dispatcher/execute.go`)
+
+The `ExecuteJob` function implements five-way routing based on payload shape:
+
+1. **`plugin_code` present** → Routes to v2 executor (`executor/v2/executor.go`) which runs inline plugin code directly. Used for edge function dispatch and inline script execution. Validates `PluginCode != ""` early and returns `system_error` if empty.
+
+2. **`chunk_id` present + no `plugin_code`** → Routes to `executeProcessChunk` (`handlers_unix.go:526`):
+   - Resolves `plugin_id` UUID → human name via `pluginIDToName` sync.Map (populated at startup from `SyncPluginsFromAPI`)
+   - Loads cached plugin binary via `LoadAndUpdatePlugin`
+   - Selects execution mode: native CGO dlopen → Docker sandbox → v2 runtime fallback
+   - Implements step chaining: `StepIndex > 0` reads from `results/chunk_N.out`, `StepIndex == 0` reads from `chunks/chunk_N.bin`
+   - On Docker error, calls `fallbackToV2Runtime` which reads cached plugin file, maps language to `RuntimeType`, and calls `executorInstance.ExecuteJob`
+
+3. **No `chunk_id` + `dataset_id` present** → Step-level coordination job. Returns nil immediately — these are markers created by `activate_pipeline` that exist only to trigger pipeline advancement.
+4. **`plugin_code` present** → Routes to v2 executor for inline code execution.
+5. **Everything else** → Falls through to v2 executor (catch-all).
+
+### Plugin Name Resolution (`internal/dispatcher/plugin_lookup.go`)
+
+- `pluginIDToName` is a `sync.Map` keyed by UUID `plugin_id` → human-readable `plugin_name`
+- `PopulatePluginIDMap(plugins)` is called at startup from `main.go:247` after `SyncPluginsFromAPI` returns the plugin list
+- `ResolvePluginName(pluginID, pluginName)` returns the resolved name, falling back to the provided `pluginName` if the ID isn't found
 
 ---
 
-## Job Types & Lifecycle
-
-### Job Types
-
-| Type | Description |
-|------|-------------|
-| `scan_dataset` | Scan and analyze dataset structure |
-| `process` | Process individual data chunks |
-| `preprocess` | Pre-process chunks before main processing |
-| `process_dataset` | Full dataset processing pipeline |
-| `merge_dataset` | Merge processed chunks into final output |
-| `plan_chunks` | Plan optimal chunking strategy |
-| `embedding` | Generate embeddings |
-| `index` | Index data |
-| `validate` | Validate data |
-
-### Job Lifecycle
-
-```
-┌─────────────┐
-│   pending   │  ← Jobs enter here from dispatch
-└──────┬──────┘
-       │ worker claims job (with lease)
-       ▼
-┌─────────────┐
-│  assigned   │  ← Lease acquired (lease_expires_at set)
-└──────┬──────┘
-       │ start execution
-       ▼
-┌─────────────┐
-│  running    │  ← Job actively executing
-└──────┬──────┘
-       │ complete_job()
-       ▼
-┌─────────────┐    ┌─────────────┐
-│ completed   │    │   failed    │
-└─────────────┘    └──────┬──────┘
-                            │ retry_count < max_retries
-                            ▼
-                      ┌─────────────┐
-                      │   pending   │  ← Re-queued
-                      └─────────────┘
-                            │ retry_count >= max_retries
-                            ▼
-                      ┌─────────────┐
-                      │dead_letter │  ← Max retries exceeded
-                      └─────────────┘
-```
-
-### State Machine Rules
-- **Initial state**: Must be `pending`
-- **pending →**: `assigned`, `cancelled`, `failed`
-- **assigned →**: `running`, `pending` (requeue), `cancelled`, `failed`
-- **running →**: `completed`, `failed`, `pending` (requeue)
-- **completed/failed/dead**: **Terminal states** - cannot be changed!
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Supabase Backend                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Devices    │  │  Agent Jobs  │  │   Executions/Pipeline │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Datasets   │  │   Plugins    │  │   Storage Config      │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │  Executions  │  │ Plugin Execs  │  │  Device Benchmarks  │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼ (Redis Streams for multi-agent)
-┌─────────────────────────────────────────────────────────────────┐
-│                        Redis (Optional)                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Job Queue   │  │ Worker State│  │  Results Cache        │  │
-│  │ (Streams)  │  │  (Hash)     │  │  (TTL keys)          │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Sentra Agent (Go)                        │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────┐  │
-│  │  Config  │  │   Auth    │  │ Dispatcher│  │ Plugin  │  │
-│  │         │  │           │  │          │  │ System  │  │
-│  └────────────┘  └────────────┘  └────────────┘  └─────────┘  │
-│  ┌────────────────────┐  ┌──────────────────────────────┐   │
-│  │  Redis Client       │  │   Bootstrap (Zero-Config)         │   │
-│  └────────────────────┘  └──────────────────────────────┘   │
-│                                                                 │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌─────────┐  │
-│  │ Heartbeat  │  │  Realtime  │  │  Backend  │  │ Startup │  │
-│  │            │  │            │  │           │  │         │  │
-│  └────────────┘  └────────────┘  └────────────┘  └─────────┘  │
-│                                                                  │
-│  ┌─────────────────────┐  ┌──────────────────────────────┐    │
-│  │  Runtime Manager    │  │   Environment Pool (v2)      │    │
-│  │  (Python/Node)     │  │   (Warm pools for fast start)   │    │
-│  └─────────────────────┘  └──────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Components
-
-### Job Dispatcher
-
-The dispatcher manages job execution across worker pools:
-
-- **Worker Pool**: Configurable concurrent workers (default: CPU/2)
-- **Job Queue**: FIFO processing with lease-based assignment
-- **Redis Queue**: Optional Redis Streams for multi-agent coordination
-- **Retry Logic**: Automatic retry with configurable backoff
-- **Graceful Shutdown**: Waits for in-flight jobs before termination
-
-### Runtime System (v2)
-
-Python and Node.js runtime environments with warm pooling:
-
-- **Environment Pool**: Pre-created virtual environments for fast startup
-- **Dependency Caching**: Hash-based caching of dependency installations
-- **Remote Cache**: Optional S3-compatible storage for environment sharing
-
-### Plugin System
-
-Plugins are dynamically loaded executable code that extend agent capabilities. The system supports **Python**, **Node.js**, **Go**, **Rust**, and native binaries.
-
-### Plugin Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      Plugin System                           │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  Manifest   │  │   Storage   │  │   Runtime   │  │
-│  │  (JSON)    │  │  (Supabase)  │  │ (Python/Node) │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-│         │                 │                 │                 │
-│         ▼                 ▼                 ▼                 │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │          Plugin Manager (Go)                     │  │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐ │  │
-│  │  │  Fetch    │  │ Validate  │  │  Execute  │ │  │
-│  │  │  (HTTP)   │  │ (Sig/Hex) │  │ (Sandbox) │ │  │
-│  │  └────────────┘  └────────────┘  └────────────┘ │  │
-│  └──────────────────────────────────────────────────┘  │
-│         │                 │                 │                 │
-│         ▼                 ▼                 ▼                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Key Store  │  │  Bundled   │  │  Reports   │  │
-│  │(Supabase)  │  │  Plugins    │  │(Supabase)  │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────┘
-```
+## Plugin System
 
 ### Plugin Manifest Structure
-
-```go
-type Manifest struct {
-    // Identity
-    Name     string `json:"name"`          // Plugin name (required)
-    Version  string `json:"version,omitempty"` // Version string
-    Filename string `json:"filename,omitempty"` // Binary filename (required)
-    URL      string `json:"url,omitempty"`      // Download URL
-
-    // Integrity
-    Checksum string `json:"checksum,omitempty"` // SHA-256 hex (required)
-
-    // Classification
-    PluginType string `json:"plugin_type,omitempty"` // "core" | "client"
-    Language   string `json:"language,omitempty"`    // rust, python, go, node, etc.
-
-    // 🔒 TRUST (NON-NEGOTIABLE)
-    Trusted bool `json:"trusted"` // MUST be true for execution
-
-    // 🔒 SANDBOX PERMISSIONS
-    Network bool `json:"network"` // default = false (explicit allow)
-
-    // 🔒 RESOURCE LIMITS (MANDATORY)
-    Resources PluginResources `json:"resources"`
-
-    // 🔒 MANIFEST SIGNATURE (NON-NEGOTIABLE)
-    Signature         string `json:"signature,omitempty"`        // Base64-encoded Ed25519 signature
-    SignatureKeyID    string `json:"signature_key_id,omitempty"` // Key identifier
-    SignatureVerified bool   `json:"signature_verified"`     // Set true after verification
-}
-
-type PluginResources struct {
-    // Memory limit in MB (REQUIRED)
-    MemoryMB int64 `json:"memory_mb"`
-
-    // Total CPU time allowed in seconds (REQUIRED)
-    CPUSeconds int64 `json:"cpu_seconds"`
-
-    // CPU quota (container-based runtimes only)
-    CPULimit float64 `json:"cpu_limit,omitempty"`
-
-    // Wall-clock execution timeout (REQUIRED)
-    TimeoutSeconds int64 `json:"timeout_seconds"`
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "filename": "plugin.py",
+  "language": "python",
+  "plugin_type": "core",
+  "checksum": "sha256:abc123...",
+  "trusted": true,
+  "network": false,
+  "resources": {
+    "memory_mb": 512,
+    "cpu_seconds": 300,
+    "timeout_seconds": 600
+  },
+  "signature": "base64encoded...",
+  "signature_key_id": "key-001"
 }
 ```
 
-### Plugin Registration Flow
+### Registration Flow (Backend Handles Signing)
 
 ```
-Agent Dashboard              Supabase Edge Function              Plugin Storage
-      │                           │                                   │
-      │  POST /register_plugin   │                                   │
-      │ ──────Binary+Metadata──▶│                                   │
-      │                           │  1. Validate JWT (admin only)      │
-      │                           │  2. Get org signing key           │
-      │                           │  3. Sign BINARY HASH (not metadata)│
-      │                           │     using Ed25519               │
-      │                           │  4. Upload binary to storage    │
-      │                           │ ───────────────▶│
-      │                           │  5. Insert plugin record        │
-      │                           │  6. Enable for org (100%)      │
-      │ ◀────plugin_id─────────│                                   │
+User (Admin)                 Edge Function                 Vault + DB
+    │                              │                            │
+    │ POST /register_plugin        │                            │
+    │ - binary file                │                            │
+    │ - metadata                  │                            │
+    ├────────────────────────────►│                            │
+    │                              │ 1. Validate JWT + admin   │
+    │                              │ 2. Upload binary to storage│
+    │                              ├───────────────────────────►│
+    │                              │                            │
+    │                              │ 3. Get signing key ID     │
+    │                              │    from plugin_signing_keys│
+    │                              ├───────────────────────────►│
+    │                              │                            │
+    │                              │ 4. Decrypt private key    │
+    │                              │    from Vault              │
+    │                              ├───────────────────────────►│
+    │                              │                            │
+    │                              │ 5. Hash binary (SHA-256)  │
+    │                              │ 6. Sign hash (Ed25519)    │
+    │                              │                            │
+    │                              │ 7. Insert into plugins    │
+    │                              ├───────────────────────────►│
+    │                              │                            │
+    │                              │ 8. Enable for org (100%)  │
+    │                              ├───────────────────────────►│
+    │                              │                            │
+    │◄─ 201 { plugin_id } ─────────┤                            │
 ```
 
 ### Plugin Execution Flow
 
 ```
-┌─────────────────┐
-│  Agent Job    │
-│  (payload)    │
-└──────┬────────┘
-       │ plugin_id
-       ▼
-┌─────────────────────────────────┐
-│  Plugin Executor (Go)          │
-│                              │
-│  1. Fetch plugin from DB      │
-│  2. Verify Ed25519 sig       │
-│  3. Check resource limits     │
-│  4. Select runtime           │
-│     ├─ Python (v2 manager)    │
-│     ├─ Node.js (v2 manager)  │
-│     └─ Native (CGO/win)       │
-│  5. Execute in sandbox      │
-│  6. Return result            │
-└─────────────────────────────────┘
-       │ ExecutionResult
-       ▼
-┌─────────────────┐
-│  Report Job   │
-│  (complete)   │
-└─────────────────┘
+Agent                        Edge Function              Plugin Binary
+  │                              │                         │
+  │ Claim job with plugin_id     │                         │
+  ├────────────────────────────►│                         │
+  │                              │ Fetch plugin record      │
+  │                              ├────────────────────────►│
+  │                              │ Download binary          │
+  │                              │ from storage             │
+  │                              │                         │
+  │                              │ Compute SHA-256          │
+  │                              │ Verify Ed25519 sig       │
+  │                              │                         │
+  │◄─ plugin + manifest ─────────┤                         │
+  │                                                       │
+  │ Verify signature (again)                             │
+  │ Check trusted flag                                    │
+  │ Check resource limits                                  │
+  │                                                       │
+  │ Select runtime (Python/Node/native)                    │
+  │ Execute in sandbox                                    │
+  │   - Memory limit (ulimit -v)                         │
+  │   - CPU time (ulimit -t)                             │
+  │   - Wall-clock timeout                                │
+  │                                                       │
+  │ Capture output                                        │
+  │ Report completion ────────────────────────────────────►│
 ```
 
-### Execution Modes
-
-| Mode | Description | Runtime | Sandbox |
-|------|-------------|---------|---------|
-| `native` | Direct binary execution | Native (CGO) | Process limits |
-| `runtime` | Language runtime (Python/Node) | v2 Runtime Manager | Docker/Process |
-| `docker` | Docker container execution | Container | Full isolation |
-
-### Language Support
-
-| Language | Runtime | Execution Method | Dependencies |
-|----------|---------|-------------------|-------------|
-| `python`, `python3` | Python interpreter | v2 Python runtime | requirements.txt / pypi |
-| `node`, `nodejs`, `javascript`, `typescript` | Node.js | v2 Node runtime | package.json / npm |
-| `go`, `rust`, `c`, `cpp`, `native` | Native binary | Direct execution | None (compiled) |
-| `ruby`, `bash`, `shell` | System interpreter | Script execution | System packages |
-
-### Resource Limits Enforcement
-
-```go
-// MANDATORY: All fields must be non-zero for execution
-type PluginResources struct {
-    MemoryMB       int64   // Memory limit in MB (required)
-    CPUSeconds     int64   // CPU time in seconds (required)
-    CPULimit      float64 // CPU quota for containers (optional)
-    TimeoutSeconds int64   // Wall-clock timeout (required)
-}
-
-// Validation: Jobs MUST NOT run if limits missing
-func (r PluginResources) HasLimits() bool {
-    return r.MemoryMB > 0 &&
-           r.CPUSeconds > 0 &&
-           r.TimeoutSeconds > 0
-}
-```
-
-### Plugin Signing (Ed25519)
-
-**CRITICAL: The backend automatically signs the plugin - users just upload the binary!**
-
-#### Key Generation (One-time per org)
-When a new org is created via `create-user` edge function:
-1. Backend reads `PLATFORM_SIGNING_PUBLIC_KEY_B64` and `PLATFORM_SIGNING_PRIVATE_KEY_B64` from environment
-2. **Public key** stored in `plugin_signing_keys` table (`public_key` column)
-3. **Private key** stored securely in **Supabase Vault** via `store_plugin_signing_key_to_vault()` RPC
-4. Vault secret name stored in `plugin_signing_keys.vault_secret_name` column
-
-#### Registration Flow (User uploads, backend signs):
-
-```
-User (Admin)                    Edge Function                    Vault + DB
-    │                                │                                │
-    │  POST /register_plugin        │                                │
-    │  - binary file                │                                │
-    │  - metadata                  │                                │
-    │──────────────────────────────>│                                │
-    │                                │                                │
-    │                                │ 1. Validate JWT + admin role  │
-    │                                │ 2. Upload binary to storage    │
-    │                                │──────────────────────────────>│
-    │                                │                                │
-    │                                │ 3. Get signing key ID from    │
-    │                                │    plugin_signing_keys table   │
-    │                                │──────────────────────────────>│
-    │                                │                                │
-    │                                │ 4. Fetch vault_secret_name   │
-    │                                │    from plugin_signing_keys    │
-    │                                │──────────────────────────────>│
-    │                                │                                │
-    │                                │ 5. Decrypt private key from  │
-    │                                │    Vault via decrypt_vault_   │
-    │                                │    secret() RPC               │
-    │                                │<──────────────────────────────│
-    │                                │                                │
-    │                                │ 6. Compute SHA-256 of binary │
-    │                                │    bytes                       │
-    │                                │ 7. Sign hash with private    │
-    │                                │    key (Ed25519)              │
-    │                                │ 8. Store signature in        │
-    │                                │    plugins table (base64)      │
-    │                                │──────────────────────────────>│
-    │                                │                                │
-    │                                │ 9. Enable plugin for org      │
-    │                                │──────────────────────────────>│
-    │                                │                                │
-    │  201 { plugin_id, signature }  │                                │
-    │<───────────────────────────────│                                │
-```
-
-**User does NOT need to:**
-- Generate Ed25519 keys
-- Sign the plugin
-- Provide a signature
-
-**The backend handles ALL cryptography** using keys stored in Supabase Vault.
-┌─────────────┐
-│  Dashboard/CLI                           │
-│  (Admin user with JWT)                │
-│                                          │
-│  1. Upload plugin binary                │
-│  2. Provide metadata (name, version,     │
-│     language, plugin_type, checksum)       │
-│  3. OPTIONALLY: signature_key_id         │
-└─────────────┬──────────────────────────────┘
-              │ multipart/form-data or JSON
-              ▼
-┌─────────────┐
-│  POST /register_plugin (Edge Function)       │
-│                                          │
-│  ┌──────────────────────────────────────┐  │
-│  │ 1. Validate JWT + Admin role        │  │
-│  │ 2. Parse form data                  │  │
-│  │ 3. Upload binary to Supabase storage │  │
-│  │ 4. Get org's Ed25519 private key │  │
-│  │    from plugin_signing_keys table      │  │
-│  │ 5. Compute SHA-256 of binary bytes │  │
-│  │ 6. Sign hash with private key      │  │
-│  │ 7. Insert into plugins table         │  │
-│  │    (storage_path, signature,         │  │
-│  │     signature_key_id, trusted=true)   │  │
-│  │ 8. Enable for org (org_plugins)   │  │
-│  └──────────────────────────────────────┘  │
-└─────────────┘
-```
-
-#### What the User Provides:
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | YES | Plugin name |
-| `version` | YES | Version string |
-| `language` | YES | python, node, go, etc. |
-| `plugin_type` | YES | core, client |
-| `binary` | YES | Plugin binary file |
-| `checksum` | YES | SHA-256 hex checksum of binary |
-| `signature_key_id` | NO | Override signing key (default: org's active key) |
-| `resources` | NO | JSON string: `{"memory_mb":512,"cpu_seconds":300,"timeout_seconds":600}` |
-| `network` | NO | true/false (default: false) |
-| `runtime_dependencies` | NO | JSON array for v2 runtime |
-
-#### What the Backend Does Automatically:
-1. **Validates** user is admin of the org
-2. **Uploads** binary to Supabase storage (`plugins/org/{org_id}/{plugin_id}/{filename}`)
-3. **Fetches** org's Ed25519 private key from `plugin_signing_keys` table (or uses user-provided `signature_key_id`)
-4. **Computes** SHA-256 hash of the binary bytes (NOT the metadata!)
-5. **Signs** the hash with the Ed25519 private key
-6. **Stores** signature in `plugins` table as base64
-7. **Sets** `trusted=true`, `signature_verified=true`
-8. **Enables** plugin for org in `org_plugins` table with 100% rollout
-
-#### Signing Code (Edge Function):
-```typescript
-// FIXED: Sign the FILE BYTES, not the metadata
-async function signManifest(pluginBinaryBytes, privKeyB64) {
-    if (!privKeyB64) return null;
-
-    // Hash the plugin FILE BYTES (SHA-256) - matches agent verification
-    const hashBuffer = await crypto.subtle.digest("SHA-256", pluginBinaryBytes);
-
-    // Import org's Ed25519 private key
-    const privKeyBytes = Uint8Array.from(atob(privKeyB64), (c)=>c.charCodeAt(0));
-    const privKey = await crypto.subtle.importKey("pkcs8", privKeyBytes, {
-        name: "Ed25519"
-    }, false, ["sign"]);
-
-    // Sign the hash
-    const sigBuffer = await crypto.subtle.sign({
-        name: "Ed25519"
-    }, privKey, hashBuffer);
-
-    // Return base64 signature
-    return btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
-}
-
-// Get org's active signing key from database
-async function getOrgSigningKeyId(supabase, orgId) {
-    const { data } = await supabase
-        .from("plugin_signing_keys")
-        .select("id")
-        .eq("org_id", orgId)
-        .is("revoked_at", null)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-    return data?.id ?? null;
-}
-```
-
-#### Registration Request Examples:
-
-**Option 1: Multipart Form (file upload)**
-```bash
-curl -X POST https://your-project.supabase.co/functions/v1/register_plugin \
-  -H "Authorization: Bearer <dashboard_jwt>" \
-  -F "name=my-plugin" \
-  -F "version=1.0.0" \
-  -F "language=python" \
-  -F "plugin_type=core" \
-  -F "checksum=sha256:abc123..." \
-  -F "binary=@./my-plugin.py" \
-  -F "resources={\"memory_mb\":512,\"cpu_seconds\":300,\"timeout_seconds\":600}" \
-  -F "network=true"
-```
-
-**Option 2: JSON (if binary already uploaded)**
-```bash
-POST /functions/v1/register_plugin
-Headers:
-  Authorization: Bearer <dashboard_jwt>
-  Content-Type: application/json
-
-Body:
-{
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "language": "python",
-  "plugin_type": "core",
-  "storage_path": "plugins/org/uuid/filename",
-  "checksum": "sha256:abc123...",
-  "signature_key_id": "key-001",  // Optional: override default key
-  "resources": {"memory_mb\":512,"cpu_seconds\":300},
-  "runtime_dependencies": [{"name\":\"pandas\",\"version\":\"2.0.0\"}]
-}
-```
-
-#### Response:
-```json
-{
-  "ok": true,
-  "plugin_id": "uuid",
-  "storage_path": "plugins/org/uuid/my-plugin-1.0.0",
-  "signature_verified": true,
-  "trusted": true
-}
-```
-
-#### Verification Process (Agent-side):
-1. Fetch plugin record from `plugins` table (includes `signature`, `signature_key_id`)
-2. Download plugin binary from `storage_path`
-3. Compute SHA-256 hash of binary bytes
-4. Fetch Ed25519 **public** key from `plugin_signing_keys` table using `signature_key_id`
-5. Verify: `crypto.subtle.verify({name:"Ed25519"}, publicKey, signature, hashBuffer)`
-6. **CRITICAL**: Only execute if:
-   - `manifest.Trusted == true` AND
-   - `manifest.SignatureVerified == true` AND
-   - Signature verification passes
-   - All resource limits are non-zero
-
-#### Plugin Signing Keys Management:
-
-| Function | Description |
-|----------|-------------|
-| `get_plugin_signing_key` | Get org's active signing key (Edge Function) |
-| `list_plugin_signing_keys` | List all keys for org (Edge Function) |
-| `plugin_signing_keys` table | Stores Ed25519 keys per org |
-
-**Key Generation (outside this system):**
-```bash
-# Generate Ed25519 key pair (example using OpenSSL)
-openssl genpkey -algorithm Ed25519 -out private_key.pem
-openssl pkey -in private_key.pem -pubout -out public_key.pem
-
-# Store PUBLIC key in plugin_signing_keys table
-# Store PRIVATE key securely (backend reads from database)
-```
-
-**Important:** The private key must be stored in the `plugin_signing_keys` table for the org. The backend uses it to automatically sign plugins on registration.
-
-### Bundled Plugins
-
-Built-in plugins included with the agent:
-
-| Plugin | Type | Language | Description |
-|--------|------|----------|-------------|
-| `scan_metadata` | core | python | Scan dataset structure and metadata |
-| `merge_metadata` | core | python | Merge processed chunk metadata |
-
-Bundled plugins are:
-- **Pre-installed**: No download required
-- **Trusted by default**: `Trusted: true`
-- **Version-synced**: Match agent version
-
-### Plugin Storage (Supabase)
-
-| Table | Purpose |
-|-------|---------|
-| `plugins` | Plugin metadata, storage_path, signature |
-| `org_plugins` | Org-plugin access, rollout %, enabled flag |
-| `plugin_signing_keys` | Ed25519 public keys per org |
-| `plugin_execution_history` | Execution tracking (start/end) |
-| `plugin_executions` | Legacy execution log |
-
-### Plugin API (Edge Functions)
-
-#### `register_plugin` - Register new plugin
-```bash
-POST /functions/v1/register_plugin
-Headers:
-  Authorization: Bearer <dashboard_jwt>  # Admin only
-Content-Type: multipart/form-data OR application/json
-
-Body (multipart):
-  name: "my-plugin"
-  version: "1.0.0"
-  language: "python"
-  plugin_type: "core"
-  binary: <plugin_file>
-  checksum: "sha256:abc123..."
-  network: "true"
-  resources: '{"memory_mb":512,"cpu_seconds":300,"timeout_seconds":600}'
-  runtime_dependencies: '[{"name":"pandas","version":"2.0.0"}]'
-
-Response:
-  { "ok": true, "plugin_id": "uuid", "storage_path": "...", "signature_verified": true }
-```
-
-#### `get_plugin` - Retrieve plugin
-```bash
-POST /functions/v1/get_plugin
-Headers:
-  Authorization: Bearer <token>
-  x-agent-token: <device_token>
-Body: { "plugin_id": "uuid" }
-
-Response:
-  {
-    "id": "uuid",
-    "name": "my-plugin",
-    "version": "1.0.0",
-    "language": "python",
-    "plugin_type": "core",
-    "storage_path": "plugins/org/uuid/my-plugin-1.0.0",
-    "checksum": "sha256:abc123...",
-    "signature": [base64_bytes],
-    "signature_key_id": "key-001",
-    "trusted": true,
-    "resources": {"memory_mb": 512, "cpu_seconds": 300, "timeout_seconds": 600},
-    "runtime_dependencies": [...]
-  }
-```
-
-#### `list_plugins_for_org` - List available plugins
-```bash
-GET /functions/v1/list_plugins_for_org
-Headers:
-  Authorization: Bearer <token>
-
-Response:
-  {
-    "ok": true,
-    "plugins": [
-      {
-        "plugin_id": "uuid",
-        "name": "my-plugin",
-        "version": "1.0.0",
-        "language": "python",
-        "trusted": true,
-        "rollout_percentage": 100,
-        "os": "linux",
-        "arch": "amd64"
-      }
-    ]
-  }
-```
-
-#### `get_plugin_signing_key` - Get signing key
-```bash
-POST /functions/v1/get_plugin_signing_key
-Headers:
-  Authorization: Bearer <token>
-  x-agent-token: <device_token>
-
-Response:
-  { "ok": true, "key": "<base64_public_key>" }
-```
-
-### Plugin Rollout Control
-
-```go
-// ShouldRunPlugin checks rollout % using MD5 hash of device ID
-func ShouldRunPlugin(deviceID uuid.UUID, rolloutPercentage int) bool {
-    if rolloutPercentage >= 100 {
-        return true
-    }
-    if rolloutPercentage <= 0 {
-        return false
-    }
-
-    // Hash-based rollout (consistent per device)
-    hash := md5.Sum(deviceID[:])
-    deviceValue := binary.BigEndian.Uint32(hash[:4]) % 100
-
-    return int(deviceValue) < rolloutPercentage
-}
-```
-
-Database function: `should_run_plugin(p_device_id, p_rollout_percentage)` → `boolean`
-
-### Plugin Sandbox Isolation
-
-```go
-type SandboxResult struct {
-    Output     string        `json:"output"`
-    ExitCode   int           `json:"exit_code"`
-    DurationMs int64         `json:"duration_ms"`
-    Method     string        `json:"method"` // "docker", "native", "runtime"
-}
-
-// Execution with resource limits
-func executeWithLimits(manifest Manifest, payload string) (*SandboxResult, error) {
-    // Apply resource limits
-    if !manifest.Resources.HasLimits() {
-        return nil, errors.New("plugin missing resource limits")
-    }
-
-    // Set memory limit (ulimit -v)
-    // Set CPU time limit (ulimit -t)
-    // Set wall-clock timeout (context.WithTimeout)
-
-    // Execute in sandbox
-    return sandbox.Run(manifest, payload)
-}
-```
-
-### Plugin Database Functions
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `get_org_plugins` | `(p_org_id, p_os, p_arch)` → table | Get plugins available to org |
-| `get_plugin_by_id` | `(p_plugin_id)` → table | Get plugin details by ID |
-| `record_plugin_execution_start` | `(p_org_id, p_plugin_id, p_job_id, p_device_id)` → uuid | Record execution start |
-| `record_plugin_execution_end` | `(p_execution_id, p_status, p_error)` → jsonb/void | Record execution end |
-| `should_run_plugin` | `(p_device_id, p_rollout_percentage)` → boolean | Check rollout % |
-| `compute_dependency_hash` | `(p_runtime_type, p_runtime_dependencies)` → text | Calculate dependency hash |
-| `encode_plugin_signature` | `(sig)` → text | Encode signature to base64 |
-
-### Plugin Security Model
-
-1. **Ed25519 Signatures**: All plugins MUST be signed with org's private key
-2. **Manifest Verification**: Signature verified against binary SHA-256 hash
-3. **Trusted Flag**: `manifest.Trusted` MUST be true for execution
-4. **Resource Limits**: All resource fields MANDATORY (memory, cpu, timeout)
-5. **Sandbox Isolation**: Execution in Docker or process sandbox
-6. **Network Control**: `manifest.Network` defaults to false
-7. **Rollout Control**: Gradual deployment with percentage-based rollout
-8. **Org Isolation**: Plugins scoped to organization via `org_plugins` table
-
-### Redis Integration
-
-For multi-agent deployments, Redis provides:
-
-- **Job Queue**: Redis Streams with consumer groups
-- **Worker State**: Real-time worker status tracking
-- **Results Cache**: Fast access to job results
-- **Pub/Sub**: Real-time notifications
+### Supported Languages
+
+| Language | Runtime | Method | Dependencies |
+|----------|---------|--------|-------------|
+| Python | v2 Runtime Manager | Pre-warmed venv | requirements.txt / PyPI |
+| Node.js | v2 Runtime Manager | Pre-warmed node_modules | package.json / npm |
+| Go | Native | Direct binary execution | None (compiled) |
+| Rust | Native | Direct binary execution | None (compiled) |
+| C/C++ | Native | Compiled binary | System libraries |
+| Ruby/Bash | System | Script interpreter | System packages |
 
 ---
 
-## Security
+## Security Model
 
-- **Device Authentication**: Token-based with secure keyring storage
-- **Plugin Signing**: Ed25519 signature verification
-- **Sandbox Isolation**: Docker-based execution with network isolation
-- **Row-Level Security**: Database-level org isolation
-- **Org Validation**: All functions validate org_id to prevent cross-org access
-- **Message Sanitization**: Error messages are sanitized to remove paths, IPs, emails
-- **Rate Limiting**: Bootstrap and API endpoints have rate limiting
-- **Cron Secret**: Internal functions protected by cron secret header
+### 1. Authentication & Authorization
 
----
+```
+┌─────────────────────────────────────────────────────────┐
+│  User Authentication (Supabase Auth)                     │
+│  - JWT tokens for dashboard users                       │
+│  - Row Level Security (RLS) enforces org isolation     │
+└─────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│  Device Authentication (Token-based)                     │
+│  - Tokens hashed (SHA-256) before storage             │
+│  - Timing-safe comparison for token verification       │
+│  - Tokens can be rotated via rotate_agent_token()      │
+└─────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│  Plugin Signing (Ed25519)                              │
+│  - Organization generates Ed25519 key pair             │
+│  - Private key stored in Supabase Vault                │
+│  - Backend signs plugin binaries (not metadata)        │
+│  - Agent verifies signature before execution           │
+└─────────────────────────────────────────────────────────┘
+```
 
-## Build
+### 2. Row Level Security (RLS)
 
-```bash
-# Build the agent
-make build
+All org-scoped tables have RLS enabled:
 
-# Or manually
-go build -o bin/sentra-agent ./cmd/main.go
+```sql
+-- Example RLS policy for agent_jobs
+CREATE POLICY "Users can only see their org's jobs"
+  ON agent_jobs
+  FOR ALL
+  USING (org_id = get_current_org_id());
 
-# Build with version info
-go build -ldflags="-X main.Version=1.0.0" -o bin/sentra-agent ./cmd/main.go
+-- Function to get current user's org
+CREATE FUNCTION get_current_org_id() RETURNS uuid AS $$
+  SELECT org_id FROM org_members WHERE user_id = auth.uid() LIMIT 1;
+$$ LANGUAGE sql STABLE;
+```
+
+### 3. Plugin Sandbox
+
+| Protection | Implementation |
+|-------------|-----------------|
+| **Memory Limit** | `ulimit -v <bytes>` (Unix) |
+| **CPU Time** | `ulimit -t <seconds>` (Unix) |
+| **Wall-clock Timeout** | `context.WithTimeout()` (Go) |
+| **Network** | `manifest.Network` flag (default: false) |
+| **File System** | Isolated temp directories |
+| **Process Isolation** | Fork/exec with resource limits |
+
+### 4. Message Sanitization
+
+Error messages are sanitized before storage:
+
+```go
+func SanitizeErrorMessage(msg string) string {
+    // Remove file paths
+    // Remove IP addresses
+    // Remove email addresses
+    // Truncate to max length
+}
 ```
 
 ---
 
-## Environment Pool Configuration
+## Configuration Reference
+
+### Agent Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SENTRA_CLAIM_CODE` | * | - | Claim code for first-time registration |
+| `SENTRA_BACKEND_URL` | No | auto-detect | Supabase project URL |
+| `SENTRA_REDIS_URL` | No | - | Redis URL for coordination |
+| `MAX_CONCURRENCY` | No | auto | Max concurrent jobs |
+| `LOG_LEVEL` | No | `info` | Log level (debug, info, warn, error) |
+| `HEALTH_CHECK_PORT` | No | `8080` | Health endpoint port |
+| `AGENT_ENVIRONMENT_TYPE` | No | `production` | Environment type |
+| `AGENT_STORAGE_TYPE` | No | `local` | Storage backend |
+
+### Runtime Pool Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENVIRONMENT_POOL_MAX_SIZE` | 10 | Max pools to keep warm |
-| `ENVIRONMENT_MAX_COUNT` | 50 | Max environments in pool |
-| `ENVIRONMENT_WARM_TIMEOUT` | 30m | Time before cooling warm envs |
-| `ENVIRONMENT_EVICTION_INTERVAL` | 5m | How often to run eviction |
-| `ENVIRONMENT_MAX_DISK_BYTES` | 10GB | Max disk usage for envs |
+| `ENVIRONMENT_POOL_MAX_SIZE` | `10` | Max warm environments |
+| `ENVIRONMENT_MAX_COUNT` | `50` | Max total environments |
+| `ENVIRONMENT_WARM_TIMEOUT` | `30m` | Time before cooling |
+| `ENVIRONMENT_EVICTION_INTERVAL` | `5m` | Eviction check interval |
+| `ENVIRONMENT_MAX_DISK_BYTES` | `10GB` | Max disk for environments |
+
+### Supabase Edge Function Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `SUPABASE_URL` | Project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key |
+| `CRON_SECRET` | Secret for cron jobs |
+| `PLATFORM_SIGNING_PUBLIC_KEY_B64` | Ed25519 public key |
+| `PLATFORM_SIGNING_PRIVATE_KEY_B64` | Ed25519 private key |
 
 ---
 
-## Runtime Dependencies
+## Monitoring & Observability
 
-The v2 runtime manager supports Python and Node.js with dependency pinning:
-
-```yaml
-dependencies:
-  - name: pandas
-    version: "2.0.0"
-    source: pypi
-  - name: numpy
-    version: "1.24.0"
-    source: pypi
-```
-
-Dependencies are automatically cached and reused across jobs with the same hash.
-
----
-
-## Monitoring
-
-### Health Check
-
-The agent exposes a health endpoint (default port 8080):
+### Health Check Endpoint
 
 ```bash
-curl http://localhost:8080/health
-# Returns: {"status":"ok","device_id":"..."}
+# Agent health endpoint (default :8080)
+GET /health
+
+Response:
+{
+  "status": "ok",
+  "device_id": "uuid",
+  "active_jobs": 3,
+  "uptime_seconds": 3600
+}
 ```
 
-### Metrics
+### Metrics Collected
 
-Environment pool metrics are logged periodically:
+| Metric | Source | Description |
+|--------|--------|-------------|
+| `device_benchmarks` | Agent | Performance scores |
+| `agent_metrics` | Agent | CPU, memory, network |
+| `plugin_execution_history` | Agent | Plugin execution records |
+| `device_job_performance` | DB | Per-device job stats |
+| `system_logs` | DB | System events |
 
+### Dashboard Statistics
+
+The `get_dashboard_stats()` function returns:
+
+```json
+{
+  "total_jobs": 1234,
+  "running_jobs": 5,
+  "completed_jobs": 1200,
+  "failed_jobs": 29,
+  "pending_jobs": 0,
+  "total_datasets": 50,
+  "active_datasets": 3,
+  "total_devices": 10,
+  "online_devices": 8,
+  "busy_devices": 5,
+  "total_executions": 45,
+  "running_executions": 2,
+  "completed_executions": 43
+}
 ```
-environment_pool_initialized{platform="darwin/arm64",python="3.11.0",node="20.0.0",max_pool_size=10,warm_timeout=30m}
-environments_evicted{count=3,remaining=7,freed_bytes=...}
+
+---
+
+## Deployment Guide
+
+### Docker Deployment
+
+```dockerfile
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN apk add --no-cache git
+RUN go build -ldflags="-s -w" -o /bin/sentra ./cmd/sentra
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+COPY --from=builder /bin/sentra /bin/sentra
+EXPOSE 8080
+CMD ["/bin/sentra", "--claim-code", "${SENTRA_CLAIM_CODE}"]
 ```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentra-agent
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: sentra-agent
+  template:
+    metadata:
+      labels:
+        app: sentra-agent
+    spec:
+      containers:
+      - name: agent
+        image: sentra/agent:latest
+        env:
+        - name: SENTRA_CLAIM_CODE
+          valueFrom:
+            secretKeyRef:
+              name: sentra-secrets
+              key: claim-code
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+```
+
+### Supabase Edge Functions Deployment
+
+```bash
+# Deploy all functions
+supabase functions deploy
+
+# Deploy specific function
+supabase functions deploy agent_stream
+
+# Set secrets
+supabase secrets set CRON_SECRET=your-secret
+supabase secrets set PLATFORM_SIGNING_PUBLIC_KEY_B64=base64-key
+```
+
+---
+
+## Testing
+
+See [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) for comprehensive testing.
+
+See [USER_FLOW_TESTING.md](./USER_FLOW_TESTING.md) for user flow tests.
+
+### Running Existing Tests
+
+```bash
+# Go unit tests
+go test ./internal/... -v
+
+# Specific test
+go test ./internal/dispatcher -run TestWorkerPool
+
+# With coverage
+go test ./... -cover
+```
+
+### Test Coverage Areas
+
+| Area | Coverage | Priority |
+|------|----------|----------|
+| Worker Pool | ✅ 10 tests | P0 |
+| Plugin Manifest | ✅ Tests | P0 |
+| Config Loading | ✅ Tests | P1 |
+| Database Functions | ⚠️ Partial | P0 |
+| Edge Functions | ❌ Missing | P0 |
+| End-to-End Flows | ❌ Missing | P0 |
 
 ---
 
 ## Troubleshooting
 
-### Device Won't Claim
+### Device Won't Register
 
-- Ensure claim code is valid
-- Check network connectivity to Supabase
-- Verify organization exists
+```
+Error: Failed to claim device: Invalid claim code
+```
+
+**Solution:**
+1. Verify claim code in `orgs` table
+2. Check network connectivity to Supabase
+3. Ensure device can reach `bootstrap` function
 
 ### Jobs Not Being Assigned
 
-- Check device status: `SELECT * FROM devices WHERE id = '<device_id>'`
-- Verify heartbeat is being received
-- Check cron job is running in Supabase
+```
+Symptom: Jobs stuck in "pending" status
+```
+
+**Debug:**
+```sql
+-- Check device status
+SELECT id, name, status, last_heartbeat FROM devices WHERE org_id = '...';
+
+-- Check for pending jobs
+SELECT COUNT(*) FROM agent_jobs WHERE status = 'pending' AND org_id = '...';
+
+-- Check device capabilities vs job requirements
+SELECT * FROM get_device_rankings('...', 'process', NULL);
+```
 
 ### Plugin Verification Fails
 
-- Ensure plugin is signed with organization's Ed25519 key
-- Check signature key is registered
-- Trusted plugins bypass verification
+```
+Error: Plugin signature verification failed
+```
+
+**Solution:**
+1. Ensure plugin was registered via `register_plugin` (backend signs it)
+2. Check `trusted` flag is `true` in `plugins` table
+3. Verify signing key not revoked in `plugin_signing_keys`
 
 ### Environment Pool Exhausted
 
-- Increase `ENVIRONMENT_MAX_COUNT`
-- Decrease `ENVIRONMENT_WARM_TIMEOUT`
-- Add disk space if hitting disk limit
+```
+Warning: Environment pool full, creating cold environment
+```
+
+**Solution:**
+1. Increase `ENVIRONMENT_MAX_COUNT`
+2. Decrease `ENVIRONMENT_WARM_TIMEOUT`
+3. Add disk space or check `ENVIRONMENT_MAX_DISK_BYTES`
 
 ### Stuck Jobs
 
-- Run `SELECT * FROM public.cleanup_stuck_jobs()` to recover
-- Check lease expiration times
-- Verify device is still online
+```sql
+-- Manually trigger cleanup
+SELECT * FROM cleanup_stuck_jobs(3, '...');
+
+-- Check lease expirations
+SELECT id, status, lease_expires_at 
+FROM agent_jobs 
+WHERE lease_expires_at < NOW() AND status IN ('assigned', 'running');
+```
 
 ---
 
-## Bug Fixes Applied
+## API Reference
 
-This release includes fixes for the following issues:
+### Edge Function Endpoints
 
-| Bug ID | Description |
-|--------|-------------|
-| C1 | Plugin signature verification now uses metadata hash |
-| C2 | Added user_orgs view for RLS policies |
-| C3 | Fixed EnvironmentPool race condition |
-| C4 | PythonRuntime.Cleanup() no longer deletes warm pool paths |
-| H1 | Added bundled merge_metadata.py plugin |
-| H2 | Fixed plugin OS/arch path fallback |
-| H3 | Worker count now updates from heartbeat |
-| H5 | Fixed ActiveJobsCount() double-counting |
-| H6 | Added advisory lock to auto_progress_after_scan |
-| M1 | Fixed ReleaseEnvironment() lock order |
-| M8 | Added cleanup_stuck_jobs cron function |
-| L1 | CGO check now guarded by env var |
-| L2 | Added fallback path warning |
+Base URL: `https://<project>.supabase.co/functions/v1/`
+
+#### Job Lifecycle
+
+```
+POST /claim_device              # Register device (no auth)
+GET  /bootstrap                 # Get config (x-bootstrap-token auth)
+POST /register_device           # Register (no auth, service_role)
+
+POST /assign_agent_job         # Request job (Agent Token) — POST only
+POST /claim_jobs_for_device     # Batch claim (Agent Token) — returns dataset_id, chunk_index, step_index
+POST /start_job                 # Start job (Agent Token)
+POST /complete_job              # Complete job (Agent Token)
+POST /report_job_error          # Report error (Agent Token)
+POST /verify_job_lease          # Verify lease (Agent Token)
+```
+
+#### Dataset & Pipeline
+
+```
+POST /run_pipeline                          # Activate pipeline
+POST /advance_pipeline                      # Advance step
+POST /plan_dataset_chunks                   # Plan chunks
+POST /pre_chunk_dataset                     # Create chunks
+POST /calculate_optimal_chunk_size          # Calc chunk size
+POST /approve_dataset_and_plan_chunks      # Approve & plan
+POST /report_dataset_scan                   # Report scan
+POST /schedule_merge_job                    # Schedule merge
+```
+
+#### Plugin Management
+
+```
+POST /register_plugin            # Register (Bearer, Admin)
+POST /get_plugin                # Get binary (Agent Token)
+GET  /list_plugins_for_org     # List org plugins (Bearer)
+GET  /list_all_plugins         # List all (Bearer)
+POST /get_plugin_signing_key   # Get key (Agent Token)
+GET  /list_plugin_signing_keys # List keys (Bearer)
+```
+
+#### Real-time
+
+```
+GET  /agent_stream              # SSE stream (Agent Token)
+POST /relay_job_event          # Relay event
+POST /notify_available_device  # Notify available
+```
 
 ---
 
 ## License
 
-Part of the Sentra Zero Compute Network.
+Part of the SentraZero Compute Platform.
+
+---
+
+## Additional Documentation
+
+- [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) - Comprehensive testing checklist
+- [USER_FLOW_TESTING.md](./USER_FLOW_TESTING.md) - End-to-end user flow tests
+- [DASHBOARD_SPECIFICATION.md](./DASHBOARD_SPECIFICATION.md) - Dashboard design & wiring
+
+---
+
+**Built with:**
+- Go 1.25+
+- Supabase (PostgreSQL + Edge Functions + Vault + Realtime)
+- Deno (Edge Functions runtime)
+- pgvector (Vector similarity search)
+- Redis (Optional coordination)
+
+**Additional Documentation:**
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — End-to-end flow with two-tier chunking design
+- [TESTING_FLOW.md](./TESTING_FLOW.md) — Detailed phase-by-phase testing guide
+
+**Last Updated:** 2026-05-12

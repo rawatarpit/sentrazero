@@ -73,17 +73,37 @@ serve(async (req)=>{
     // --- Update agent_jobs ---
     if (job_id) {
       console.log("[complete_job] processing job:", job_id);
-      // Check if already completed (idempotent)
-      const { data: currJob } = await supabase.from("agent_jobs").select("status, execution_id").eq("id", job_id).maybeSingle();
+      const { data: currJob } = await supabase.from("agent_jobs").select("status, execution_id, payload").eq("id", job_id).maybeSingle();
       if (currJob?.status === "completed" || currJob?.status === "failed") {
+        console.log("[complete_job] job already in terminal state, triggering advance_pipeline");
+        const termExecId = execution_id || currJob?.execution_id;
+        if (termExecId) {
+          try {
+            const advRes = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/advance_pipeline`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-relay-key": Deno.env.get("RELAY_WEBHOOK_SECRET"),
+                "x-org-id": authResult.device.org_id
+              },
+              body: JSON.stringify({
+                execution_id: termExecId
+              })
+            });
+            console.log("[complete_job] advance_pipeline result (idempotent):", await advRes.text());
+          } catch (e) {
+            console.log("[complete_job] advance_pipeline call failed (non-fatal):", e.message);
+          }
+        }
         return jsonResponse({
           ok: true,
           job_id,
-          execution_id: execution_id || currJob?.execution_id,
+          execution_id: termExecId,
           status: currJob.status,
           idempotent: true
         });
       }
+      const { data: jobWithPayload } = await supabase.from("agent_jobs").select("status, execution_id, payload").eq("id", job_id).maybeSingle();
       // Update job (no .select() to avoid issues)
       const { error: updateErr, count } = await supabase.from("agent_jobs").update(jobUpdateData).eq("id", job_id).select("id", {
         count: "exact",
@@ -97,8 +117,34 @@ serve(async (req)=>{
         console.error("[complete_job] job update FAILED:", updateErr.message);
       } else {
         console.log("[complete_job] JOB UPDATED SUCCESSFULLY, rows:", count);
-        if (!execId && currJob?.execution_id) {
-          execId = currJob.execution_id;
+        if (!execId && jobWithPayload?.execution_id) {
+          execId = jobWithPayload.execution_id;
+        }
+        if (status === "completed") {
+          const chunkId = jobWithPayload?.payload?.chunk_id;
+          if (chunkId) {
+            const { error: chunkErr } = await supabase.from("batch_chunks").update({
+              status: "processed",
+              updated_at: new Date().toISOString()
+            }).eq("id", chunkId);
+            if (chunkErr) {
+              console.error("[complete_job] batch_chunk update failed:", chunkErr.message);
+            } else {
+              console.log("[complete_job] batch_chunk", chunkId, "marked processed");
+            }
+          }
+        }
+        if (status === "completed" && jobWithPayload?.payload?.job_type === "merge_dataset") {
+          const { error: dsErr } = await supabase.from("datasets").update({
+            status: "merged",
+            merged_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }).eq("id", jobWithPayload.payload.dataset_id);
+          if (dsErr) {
+            console.error("[complete_job] dataset merge update failed:", dsErr.message);
+          } else {
+            console.log("[complete_job] dataset", jobWithPayload.payload.dataset_id, "marked merged");
+          }
         }
       }
     }
@@ -106,16 +152,37 @@ serve(async (req)=>{
     if (execId) {
       console.log("[complete_job] processing execution:", execId);
       const execUpdate = {
-        status: status,
-        finished_at: new Date().toISOString()
+        completed_at: new Date().toISOString()
       };
-      if (duration_ms) execUpdate.duration_ms = duration_ms;
-      if (error) execUpdate.error_message = error;
+      if (status === "failed") {
+        execUpdate.status = "failed";
+      }
       const { error: execErr } = await supabase.from("executions").update(execUpdate).eq("id", execId);
       if (execErr) {
         console.error("[complete_job] execution update FAILED:", execErr.message);
       } else {
         console.log("[complete_job] EXECUTION UPDATED SUCCESSFULLY");
+      }
+    }
+    // --- Advance pipeline if this job belongs to an execution ---
+    if (execId) {
+      try {
+        console.log("[complete_job] calling advance_pipeline for execution:", execId);
+        const advRes = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/advance_pipeline`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-relay-key": Deno.env.get("RELAY_WEBHOOK_SECRET"),
+            "x-org-id": authResult.device.org_id
+          },
+          body: JSON.stringify({
+            execution_id: execId
+          })
+        });
+        const advBody = await advRes.json();
+        console.log("[complete_job] advance_pipeline result:", JSON.stringify(advBody));
+      } catch (e) {
+        console.log("[complete_job] advance_pipeline call failed (non-fatal):", e.message);
       }
     }
     // --- Return success ---
