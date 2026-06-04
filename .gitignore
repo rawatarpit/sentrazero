@@ -7,10 +7,15 @@
 *.key
 *.pub
 
+# Runtime state
+~/.sentra/
+
 # Binaries & Large Archives
 bin/
 main
 sentra-agent*
+agent
+server/sentra-agent
 *.zip
 *.tar.gz
 *.dump
@@ -37,4 +42,3 @@ launcher/
 security/
 e2e/
 docs/
-/Users/arpitrawat/Downloads/sentrazero/docs

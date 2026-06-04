@@ -1,14 +1,9 @@
-//go:build (linux || darwin) && cgo
-// +build linux darwin
-// +build cgo
-
 package dispatcher
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
-	"sentra-agent/internal/ffi"
 	"sentra-agent/internal/plugin"
 )
 
@@ -18,24 +13,11 @@ func nativeRunner(
 	checksum string,
 	inputJSON string,
 ) (string, error) {
-	handle, runSym, freeSym, err := openAndGetSymbols(pluginPath, checksum)
-	if err != nil {
-		return "", fmt.Errorf("native runner: open symbols: %w", err)
-	}
-	defer closePluginHandle(handle)
-
-	out, err := callPlugin(ctx, runSym, freeSym, inputJSON)
-	if err != nil {
-		return "", fmt.Errorf("native runner: call plugin: %w", err)
-	}
-
-	return out, nil
+	return "", errors.New("native plugin execution disabled (not built with CGO)")
 }
 
 func NativeRunnerFunc() plugin.NativeRunner {
 	return nativeRunner
 }
 
-var _ = ffi.DLOpen
-var _ = ffi.DLSym
-var _ = ffi.DLClose
+var _ = plugin.NativeRunner(nativeRunner)

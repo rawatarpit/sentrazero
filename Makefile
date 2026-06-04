@@ -12,13 +12,14 @@ GO_BINARY := bin/sentra-agent
 # --- Build Everything ---
 all: build
 
-# --- Build Go Agent ---
+# --- Build Go Agent (stripped) ---
 build:
 	@echo "🧠 Building Go Sentra Agent..."
 	@mkdir -p bin
 	go clean -cache -modcache -testcache
-	go build -o $(GO_BINARY) ./cmd/main.go
+	go build -ldflags="-w -s" -o $(GO_BINARY) ./cmd/main.go
 	@echo "✅ Build complete: $(GO_BINARY)"
+	@echo "🔍 Binary size: $$(ls -lh $(GO_BINARY) | awk '{print $$5}')"
 
 # --- Run the Agent ---
 run: build

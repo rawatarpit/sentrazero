@@ -284,22 +284,4 @@ func parseInputJSON(inputJSON string) map[string]interface{} {
 	return m
 }
 
-func executeWithLocalRuntime(
-	ctx context.Context,
-	pluginPath string,
-	manifest Manifest,
-	payload map[string]interface{},
-	env system.ExecutionEnv,
-	start time.Time,
-) (*ExecutionResult, error) {
-	return &ExecutionResult{
-			Output:         "",
-			Method:         "local",
-			DurationMs:     time.Since(start).Milliseconds(),
-			FallbackReason: "local runtime execution disabled for security - plugin not executed",
-		}, fmt.Errorf(
-			"local runtime execution is disabled for security reasons. "+
-				"Plugin %q was NOT executed. Please enable Docker or use a sandboxed runtime environment",
-			manifest.Name,
-		)
-}
+
