@@ -12,7 +12,6 @@ import (
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dispatcher"
 	"sentra-agent/internal/sysinfo"
-	"sentra-agent/internal/system"
 )
 
 const heartbeatInterval = 10 * time.Second
@@ -111,9 +110,6 @@ func performHeartbeat(
 	// -----------------------------------------------------------------
 
 	platform := runtimev2.GetCurrentPlatform()
-	env := system.DetectExecutionEnv()
-	hasDocker := env.HasDocker
-
 	if execClient != nil {
 		policyResult, err := execClient.SendDeviceHeartbeat(
 			ctx,
@@ -130,7 +126,7 @@ func performHeartbeat(
 				ActiveWorkers:    activeWorkers,
 				PythonVersion:    platform.Python,
 				NodeVersion:      platform.Node,
-				DockerAvailable:  hasDocker,
+				DockerAvailable:  false,
 				RuntimeSupported: platform.Python != "" || platform.Node != "",
 			},
 		)

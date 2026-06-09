@@ -454,7 +454,7 @@ func GetRemotePathWithSlug(datasetID, datasetSlug string, chunkIndex int, pathTy
 	case "result":
 		return fmt.Sprintf("%s/chunks/chunk_%d.out", base, chunkIndex)
 	case "merged":
-		return fmt.Sprintf("%s.csv", base)
+		return fmt.Sprintf("%s_merged.csv", base)
 	}
 	return ""
 }

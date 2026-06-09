@@ -251,6 +251,7 @@ var (
 type RedisCache struct {
 	RedisURL   string `json:"redis_url"`
 	RedisToken string `json:"redis_token"`
+	AnonKey    string `json:"anon_key"`
 	CachedAt   string `json:"cached_at"`
 }
 
@@ -258,10 +259,10 @@ const redisCacheFile = "redis_cache.json"
 
 // FetchRedisConfig calls the bootstrap edge function (with device-token auth)
 // and caches the result locally. On subsequent calls the cached value is used.
-func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, redisToken string, err error) {
+func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, redisToken, anonKey string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", "", fmt.Errorf("cannot find home dir: %w", err)
+		return "", "", "", fmt.Errorf("cannot find home dir: %w", err)
 	}
 
 	cachePath := filepath.Join(home, ".sentra", redisCacheFile)
@@ -270,20 +271,20 @@ func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, r
 	if data, readErr := os.ReadFile(cachePath); readErr == nil {
 		var cached RedisCache
 		if json.Unmarshal(data, &cached) == nil && cached.RedisURL != "" && cached.RedisToken != "" {
-			return cached.RedisURL, cached.RedisToken, nil
+			return cached.RedisURL, cached.RedisToken, cached.AnonKey, nil
 		}
 	}
 
 	// No valid cache, call bootstrap edge function
 	if cfg.DeviceID == "" || cfg.Token == "" {
-		return "", "", nil // not yet claimed
+		return "", "", "", nil // not yet claimed
 	}
 
 	bootstrapURL := fmt.Sprintf("%s/functions/v1/bootstrap", cfg.BackendURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bootstrapURL, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("bootstrap request failed: %w", err)
+		return "", "", "", fmt.Errorf("bootstrap request failed: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+cfg.BackendAnonKey)
@@ -291,30 +292,32 @@ func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, r
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", nil
+		return "", "", "", nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", nil
+		return "", "", "", nil
 	}
 
 	var result struct {
 		RedisURL   string `json:"redis_url"`
 		RedisToken string `json:"redis_token"`
+		AnonKey    string `json:"anon_key"`
 	}
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
-		return "", "", nil
+		return "", "", "", nil
 	}
 
 	if result.RedisURL == "" || result.RedisToken == "" {
-		return "", "", nil
+		return "", "", "", nil
 	}
 
 	// Cache locally
 	cached := RedisCache{
 		RedisURL:   result.RedisURL,
 		RedisToken: result.RedisToken,
+		AnonKey:    result.AnonKey,
 		CachedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	if data, marshalErr := json.MarshalIndent(cached, "", "  "); marshalErr == nil {
@@ -324,5 +327,5 @@ func FetchRedisConfig(ctx context.Context, cfg *agentconfig.Config) (redisURL, r
 		}
 	}
 
-	return result.RedisURL, result.RedisToken, nil
+	return result.RedisURL, result.RedisToken, result.AnonKey, nil
 }

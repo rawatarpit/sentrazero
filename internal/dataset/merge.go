@@ -328,7 +328,7 @@ func getOutputPath(deviceOutput *DeviceOutput, datasetID, datasetSlug string) st
 	if datasetSlug != "" {
 		name = datasetSlug
 	}
-	filename := fmt.Sprintf("%s.csv", name)
+	filename := fmt.Sprintf("%s_merged.csv", name)
 	if deviceOutput != nil && deviceOutput.MountPath != "" {
 		return filepath.Join(deviceOutput.MountPath, filename)
 	}
@@ -395,6 +395,41 @@ func detectPartialMerge(outputPath string) bool {
 		return true
 	}
 	return false
+}
+
+func cleanupChunks(chunks []ChunkInfo) int {
+	deletedCount := 0
+	seenDirs := make(map[string]bool)
+
+	for _, chunk := range chunks {
+		if chunk.IsSkipped {
+			continue
+		}
+		resolvedPath := chunk.Path
+		if err := os.Remove(resolvedPath); err == nil {
+			deletedCount++
+			// Remove .metadata.json if it exists
+			metaPath := resolvedPath + ".metadata.json"
+			os.Remove(metaPath)
+
+			// Clean up parent directory if empty
+			dir := filepath.Dir(resolvedPath)
+			if !seenDirs[dir] {
+				seenDirs[dir] = true
+				entries, err := os.ReadDir(dir)
+				if err == nil && len(entries) == 0 {
+					os.Remove(dir)
+					// Also clean up parent of chunks/ (e.g. {slug}/)
+					parent := filepath.Dir(dir)
+					parentEntries, err := os.ReadDir(parent)
+					if err == nil && len(parentEntries) == 0 {
+						os.Remove(parent)
+					}
+				}
+			}
+		}
+	}
+	return deletedCount
 }
 
 func StreamMerge(ctx context.Context, config MergeConfig) (*MergeResult, error) {
@@ -582,33 +617,14 @@ func StreamMerge(ctx context.Context, config MergeConfig) (*MergeResult, error) 
 			})
 		}
 
-		if config.DeleteChunksAfter {
-			chunkChecksum, _, _ := computeChunkChecksum(resolvedPath)
-			if chunkChecksum == chunk.Checksum {
-				if err := os.Remove(resolvedPath); err != nil {
-					obs.Warn("failed to delete chunk after merge", obs.Field{
-						"chunk_id": chunk.ChunkID,
-						"error":    err.Error(),
-					})
-				} else {
-					deletedCount++
-				}
-			} else {
-				obs.Warn("chunk checksum mismatch, skipping deletion", obs.Field{
-					"chunk_id": chunk.ChunkID,
-					"expected": chunk.Checksum,
-					"actual":   chunkChecksum,
-				})
-				recordChecksumFailure(config.DatasetID)
-			}
-		}
-
 		obs.Debug("chunk merged", obs.Field{
 			"chunk_id":    chunk.ChunkID,
 			"bytesritten": written,
 			"total_bytes": bytesWritten,
 		})
 	}
+
+	deletedCount = cleanupChunks(activeChunks)
 
 	if err := outFile.Sync(); err != nil {
 		return nil, fmt.Errorf("failed to sync final output: %w", err)
@@ -666,6 +682,17 @@ func StreamMerge(ctx context.Context, config MergeConfig) (*MergeResult, error) 
 	}
 
 	recordMergeMetrics(config.DatasetID, *result)
+
+	// Clean up empty directories and stale metadata files
+	outputDirEntries, _ := os.ReadDir(outputDir)
+	for _, entry := range outputDirEntries {
+		if entry.IsDir() {
+			subEntries, _ := os.ReadDir(filepath.Join(outputDir, entry.Name()))
+			if len(subEntries) == 0 {
+				os.Remove(filepath.Join(outputDir, entry.Name()))
+			}
+		}
+	}
 
 	obs.Info("merge completed", obs.Field{
 		"dataset_id":      config.DatasetID,
@@ -836,6 +863,27 @@ func StreamMergeTree(ctx context.Context, config MergeConfig) (*MergeResult, err
 	}
 
 	recordMergeMetrics(config.DatasetID, *result)
+
+	// Clean up intermediate stage files
+	for _, intermediate := range intermediateOutputs {
+		intermediatePath := filepath.Join(outputDir, intermediate)
+		if err := os.Remove(intermediatePath); err == nil {
+			obs.Debug("cleaned up intermediate stage output", obs.Field{
+				"path": intermediatePath,
+			})
+		}
+	}
+
+	// Clean up empty stage directories in output
+	outputDirEntries, _ := os.ReadDir(outputDir)
+	for _, entry := range outputDirEntries {
+		if entry.IsDir() {
+			subEntries, _ := os.ReadDir(filepath.Join(outputDir, entry.Name()))
+			if len(subEntries) == 0 {
+				os.Remove(filepath.Join(outputDir, entry.Name()))
+			}
+		}
+	}
 
 	obs.Info("tree merge completed", obs.Field{
 		"dataset_id":  config.DatasetID,

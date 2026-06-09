@@ -69,8 +69,6 @@ func Execute(
 		"os":           env.OS,
 		"arch":         env.Arch,
 		"has_cgo":      env.HasCGO,
-		"has_docker":   env.HasDocker,
-		"privileged":   env.IsPrivileged,
 		"timeout_secs": timeout.Seconds(),
 		"memory_mb":    manifest.Resources.MemoryMB,
 		"cpu_seconds":  manifest.Resources.CPUSeconds,
@@ -156,48 +154,36 @@ func executeScript(
 	env system.ExecutionEnv,
 	start time.Time,
 ) (*ExecutionResult, error) {
-	if env.HasDocker {
-		out, err := RunSandboxedPlugin(ctx, pluginPath, payload, manifest)
-		duration := time.Since(start)
+	out, err := RunSandboxedPlugin(ctx, pluginPath, payload, manifest)
+	duration := time.Since(start)
 
-		if err != nil {
-			obs.Error("docker sandbox execution failed", obs.Field{
-				"plugin":      manifest.Name,
-				"language":    manifest.Language,
-				"method":      "docker",
-				"duration_ms": duration.Milliseconds(),
-				"error":       err.Error(),
-			})
-			return nil, fmt.Errorf("docker sandbox execution failed for plugin %q: %w", manifest.Name, err)
-		}
-
-		obs.Info("plugin executed", obs.Field{
-			"plugin":          manifest.Name,
-			"language":        manifest.Language,
-			"method":          out.Method,
-			"duration_ms":     duration.Milliseconds(),
-			"fallback_reason": "",
-			"os":              env.OS,
-			"arch":            env.Arch,
+	if err != nil {
+		obs.Error("sandbox execution failed", obs.Field{
+			"plugin":      manifest.Name,
+			"language":    manifest.Language,
+			"method":      "native_sandbox",
+			"duration_ms": duration.Milliseconds(),
+			"error":       err.Error(),
 		})
-
-		return &ExecutionResult{
-			Output:         out.Output,
-			Method:         out.Method,
-			DurationMs:     duration.Milliseconds(),
-			FallbackReason: "",
-		}, nil
+		return nil, fmt.Errorf("sandbox execution failed for plugin %q: %w", manifest.Name, err)
 	}
 
-	// Local execution is disabled for security - require Docker or RuntimeManager
-	obs.Error("script plugin requires Docker but Docker is unavailable", obs.Field{
-		"plugin":   manifest.Name,
-		"language": manifest.Language,
+	obs.Info("plugin executed", obs.Field{
+		"plugin":          manifest.Name,
+		"language":        manifest.Language,
+		"method":          out.Method,
+		"duration_ms":     duration.Milliseconds(),
+		"fallback_reason": "",
+		"os":              env.OS,
+		"arch":            env.Arch,
 	})
-	return nil, fmt.Errorf(
-		"plugin %q requires Docker sandbox but Docker is not available on this device",
-		manifest.Name,
-	)
+
+	return &ExecutionResult{
+		Output:         out.Output,
+		Method:         out.Method,
+		DurationMs:     duration.Milliseconds(),
+		FallbackReason: "",
+	}, nil
 }
 
 func validatePluginTypeMismatch(pluginPath string, lang string) error {

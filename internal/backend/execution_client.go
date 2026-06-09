@@ -604,32 +604,23 @@ const (
 
 func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, jobID string, status string, durationMs int64, resultData any) *CompleteJobResult {
 	log.Printf("[EXEC-CLIENT] CompleteJob: executionID=%s jobID=%s status=%s", executionID, jobID, status)
-	
-	reqBody := execCompleteJobRequest{
-		ExecutionID: executionID,
-		JobID:      jobID,
-		Status:     status,
-		DurationMs: durationMs,
-	}
 
-	// Also pass via context headers for edge function to use as fallback
-	if executionID == "" {
-		// Try to get from elsewhere - but for now pass empty
+	reqBody := map[string]any{
+		"job_id":       jobID,
+		"execution_id": executionID,
+		"status":       status,
 	}
-
-	if resultData != nil {
-		resultJSON, err := json.Marshal(resultData)
-		if err != nil {
-			return &CompleteJobResult{Err: err}
-		}
-		reqBody.Output = resultJSON
+	if durationMs > 0 {
+		reqBody["duration_ms"] = durationMs
+	}
+	if resultData != nil && status == "failed" {
+		reqBody["result"] = resultData
 	}
 
 	body, _ := json.Marshal(reqBody)
 
-	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/complete_job", body, func(r *http.Request) {
+	resp, err := c.httpc.DoWithReq(ctx, "POST", "/functions/v1/complete_job", body, func(r *http.Request) {
 		r.Header.Set("x-device-id", c.deviceID)
-		r.Header.Set("apikey", c.anonKey)
 	})
 	if err != nil {
 		return &CompleteJobResult{Err: err}
@@ -643,76 +634,79 @@ func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, j
 
 	log.Printf("[EXEC-CLIENT] complete_job → HTTP %d | body: %s", resp.StatusCode, string(respBody))
 
-	// Parse response body for error details
-	var apiResp struct {
+	if resp.StatusCode == 200 {
+		var result struct {
+			Ok         bool   `json:"ok"`
+			Idempotent bool   `json:"idempotent,omitempty"`
+		}
+		json.Unmarshal(respBody, &result)
+		if result.Ok {
+			if result.Idempotent {
+				return &CompleteJobResult{IsAlreadyDone: true}
+			}
+			return &CompleteJobResult{}
+		}
+	}
+
+	// Map error responses
+	var errResp struct {
 		Ok    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-		Code  string `json:"code,omitempty"`
+		Error string `json:"error"`
 	}
-	var completeResult execCompleteJobResponse
-	json.Unmarshal(respBody, &apiResp)
-	json.Unmarshal(respBody, &completeResult)
-
-	// Handle based on HTTP status code
-	if resp.StatusCode == 409 {
-		// HTTP 409 Conflict - check error code
-		errMsg := apiResp.Error
-		if errMsg == "" {
-			errMsg = completeResult.Error
-		}
-
-		switch ErrorCode(apiResp.Code) {
-		case ErrCodeAlreadyDone:
-			// Job already completed - treat as success
-			return &CompleteJobResult{
-				IsAlreadyDone: true,
-				Err:           fmt.Errorf("job already in terminal state: %s", errMsg),
-			}
-		case ErrCodeConcurrentMod:
-			// Concurrent modification
-			return &CompleteJobResult{
-				IsConcurrentMod: true,
-				Err:             fmt.Errorf("state transition failed - concurrent modification: %s", errMsg),
-			}
-		case ErrCodeLeaseExpired:
-			// Lease expired
-			return &CompleteJobResult{
-				IsLeaseExpired: true,
-				Err:            fmt.Errorf("lease expired: %s", errMsg),
-			}
-		default:
-			// Fallback: check error message content
-			if strings.Contains(errMsg, "terminal state") ||
-				strings.Contains(errMsg, "already completed") ||
-				strings.Contains(errMsg, "already dead") {
-				return &CompleteJobResult{
-					IsAlreadyDone: true,
-					Err:           fmt.Errorf("job already in terminal state: %s", errMsg),
-				}
-			}
-			return &CompleteJobResult{
-				IsLeaseExpired: true,
-				Err:            fmt.Errorf("completion rejected: %s", errMsg),
-			}
-		}
+	json.Unmarshal(respBody, &errResp)
+	errMsg := errResp.Error
+	if errMsg == "" {
+		errMsg = string(respBody)
 	}
 
-	if resp.StatusCode == 403 {
-		return &CompleteJobResult{
-			Err: fmt.Errorf("authorization failed: %s", apiResp.Error),
-		}
+	if strings.Contains(errMsg, "already completed") ||
+		strings.Contains(errMsg, "terminal state") {
+		return &CompleteJobResult{IsAlreadyDone: true, Err: fmt.Errorf("%s", errMsg)}
 	}
 
-	if resp.StatusCode == 404 {
-		return &CompleteJobResult{
-			Err: fmt.Errorf("job not found: %s", apiResp.Error),
-		}
+	return &CompleteJobResult{Err: fmt.Errorf("complete_job failed: HTTP %d: %s", resp.StatusCode, errMsg)}
+}
+
+// DeviceAssignedJob represents a job assigned to this device (fetched via PostgREST)
+type DeviceAssignedJob struct {
+	ID              string          `json:"id"`
+	JobType         string          `json:"job_type"`
+	Payload         json.RawMessage `json:"payload"`
+	ExecutionID     string          `json:"execution_id"`
+	ExecutionStepID string          `json:"execution_step_id"`
+	OrgID           string          `json:"org_id"`
+	Status          string          `json:"status"`
+}
+
+// GetAssignedJobs fetches jobs assigned to this device that are in assigned or running state
+func (c *ExecutionClient) GetAssignedJobs(ctx context.Context) ([]DeviceAssignedJob, error) {
+	url := fmt.Sprintf("%s/rest/v1/agent_jobs?agent_id=eq.%s&status=in.(assigned,running)&select=id,job_type,payload,execution_id,execution_step_id,org_id,status",
+		c.baseURL, c.deviceID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
 	}
+
+	req.Header.Set("apikey", c.anonKey)
+	req.Header.Set("Authorization", "Bearer "+c.anonKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		return &CompleteJobResult{Err: fmt.Errorf("complete_job failed: HTTP %d: %s", resp.StatusCode, apiResp.Error)}
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get_assigned_jobs failed: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Success case
-	return &CompleteJobResult{Response: &completeResult}
+	var jobs []DeviceAssignedJob
+	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
+		return nil, err
+	}
+
+	return jobs, nil
 }

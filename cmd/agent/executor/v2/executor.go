@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,8 +15,6 @@ import (
 
 	"sentra-agent/cmd/agent/runtime/v2"
 	"sentra-agent/cmd/agent/sandbox"
-	"sentra-agent/internal/obs"
-	"sentra-agent/internal/system"
 )
 
 type ExecutionMode string
@@ -25,7 +22,6 @@ type ExecutionMode string
 const (
 	ModeNative  ExecutionMode = "native"
 	ModeRuntime ExecutionMode = "runtime"
-	ModeDocker  ExecutionMode = "docker"
 )
 
 type Job struct {
@@ -122,25 +118,12 @@ func (e *Executor) GetRuntimeManager() *runtime.RuntimeManager {
 }
 
 func selectExecutionModes(executionMode string) []ExecutionMode {
-	dockerAvailable := system.IsDockerAvailable()
-
 	switch ExecutionMode(executionMode) {
-	case ModeDocker:
-		if dockerAvailable {
-			return []ExecutionMode{ModeDocker, ModeRuntime}
-		}
-		return []ExecutionMode{ModeRuntime}
 	case ModeRuntime:
-		if dockerAvailable {
-			return []ExecutionMode{ModeRuntime, ModeDocker}
-		}
 		return []ExecutionMode{ModeRuntime}
 	case ModeNative:
 		return []ExecutionMode{ModeNative}
 	default:
-		if dockerAvailable {
-			return []ExecutionMode{ModeRuntime, ModeDocker}
-		}
 		return []ExecutionMode{ModeRuntime}
 	}
 }
@@ -346,143 +329,6 @@ func (e *Executor) executeRuntime(ctx context.Context, job Job, policy *Executio
 	return result, err
 }
 
-func (e *Executor) executeDocker(ctx context.Context, job Job, policy *ExecutionPolicy) (*Result, error) {
-	if !system.IsDockerAvailable() {
-		return &Result{
-			Success:             false,
-			Error:               "Docker is not available on this device",
-			ErrorClassification: "infra_error",
-		}, fmt.Errorf("Docker is not available")
-	}
-
-	timeout := time.Duration(policy.DefaultTimeoutSeconds) * time.Second
-	if job.TimeoutSeconds > 0 {
-		timeout = time.Duration(job.TimeoutSeconds) * time.Second
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	workDir := filepath.Join(e.sandboxBase, "docker-"+job.ID)
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return &Result{
-			Success:             false,
-			Error:               fmt.Sprintf("failed to create work directory: %v", err),
-			ErrorClassification: "fatal",
-		}, err
-	}
-	defer os.RemoveAll(workDir)
-
-	rtType := runtime.RuntimeType(job.RuntimeType)
-	if rtType == "" {
-		rtType = runtime.RuntimePython
-	}
-
-	pluginFile := filepath.Join(workDir, getPluginFilename(rtType))
-	if err := os.WriteFile(pluginFile, []byte(job.PluginCode), 0644); err != nil {
-		return &Result{
-			Success:             false,
-			Error:               fmt.Sprintf("failed to write plugin: %v", err),
-			ErrorClassification: "fatal",
-		}, err
-	}
-
-	inputJSON := map[string]interface{}{
-		"input":    job.Payload,
-		"config":   map[string]interface{}{"job_id": job.ID, "job_type": job.Type},
-		"metadata": map[string]interface{}{"org_id": job.OrgID, "run_id": job.RunID},
-	}
-	inputBytes, _ := json.Marshal(inputJSON)
-
-	img := getDockerImageForRuntime(rtType)
-	runner := getRunnerForRuntime(rtType)
-
-	args := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:/mnt/plugin:ro", workDir),
-		"--network", "none",
-		"--memory", "512m",
-		"--cpus", "1.0",
-		"-i",
-	}
-
-	if job.OrgID != "" {
-		args = append(args, "-e", fmt.Sprintf("ORG_ID=%s", job.OrgID))
-	}
-	if job.RunID != "" {
-		args = append(args, "-e", fmt.Sprintf("RUN_ID=%s", job.RunID))
-	}
-
-	args = append(args, img, "sh", "-c", fmt.Sprintf("%s /mnt/plugin/plugin.%s", runner, getPluginExtension(rtType)))
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdin = bytes.NewReader(inputBytes)
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	startTime := time.Now()
-	err := cmd.Run()
-	duration := time.Since(startTime)
-
-	result := &Result{
-		Success:             err == nil,
-		DurationMs:          duration.Milliseconds(),
-		RunID:               job.RunID,
-		AttemptNumber:       job.AttemptNumber,
-		ErrorClassification: "unknown",
-	}
-
-	if err != nil {
-		result.ExitCode = cmd.ProcessState.ExitCode()
-		result.Error = out.String()
-		if result.ExitCode == 137 || strings.Contains(out.String(), "Killed") {
-			result.ErrorClassification = "fatal"
-			result.Error = "OOM killed"
-		} else if result.ExitCode != 0 {
-			result.ErrorClassification = "retryable"
-		}
-	} else {
-		result.Data = map[string]interface{}{"output": out.String()}
-		result.ErrorClassification = "success"
-	}
-
-	return result, nil
-}
-
-func getDockerImageForRuntime(rt runtime.RuntimeType) string {
-	switch rt {
-	case runtime.RuntimePython:
-		return "python:3.11-slim"
-	case runtime.RuntimeNode:
-		return "node:18-slim"
-	default:
-		return "python:3.11-slim"
-	}
-}
-
-func getRunnerForRuntime(rt runtime.RuntimeType) string {
-	switch rt {
-	case runtime.RuntimePython:
-		return "python"
-	case runtime.RuntimeNode:
-		return "node"
-	default:
-		return "python"
-	}
-}
-
-func getPluginExtension(rt runtime.RuntimeType) string {
-	switch rt {
-	case runtime.RuntimePython:
-		return "py"
-	case runtime.RuntimeNode:
-		return "js"
-	default:
-		return "py"
-	}
-}
-
 func (e *Executor) GetJobStatus(jobID string) (running bool, result *Result) {
 	e.state.mu.Lock()
 	defer e.state.mu.Unlock()
@@ -512,18 +358,14 @@ func (e *Executor) GetRunningJobs() []*Job {
 
 func (e *Executor) executeRuntimeWithRetry(ctx context.Context, job Job, policy *ExecutionPolicy, mode ExecutionMode) (*Result, error) {
 	if policy.MaxRetries <= 0 {
-		switch mode {
-		case ModeRuntime:
+		if mode == ModeRuntime {
 			return e.executeRuntime(ctx, job, policy)
-		case ModeDocker:
-			return e.executeDocker(ctx, job, policy)
-		default:
-			return &Result{
-				Success:             false,
-				Error:               "unsupported execution mode",
-				ErrorClassification: "fatal",
-			}, fmt.Errorf("unsupported execution mode")
 		}
+		return &Result{
+			Success:             false,
+			Error:               "unsupported execution mode",
+			ErrorClassification: "fatal",
+		}, fmt.Errorf("unsupported execution mode")
 	}
 
 	backoffMultiplier := policy.RetryBackoffMultiplier
@@ -554,18 +396,7 @@ func (e *Executor) executeRuntimeWithRetry(ctx context.Context, job Job, policy 
 		}
 
 		var result *Result
-		switch mode {
-		case ModeRuntime:
-			result, lastErr = e.executeRuntime(ctx, job, policy)
-		case ModeDocker:
-			result, lastErr = e.executeDocker(ctx, job, policy)
-		default:
-			return &Result{
-				Success:             false,
-				Error:               "unsupported execution mode",
-				ErrorClassification: "fatal",
-			}, fmt.Errorf("unsupported execution mode")
-		}
+		result, lastErr = e.executeRuntime(ctx, job, policy)
 
 		lastResult = result
 
@@ -574,16 +405,6 @@ func (e *Executor) executeRuntimeWithRetry(ctx context.Context, job Job, policy 
 		}
 
 		errClass := result.ErrorClassification
-
-		if mode == ModeRuntime && errClass == "retryable" {
-			obs.Info("runtime mode failed with retryable error, falling back to docker", obs.Field{
-				"job_id":      job.ID,
-				"error":       lastErr.Error(),
-				"attempt":     attempt + 1,
-				"max_retries": policy.MaxRetries,
-			})
-			continue
-		}
 
 		if errClass != "retryable" {
 			return result, lastErr

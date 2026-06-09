@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+const sha256EmptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 type S3HTTPBackend struct {
 	bucketName string
 	endpoint string // full endpoint like https://project.storage.supabase.co/storage/v1/s3
@@ -67,7 +69,7 @@ func NewS3HTTPBackend(endpoint, bucketName, region string, creds *S3Credentials)
 	}, nil
 }
 
-func (b *S3HTTPBackend) signRequest(req *http.Request) error {
+func (b *S3HTTPBackend) signRequest(req *http.Request, payloadHash string) error {
 	now := time.Now().UTC()
 	amzDate := now.Format("20060102T150405Z")
 	dateStamp := now.Format("20060102")
@@ -100,15 +102,12 @@ func (b *S3HTTPBackend) signRequest(req *http.Request) error {
 	// Host header
 	req.Header.Set("X-Amz-Date", amzDate)
 	req.Header.Set("Host", b.host)
-	req.Header.Set("X-Amz-Content-Sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
 	// Canonical headers - MUST be lowercase and sorted alphabetically
 	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-		b.host, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", amzDate)
+		b.host, payloadHash, amzDate)
 	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
-
-	// Unsigned payload
-	payloadHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 	// Canonical request - order matters!
 	canonicalParts := []string{
@@ -209,7 +208,7 @@ func (b *S3HTTPBackend) ListObjects(ctx context.Context, prefix string) ([]Objec
 			return nil, err
 		}
 		
-		if err := b.signRequest(req); err != nil {
+		if err := b.signRequest(req, sha256EmptyHash); err != nil {
 			return nil, err
 		}
 
@@ -299,7 +298,7 @@ func (b *S3HTTPBackend) ReadObject(ctx context.Context, remotePath string) (io.R
 		return nil, err
 	}
 	
-	if err := b.signRequest(req); err != nil {
+	if err := b.signRequest(req, sha256EmptyHash); err != nil {
 		return nil, err
 	}
 
@@ -325,6 +324,8 @@ func (b *S3HTTPBackend) WriteObject(ctx context.Context, remotePath string, read
 		return fmt.Errorf("failed to read payload: %w", err)
 	}
 
+	payloadHash := sha256Hex(body)
+
 	urlStr := b.buildURL(remotePath)
 	req, err := http.NewRequest("PUT", urlStr, bytes.NewReader(body))
 	if err != nil {
@@ -333,7 +334,7 @@ func (b *S3HTTPBackend) WriteObject(ctx context.Context, remotePath string, read
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	if err := b.signRequest(req); err != nil {
+	if err := b.signRequest(req, payloadHash); err != nil {
 		return err
 	}
 
@@ -351,6 +352,11 @@ func (b *S3HTTPBackend) WriteObject(ctx context.Context, remotePath string, read
 	return nil
 }
 
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
 func (b *S3HTTPBackend) StatObject(ctx context.Context, remotePath string) (ObjectInfo, error) {
 	urlStr := b.buildURL(remotePath)
 	req, err := http.NewRequest("HEAD", urlStr, nil)
@@ -358,7 +364,7 @@ func (b *S3HTTPBackend) StatObject(ctx context.Context, remotePath string) (Obje
 		return ObjectInfo{}, err
 	}
 	
-	if err := b.signRequest(req); err != nil {
+	if err := b.signRequest(req, sha256EmptyHash); err != nil {
 		return ObjectInfo{}, err
 	}
 
@@ -385,7 +391,7 @@ func (b *S3HTTPBackend) DeleteObject(ctx context.Context, remotePath string) err
 		return err
 	}
 	
-	if err := b.signRequest(req); err != nil {
+	if err := b.signRequest(req, sha256EmptyHash); err != nil {
 		return err
 	}
 

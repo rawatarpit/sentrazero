@@ -234,12 +234,14 @@ func SyncPluginsFromAPI(ctx context.Context) ([]DBPlugin, error) {
 }
 
 func loadConfig() (*Config, error) {
+	projectRef := config.ReadProjectRef()
+
 	backendURL := firstNonEmpty(
 		os.Getenv("SENTRA_BACKEND_URL"),
 		os.Getenv("APP_SUPABASE_URL"),
 		os.Getenv("SUPABASE_URL"),
 		os.Getenv("BACKEND_URL"),
-		config.DefaultBackendURL,
+		config.BuildBackendURL(projectRef),
 	)
 	if backendURL == "" {
 		return nil, fmt.Errorf("backend URL not configured: set SENTRA_BACKEND_URL")
@@ -249,7 +251,7 @@ func loadConfig() (*Config, error) {
 		os.Getenv("SENTRA_BACKEND_ANON_KEY"),
 		os.Getenv("SUPABASE_ANON_KEY"),
 		os.Getenv("BACKEND_ANON_KEY"),
-		config.DefaultAnonKey,
+		config.BuildAnonKey(projectRef),
 	)
 
 	return &Config{

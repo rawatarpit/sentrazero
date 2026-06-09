@@ -54,19 +54,21 @@ type Config struct {
 func LoadStatic() *Config {
 	_ = godotenv.Load(".env")
 
+	projectRef := ReadProjectRef()
+
 	backendURL := strings.TrimRight(
 		firstNonEmpty(
 			os.Getenv("BACKEND_URL"),
 			os.Getenv("SENTRA_BACKEND_URL"),
 			os.Getenv("APP_SUPABASE_URL"),
 			os.Getenv("SUPABASE_URL"),
-			DefaultBackendURL,
+			BuildBackendURL(projectRef),
 		),
 		"/",
 	)
 
 	if backendURL == "" {
-		log.Fatal("❌ Backend URL not configured. Set BACKEND_URL or rebuild with -ldflags.")
+		log.Fatal("Backend URL not configured. Set BACKEND_URL, SUPABASE_URL, or ensure supabase/.temp/project-ref exists.")
 	}
 
 	anonKey := firstNonEmpty(
@@ -74,7 +76,7 @@ func LoadStatic() *Config {
 		os.Getenv("SENTRA_BACKEND_ANON_KEY"),
 		os.Getenv("SUPABASE_ANON_KEY"),
 		os.Getenv("APP_SUPABASE_ANON_KEY"),
-		DefaultAnonKey,
+		BuildAnonKey(projectRef),
 	)
 
 	// Note: anonKey can be empty - will be provided by claim_device response if using cloud

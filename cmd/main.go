@@ -19,6 +19,7 @@ import (
 	"sentra-agent/internal/dispatcher"
 	"sentra-agent/internal/healthcheck"
 	"sentra-agent/internal/heartbeat"
+	"sentra-agent/internal/obs"
 	"sentra-agent/internal/plugin"
 	"sentra-agent/internal/realtime"
 	agentredis "sentra-agent/internal/redis"
@@ -138,10 +139,19 @@ func main() {
 	// ---------------------------------------------------------------------
 
 	var rdb *agentredis.Client
-	rURL, rToken, rErr := bootstrap.FetchRedisConfig(ctx, cfg)
+	rURL, rToken, bootstrapAnonKey, rErr := bootstrap.FetchRedisConfig(ctx, cfg)
 	if rErr == nil && rURL != "" && rToken != "" {
 		cfg.RedisURL = rURL
 		cfg.RedisToken = rToken
+
+		// Override BackendAnonKey with the publishable key from the bootstrap
+		// edge function. The JWT anon key from .env has a stale project ref and
+		// is rejected by PostgREST. The publishable key works for both PostgREST
+		// and edge function auth.
+		if bootstrapAnonKey != "" {
+			cfg.BackendAnonKey = bootstrapAnonKey
+			log.Println("🔑 Using publishable anon key from bootstrap")
+		}
 
 		// Clean the URL — strip quotes and whitespace
 		rURL = strings.TrimSpace(rURL)
@@ -348,6 +358,29 @@ func main() {
 
 	if err := realtime.ReconcileAgent(ctx, cfg); err != nil {
 		log.Printf("⚠️ reconcile_agent failed: %v", err)
+	}
+
+	// Fetch and dispatch any jobs already assigned to this device
+	// (reconcile may have assigned jobs that polling won't return)
+	assignedJobs, err := execClient.GetAssignedJobs(ctx)
+	if err != nil {
+		log.Printf("⚠️ Failed to fetch assigned jobs: %v", err)
+	} else if len(assignedJobs) > 0 {
+		log.Printf("📋 Found %d assigned job(s), dispatching...", len(assignedJobs))
+		for _, job := range assignedJobs {
+			traceID := obs.NewTraceID()
+			if err := dispatcher.SubmitJobWithMeta(
+				job.JobType,
+				job.Payload,
+				job.ID,
+				job.OrgID,
+				traceID,
+				job.ExecutionStepID,
+				job.ExecutionID,
+			); err != nil {
+				log.Printf("[realtime] dispatch failed for assigned job %s: %v", job.ID, err)
+			}
+		}
 	}
 
 	// ---------------------------------------------------------------------

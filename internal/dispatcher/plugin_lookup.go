@@ -12,6 +12,10 @@ func PopulatePluginIDMap(plugins []plugin.DBPlugin) {
 	for _, p := range plugins {
 		if p.ID != "" && p.Name != "" {
 			pluginIDToName.Store(p.ID, p.Name)
+			pluginIDToName.Store(p.Name, p.Name)
+			if len(p.Name) > 7 && p.Name[:7] == "plugin_" {
+				pluginIDToName.Store(p.Name[7:], p.Name)
+			}
 		}
 	}
 }

@@ -115,19 +115,31 @@ func Validate(parentCtx context.Context, cfg *config.Config) error {
 	obs.Info("startup plugin registry accessible", obs.Field{"path": pluginDir})
 
 	{
-		testCmd := exec.CommandContext(ctx, "sh", "-c", `python3 -c "import hashlib,os; [hashlib.sha256(os.urandom(1024*1024)).hexdigest() for _ in range(100)]"`)
-		limits := sandbox.Limits{
-			MaxCPUSeconds: 1,
-			MaxMemoryMB:   64,
-			Timeout:       2 * time.Second,
+		cfg := sandbox.LoadConfig()
+		cfg.Mode = "off"
+		sb := sandbox.New(cfg)
+
+		pm := sandbox.PluginManifest{
+			Name: "startup-validation",
+			Resources: sandbox.PluginResources{
+				MemoryMB:       64,
+				CPUSeconds:     1,
+				TimeoutSeconds: 2,
+			},
 		}
-		if err := sandbox.Apply(ctx, testCmd, limits); err == nil {
-			err = testCmd.Wait()
-		}
-		if err == nil {
-			obs.Warn("startup sandbox did not enforce limits (process completed without being killed)", obs.Field{})
+
+		env, err := sb.Prepare(ctx, "startup-validation", pm, false)
+		if err != nil {
+			obs.Warn("startup sandbox prepare failed", obs.Field{"error": err.Error()})
 		} else {
-			obs.Info("startup sandbox enforcement verified", obs.Field{"status": "ok", "enforcement_error": err.Error()})
+			testCmd := exec.CommandContext(ctx, "sh", "-c", `python3 -c "import hashlib,os; [hashlib.sha256(os.urandom(1024*1024)).hexdigest() for _ in range(100)]"`)
+			testCmd.Dir = env.WorkDir
+			if err := sb.Execute(ctx, env, testCmd); err == nil {
+				obs.Warn("startup sandbox did not enforce limits (process completed without being killed)", obs.Field{})
+			} else {
+				obs.Info("startup sandbox enforcement verified", obs.Field{"status": "ok", "enforcement_error": err.Error()})
+			}
+			sb.Destroy(ctx, env)
 		}
 	}
 

@@ -39,16 +39,17 @@ var (
 )
 
 func init() {
+	projectRef := config.ReadProjectRef()
 	supabaseBaseURL = firstNonEmpty(
 		os.Getenv("SUPABASE_URL"),
-		config.DefaultBackendURL,
+		config.BuildBackendURL(projectRef),
 	)
 	supabaseToken = firstNonEmpty(
 		os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
 	)
 	supabaseAnonKey = firstNonEmpty(
 		os.Getenv("SUPABASE_ANON_KEY"),
-		config.DefaultAnonKey,
+		config.BuildAnonKey(projectRef),
 	)
 }
 
@@ -85,6 +86,7 @@ type MergePayload struct {
 	AffinityDeviceID  string                `json:"affinity_device_id"`
 	DeviceOutput      *dataset.DeviceOutput `json:"device_output"`
 	Strategy          MergeStrategy         `json:"strategy"`
+	StorageMode       string                `json:"storage_mode,omitempty"`
 	Chunks            []MergeChunk          `json:"chunks"`
 	MountPath         string                `json:"mount_path,omitempty"`
 	IsPartial         bool                  `json:"is_partial,omitempty"`
@@ -147,9 +149,20 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("missing dataset_id")
 	}
 
+	// Extract nested payload fields as fallback
+	var nestedJob struct {
+		StorageMode string `json:"storage_mode"`
+	}
+	if job.Payload != nil {
+		json.Unmarshal(job.Payload, &nestedJob)
+	}
+
 	storageMode := job.StorageMode
 	if storageMode == "" {
 		storageMode = job.StorageType
+	}
+	if storageMode == "" {
+		storageMode = nestedJob.StorageMode
 	}
 	if storageMode == "" {
 		storageMode = "shared_mount"
@@ -303,6 +316,58 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		// Don't return error - reporting is non-critical
 	}
 
+	// Create chunk file from source for the pipeline process step
+	if err := createChunkFromSource(ctx, backend, job.DatasetID, remotePath, objects); err != nil {
+		obs.Warn("failed to create chunk from source", obs.Field{
+			"job_id":     job.ID,
+			"dataset_id": job.DatasetID,
+			"error":      err.Error(),
+		})
+	}
+
+	return nil
+}
+
+func createChunkFromSource(ctx context.Context, backend storage.StorageBackend, datasetID, remotePath string, objects []storage.ObjectInfo) error {
+	if backend == nil {
+		return errors.New("backend is nil")
+	}
+
+	var sourceKey string
+	if len(objects) > 0 {
+		sourceKey = objects[0].Key
+	} else {
+		sourceKey = remotePath
+	}
+
+	if sourceKey == "" {
+		return errors.New("no source found to create chunk")
+	}
+
+	chunkKey := storage.GetRemotePath(datasetID, 0, "chunk")
+	if chunkKey == "" {
+		return errors.New("failed to build chunk key")
+	}
+
+	obs.Info("creating chunk file from source", obs.Field{
+		"source_key": sourceKey,
+		"chunk_key":  chunkKey,
+	})
+
+	reader, err := backend.ReadObject(ctx, sourceKey)
+	if err != nil {
+		return fmt.Errorf("failed to read source: %w", err)
+	}
+	defer reader.Close()
+
+	if err := backend.WriteObject(ctx, chunkKey, reader); err != nil {
+		return fmt.Errorf("failed to write chunk: %w", err)
+	}
+
+	obs.Info("chunk file created", obs.Field{
+		"chunk_key": chunkKey,
+	})
+
 	return nil
 }
 
@@ -379,7 +444,20 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("no chunks provided")
 	}
 
+	// Try strategy first, then fall back to storage_mode (nested payload)
 	storageMode := string(mergePayload.Strategy)
+	if storageMode == "" {
+		storageMode = mergePayload.StorageMode
+	}
+	if storageMode == "" {
+		var nested struct {
+			StorageMode string `json:"storage_mode"`
+		}
+		if job.Payload != nil {
+			json.Unmarshal(job.Payload, &nested)
+			storageMode = nested.StorageMode
+		}
+	}
 	backend := GetStorageBackend()
 
 	useS3Merge := backend != nil && storageMode != "shared_mount" && storageMode != "affinity"
@@ -459,10 +537,10 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 			return fmt.Errorf("failed to write merged result: %w", err)
 		}
 
-		// Clean up chunks after successful merge
-		if mergePayload.DeleteChunksAfter {
-			for _, chunk := range mergePayload.Chunks {
-				chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, "result")
+		// Clean up chunks and empty prefixes after successful merge
+		for _, chunk := range mergePayload.Chunks {
+			for _, pathType := range []string{"result", "chunk"} {
+				chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, pathType)
 				if err := backend.DeleteObject(ctx, chunkKey); err != nil {
 					obs.Warn("failed to delete chunk after merge", obs.Field{
 						"chunk_key": chunkKey,
@@ -552,6 +630,7 @@ type ProcessPayload struct {
 	DatasetSlug string          `json:"dataset_slug,omitempty"`
 	ChunkIndex  int             `json:"chunk_index,omitempty"`
 	StorageMode string          `json:"storage_mode,omitempty"`
+	PluginID    string          `json:"plugin_id,omitempty"`
 	Rows        int             `json:"rows,omitempty"`
 	Checksum    string          `json:"checksum,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
@@ -566,6 +645,41 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	var processPayload ProcessPayload
 	if err := json.Unmarshal(payload, &processPayload); err != nil {
 		return fmt.Errorf("invalid process payload: %w", err)
+	}
+
+	// Some fields are nested inside the "payload" JSONB column — extract them as fallback
+	var nestedPayload ProcessPayload
+	if job.Payload != nil {
+		json.Unmarshal(job.Payload, &nestedPayload)
+	}
+
+	// Fill in top-level fields from nested payload if missing
+	if processPayload.ChunkID == "" {
+		processPayload.ChunkID = nestedPayload.ChunkID
+	}
+	if processPayload.DatasetID == "" {
+		processPayload.DatasetID = nestedPayload.DatasetID
+	}
+	if processPayload.DatasetSlug == "" {
+		processPayload.DatasetSlug = nestedPayload.DatasetSlug
+	}
+	if processPayload.ChunkIndex == 0 && nestedPayload.ChunkIndex != 0 {
+		processPayload.ChunkIndex = nestedPayload.ChunkIndex
+	}
+	if processPayload.StorageMode == "" {
+		processPayload.StorageMode = nestedPayload.StorageMode
+	}
+	if processPayload.Rows == 0 && nestedPayload.Rows != 0 {
+		processPayload.Rows = nestedPayload.Rows
+	}
+	if processPayload.Checksum == "" {
+		processPayload.Checksum = nestedPayload.Checksum
+	}
+	if processPayload.PluginID == "" {
+		processPayload.PluginID = nestedPayload.PluginID
+	}
+	if len(processPayload.Config) == 0 && len(nestedPayload.Config) > 0 {
+		processPayload.Config = nestedPayload.Config
 	}
 
 	if processPayload.ChunkID == "" && processPayload.DatasetID == "" {
@@ -589,7 +703,6 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	datasetSlug := processPayload.DatasetSlug
 	chunkIndex := processPayload.ChunkIndex
 
-	chunkKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "chunk")
 	resultKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
 
 	workDirID := job.ID
@@ -628,9 +741,15 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		processPayload.OutputPath = outputPath
 	} else {
 		// S3/object storage: download input based on step index
-		inputKey := chunkKey
+		var inputKey string
 		if stepIndex > 0 {
 			inputKey = resultKey
+		} else {
+			base := datasetID
+			if datasetSlug != "" {
+				base = datasetSlug
+			}
+			inputKey = fmt.Sprintf("%s.csv", base)
 		}
 		objReader, err := backend.ReadObject(ctx, inputKey)
 		if err != nil {
@@ -662,11 +781,20 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("could not derive output_path")
 	}
 
-	pluginName := ResolvePluginName(job.PluginID, job.PluginName)
+	// Resolve plugin name: try top-level fields first, then fall back to nested payload
+	pluginID := job.PluginID
+	if pluginID == "" {
+		pluginID = processPayload.PluginID
+	}
+	if pluginID == "" {
+		pluginID = nestedPayload.PluginID
+	}
+
+	pluginName := ResolvePluginName(pluginID, job.PluginName)
 	if pluginName == "" {
 		obs.Warn("no plugin name or ID in job payload — agent cannot load plugin", obs.Field{
 			"job_id":    job.ID,
-			"plugin_id": job.PluginID,
+			"plugin_id": pluginID,
 		})
 		return fmt.Errorf("no plugin_id in job payload — cannot determine which plugin to execute")
 	}

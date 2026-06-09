@@ -243,6 +243,7 @@ func (p *PollingClient) fetchNewJobs() {
 	}
 
 	if !result.Ok {
+		log.Printf("[realtime] ⚠️ result.Ok is false, dropping %d jobs", len(result.Jobs))
 		return
 	}
 
@@ -287,11 +288,17 @@ func (p *PollingClient) fetchNewJobs() {
 		
 		if p.redisClient != nil {
 			added, err := p.redisClient.MarkJobProcessed(p.ctx, jobID, sentJobsTTL)
-			if err != nil || !added {
+			if err != nil {
+				log.Printf("[realtime] ⚠️ Redis dedup error for job %s: %v", jobID, err)
+				continue
+			}
+			if !added {
+				log.Printf("[realtime] ⚠️ Redis dedup rejected job %s (already processed within TTL)", jobID)
 				continue
 			}
 		} else {
 			if _, exists := p.sentJobs.Load(jobID); exists {
+				log.Printf("[realtime] ⚠️ in-memory dedup rejected job %s (already processed)", jobID)
 				continue
 			}
 			p.sentJobs.Store(jobID, time.Now())

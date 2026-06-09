@@ -79,6 +79,9 @@ func extractJobMeta(payload json.RawMessage, envelopeJobType ...string) (*JobMet
 			return nil, errors.New("merge_dataset job missing dataset_id")
 		}
 
+	case "preprocess":
+		// preprocess jobs are handled below in ExecuteJob
+
 	case "scan_dataset":
 		// scan_dataset jobs allowed without chunk_id
 
@@ -238,6 +241,15 @@ func ExecuteJob(
 			DefaultTimeoutSeconds: fullJob.ExecutionPolicy.DefaultTimeoutSeconds,
 			HardTimeoutSeconds:    fullJob.ExecutionPolicy.HardTimeoutSeconds,
 		}
+	}
+
+	// Preprocess jobs are completed immediately (marker jobs)
+	if meta.JobType == "preprocess" {
+		obs.Info("preprocess job — completing immediately", obs.Field{
+			"chunk_id":   meta.ChunkID,
+			"dataset_id": meta.DatasetID,
+		})
+		return nil
 	}
 
 	// Route scan_dataset through built-in handler (no v2 executor needed)
