@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentra — Commercialization Plan</title>
+<style>
+  :root {
+    --bg: #0a0f1e;
+    --surface: #141b2d;
+    --surface-2: #1a2338;
+    --border: #1e2a45;
+    --text: #e2e8f0;
+    --muted: #8896b0;
+    --accent: #60a5fa;
+    --accent-glow: rgba(96,165,250,0.15);
+    --green: #4ade80;
+    --green-bg: rgba(74,222,128,0.1);
+    --amber: #fbbf24;
+    --amber-bg: rgba(251,191,36,0.1);
+    --red: #f87171;
+    --red-bg: rgba(248,113,113,0.1);
+    --purple: #c084fc;
+    --purple-bg: rgba(192,132,252,0.1);
+    --radius: 10px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Progress bar */
+  #progress-bar {
+    position: fixed; top: 0; left: 0; height: 2px; background: linear-gradient(90deg, var(--accent), var(--purple));
+    z-index: 9999; transition: width 0.1s; width: 0%;
+  }
+
+  /* Navigation tabs */
+  .nav-bar {
+    position: sticky; top: 0; z-index: 999; background: rgba(10,15,30,0.92);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0 16px;
+    overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch;
+  }
+  .nav-bar::-webkit-scrollbar { height: 0; }
+  .nav-inner { max-width: 960px; margin: 0 auto; display: flex; gap: 0; }
+  .nav-btn {
+    background: none; border: none; color: var(--muted); padding: 12px 16px;
+    font-size: 0.8rem; font-weight: 500; cursor: pointer; position: relative;
+    font-family: inherit; transition: color 0.2s; flex-shrink: 0;
+  }
+  .nav-btn:hover { color: var(--text); }
+  .nav-btn.active { color: var(--accent); }
+  .nav-btn.active::after {
+    content: ''; position: absolute; bottom: 0; left: 16px; right: 16px;
+    height: 2px; background: var(--accent); border-radius: 1px;
+  }
+
+  .container { max-width: 960px; margin: 0 auto; padding: 32px 20px; }
+
+  /* Sections */
+  .section {
+    display: none; animation: fadeUp 0.35s ease;
+  }
+  .section.active { display: block; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  h1 { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.25rem; }
+  h1 span { background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .subtitle { color: var(--muted); font-size: 1rem; margin-bottom: 1.5rem; }
+  h2 {
+    font-size: 1.4rem; font-weight: 700; margin: 2rem 0 1rem;
+    padding-bottom: 0.4rem; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  h2 .count {
+    background: var(--accent-glow); color: var(--accent); font-size: 0.7rem;
+    padding: 0.1rem 0.5rem; border-radius: 999px; font-weight: 600;
+  }
+  h3 { font-size: 1rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.5rem; color: var(--accent); }
+  p { margin-bottom: 0.65rem; color: var(--muted); font-size: 0.9rem; }
+  ul, ol { margin-bottom: 0.75rem; padding-left: 1.4rem; }
+  li { margin-bottom: 0.3rem; color: var(--muted); font-size: 0.9rem; }
+  strong { color: var(--text); font-weight: 600; }
+  code {
+    background: var(--surface-2); padding: 0.1rem 0.35rem; border-radius: 4px;
+    font-size: 0.8rem; color: var(--green);
+  }
+
+  /* Cards */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.25rem; margin-bottom: 1rem;
+  }
+  .card h4 { font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
+
+  /* Metrics row */
+  .metrics { display: flex; gap: 0; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin: 1rem 0; }
+  .metric {
+    flex: 1; text-align: center; padding: 1rem 0.5rem;
+    border-right: 1px solid var(--border); min-width: 80px;
+  }
+  .metric:last-child { border-right: none; }
+  .metric .num { font-size: 1.5rem; font-weight: 800; color: var(--accent); }
+  .metric .label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.15rem; }
+
+  /* Pricing tiers */
+  .pricing-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; }
+  .tier {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.25rem; position: relative; overflow: hidden; transition: border-color 0.2s;
+  }
+  .tier.featured { border-color: var(--accent); }
+  .tier.featured::before {
+    content: 'RECOMMENDED'; position: absolute; top: 0.6rem; right: -1.8rem;
+    background: var(--accent); color: #fff; font-size: 0.55rem; font-weight: 700;
+    padding: 0.1rem 2.2rem; transform: rotate(45deg); letter-spacing: 0.08em;
+  }
+  .tier h3 { font-size: 1.1rem; margin-top: 0; color: var(--text); }
+  .tier .price { font-size: 1.8rem; font-weight: 800; margin: 0.4rem 0; }
+  .tier .price span { font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+  .tier ul { padding-left: 1.1rem; font-size: 0.85rem; }
+  .tier li { font-size: 0.82rem; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th { text-align: left; padding: 0.5rem 0.7rem; background: var(--surface-2); color: var(--text); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); color: var(--muted); }
+  tr:hover td { background: var(--surface); }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 999px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+  .badge-green { background: var(--green-bg); color: var(--green); }
+  .badge-amber { background: var(--amber-bg); color: var(--amber); }
+  .badge-red { background: var(--red-bg); color: var(--red); }
+  .badge-blue { background: var(--accent-glow); color: var(--accent); }
+  .badge-purple { background: var(--purple-bg); color: var(--purple); }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 1.8rem; }
+  .timeline::before { content: ''; position: absolute; left: 0.45rem; top: 0; bottom: 0; width: 2px; background: var(--border); }
+  .timeline-item { position: relative; margin-bottom: 1.25rem; padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); transition: border-color 0.2s; cursor: pointer; }
+  .timeline-item:hover { border-color: var(--accent); }
+  .timeline-item::before {
+    content: ''; position: absolute; left: -1.5rem; top: 1.2rem; width: 10px; height: 10px;
+    border-radius: 50%; background: var(--accent); border: 2px solid var(--bg);
+  }
+  .timeline-item .phase { font-size: 0.7rem; color: var(--accent); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .timeline-item h4 { margin: 0.2rem 0; font-size: 0.95rem; }
+  .timeline-item .tl-body { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+  .timeline-item.open .tl-body { max-height: 500px; }
+  .timeline-item ul { font-size: 0.82rem; padding-top: 0.5rem; }
+
+  /* Risk cards */
+  .risk-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem 1.25rem; margin-bottom: 0.6rem; cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .risk-card:hover { border-color: var(--accent); }
+  .risk-card .risk-header { display: flex; justify-content: space-between; align-items: center; }
+  .risk-card .risk-header h4 { font-size: 0.9rem; color: var(--text); text-transform: none; letter-spacing: 0; margin: 0; }
+  .risk-card .risk-toggle { color: var(--muted); font-size: 1.1rem; transition: transform 0.2s; }
+  .risk-card.open .risk-toggle { transform: rotate(180deg); }
+  .risk-card .risk-body { max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+  .risk-card.open .risk-body { max-height: 300px; }
+  .risk-card .risk-body p { margin-top: 0.6rem; font-size: 0.85rem; }
+  .likelihood { font-size: 0.75rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 600; }
+
+  /* Calculator */
+  .calc-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem; }
+  .calc-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+  .calc-row label { font-size: 0.82rem; color: var(--muted); min-width: 140px; }
+  .calc-row input[type="range"] {
+    flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+    background: var(--border); border-radius: 2px; outline: none; min-width: 100px;
+  }
+  .calc-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--bg); cursor: pointer;
+  }
+  .calc-val { font-size: 0.9rem; font-weight: 700; color: var(--text); min-width: 50px; text-align: right; }
+  .calc-total { display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid var(--border); margin-top: 0.5rem; }
+  .calc-total .label { font-size: 0.9rem; color: var(--muted); }
+  .calc-total .value { font-size: 1.6rem; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+  /* SVG chart */
+  .chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem; }
+  .chart-wrap svg { width: 100%; height: auto; }
+
+  /* Funnel */
+  .funnel { margin: 1rem 0; }
+  .funnel-step {
+    display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 1rem;
+    margin-bottom: 0.3rem; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); position: relative; transition: all 0.2s;
+  }
+  .funnel-step:hover { border-color: var(--accent); }
+  .funnel-step .funnel-bar {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: var(--accent-glow); border-radius: var(--radius);
+    transition: width 0.5s ease; min-width: 4px;
+  }
+  .funnel-step .funnel-label { position: relative; z-index: 1; font-size: 0.82rem; font-weight: 500; flex: 1; }
+  .funnel-step .funnel-pct { position: relative; z-index: 1; font-size: 0.8rem; color: var(--accent); font-weight: 700; min-width: 40px; text-align: right; }
+
+  /* Pre */
+  pre {
+    font-size: 0.72rem; background: var(--bg); padding: 0.75rem; border-radius: 6px;
+    overflow-x: auto; color: var(--muted); line-height: 1.4;
+  }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+
+  /* Footer */
+  .footer { text-align: center; color: var(--muted); padding: 2rem 0; font-size: 0.8rem; }
+
+  @media (max-width: 768px) {
+    .grid-2, .grid-3, .pricing-grid { grid-template-columns: 1fr; }
+    .nav-btn { padding: 10px 12px; font-size: 0.75rem; }
+  }
+
+  /* Animations for metrics */
+  .count-up { display: inline-block; }
+</style>
+</head>
+<body>
+
+<div id="progress-bar"></div>
+
+<nav class="nav-bar" id="nav">
+  <div class="nav-inner">
+    <button class="nav-btn active" data-tab="exec">Executive Summary</button>
+    <button class="nav-btn" data-tab="product">Product</button>
+    <button class="nav-btn" data-tab="market">Market</button>
+    <button class="nav-btn" data-tab="pricing">Pricing</button>
+    <button class="nav-btn" data-tab="monetization">Revenue</button>
+    <button class="nav-btn" data-tab="gtm">Go-to-Market</button>
+    <button class="nav-btn" data-tab="competition">Competitors</button>
+    <button class="nav-btn" data-tab="roadmap">Roadmap</button>
+    <button class="nav-btn" data-tab="financials">Financials</button>
+    <button class="nav-btn" data-tab="risks">Risks</button>
+  </div>
+</nav>
+
+<div class="container">
+
+<!-- ============ 1. EXECUTIVE SUMMARY ============ -->
+<div class="section active" id="sec-exec">
+  <h1>Sentra <span>Commercialization Plan</span></h1>
+  <p class="subtitle">Go-to-market, pricing, and monetization strategy for the Sentra distributed data processing platform.</p>
+
+  <div class="metrics">
+    <div class="metric"><div class="num count-up" data-target="3">0</div><div class="label">Pricing Tiers</div></div>
+    <div class="metric"><div class="num count-up" data-target="2">0</div><div class="label">Revenue Models</div></div>
+    <div class="metric"><div class="num count-up" data-target="6">0</div><div class="label">Month Launch Timeline</div></div>
+    <div class="metric"><div class="num count-up" data-target="55">0</div><div class="label">Edge Functions</div></div>
+    <div class="metric"><div class="num count-up" data-target="51">0</div><div class="label">DB Tables</div></div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>What is Sentra?</h4>
+      <p>A distributed data processing platform that executes pipelines <strong>where data already lives</strong> — on customer infrastructure, at the edge, or on-premise. Agents process data locally and push only results.</p>
+      <p>No data egress. No per-row pricing. No vendor lock-in.</p>
+    </div>
+    <div class="card">
+      <h4>Core Thesis</h4>
+      <p>The market is saturated with tools that charge by data volume moved. Sentra's differentiation is <strong>charging by compute capacity</strong> — not data throughput. This aligns incentives with customers who want predictable costs and data sovereignty.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>Current State</h4>
+    <p>The platform is <strong>fully built</strong> — multi-tenant architecture, 55+ edge functions, 51 database tables, complete dashboard UI, agent fleet management, pipeline execution engine, plugin system, and security infrastructure. What's missing is the billing integration, paywall gating, and go-to-market motion.</p>
+  </div>
+</div>
+
+<!-- ============ 2. PRODUCT ============ -->
+<div class="section" id="sec-product">
+  <h2>Product Overview <span class="count">Section 2</span></h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>What it Does</h4>
+      <ul>
+        <li>Register datasets from S3, Azure, GCS, or local mounts</li>
+        <li>Scan, chunk, and distribute processing across a fleet of agents</li>
+        <li>Run multi-step pipelines (scrape, transform, PII redact, merge)</li>
+        <li>Output results to configurable storage backends</li>
+        <li>Monitor fleet health, alert on failures, audit activity</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Key Differentiators</h4>
+      <ul>
+        <li><strong>Local processing:</strong> data never leaves customer infrastructure</li>
+        <li><strong>Single binary agent:</strong> one command to install, three env vars</li>
+        <li><strong>Plugin system:</strong> custom logic via WASM/JavaScript, signed &amp; sandboxed</li>
+        <li><strong>No data egress fees:</strong> processes in situ, pushes only results</li>
+        <li><strong>Multi-cloud:</strong> S3, Azure Blob, GCS, MinIO, Cloudflare R2</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>Technical Architecture</h4>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.82rem;">
+      <div><strong style="color: var(--accent);">Control Plane</strong><br>Next.js 14 + Supabase (PostgreSQL, Auth, Edge Functions)</div>
+      <div><strong style="color: var(--accent);">Data Plane</strong><br>Go agents on Linux, Docker, Kubernetes</div>
+      <div><strong style="color: var(--accent);">Storage</strong><br>S3-compatible, Azure Blob, NFS shared mount</div>
+      <div><strong style="color: var(--accent);">Security</strong><br>Plugin signing keys, org-level RLS on all tables</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 3. MARKET ============ -->
+<div class="section" id="sec-market">
+  <h2>Market Analysis <span class="count">Section 3</span></h2>
+
+  <div class="grid-3">
+    <div class="card">
+      <h4>TAM</h4>
+      <p style="font-size: 1.3rem; font-weight: 700; color: var(--text);">$24.3B</p>
+      <p>Global data integration market (2024). Projected $56.7B by 2030 (CAGR 15.1%)</p>
+    </div>
+    <div class="card">
+      <h4>SAM</h4>
+      <p style="font-size: 1.3rem; font-weight: 700; color: var(--text);">$8.2B</p>
+      <p>Data preprocessing &amp; ETL for on-premise/edge workloads</p>
+    </div>
+    <div class="card">
+      <h4>Target</h4>
+      <p style="font-size: 1.3rem; font-weight: 700; color: var(--text);">Mid-Market</p>
+      <p>$10M–$500M revenue companies with compliance requirements</p>
+    </div>
+  </div>
+
+  <h3>Target Customer Personas</h3>
+  <div class="grid-3">
+    <div class="card">
+      <h4>🧑‍💻 Data Engineer</h4>
+      <p style="font-size: 0.85rem;">Mid-market / Startup. 10–50 TB data across NAS + cloud. Runs preprocessing for ML. Currently uses Python scripts + cron. Pain: brittle, no monitoring, no parallelization.</p>
+      <p style="font-size: 0.85rem;"><strong>Willing to pay:</strong> $500–2,000/mo</p>
+    </div>
+    <div class="card">
+      <h4>🔐 Security/Privacy Lead</h4>
+      <p style="font-size: 0.85rem;">Regulated industry. Needs auditable PII redaction. Data cannot leave VPC/on-prem. Pain: cost, audit trails, slow processing.</p>
+      <p style="font-size: 0.85rem;"><strong>Willing to pay:</strong> $2,000–5,000/mo</p>
+    </div>
+    <div class="card">
+      <h4>🤖 ML Engineer</h4>
+      <p style="font-size: 0.85rem;">AI Startup. Building training datasets from raw scrapes/logs. Needs reproducible pipelines. Pain: managing spot compute, no DAG management.</p>
+      <p style="font-size: 0.85rem;"><strong>Willing to pay:</strong> $200–1,000/mo</p>
+    </div>
+  </div>
+
+  <h3>Market Trends Supporting Sentra</h3>
+  <div class="grid-2">
+    <div class="card">
+      <ul>
+        <li><strong>Data sovereignty regs</strong> — GDPR, CCPA, HIPAA driving on-premise demand</li>
+        <li><strong>Cloud repatriation</strong> — 40% of enterprises moved workloads back on-prem (IDC 2024)</li>
+        <li><strong>AI/ML data prep</strong> — 60–80% of ML effort is preprocessing (Google 2023)</li>
+      </ul>
+    </div>
+    <div class="card">
+      <ul>
+        <li><strong>Edge computing</strong> — global edge market projected $61B by 2028</li>
+        <li><strong>Anti-Fivetran sentiment</strong> — customers frustrated by per-row egress pricing</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 4. PRICING ============ -->
+<div class="section" id="sec-pricing">
+  <h2>Pricing Tiers <span class="count">Section 4</span></h2>
+
+  <div class="pricing-grid">
+    <div class="tier">
+      <h3>Free</h3>
+      <div class="price">$0<span>/mo</span></div>
+      <ul>
+        <li>1 agent device</li>
+        <li>50 concurrent jobs</li>
+        <li>5 plugins</li>
+        <li>3 team members</li>
+        <li>Community support</li>
+        <li>7-day execution history</li>
+      </ul>
+    </div>
+    <div class="tier featured">
+      <h3>Team</h3>
+      <div class="price">$799<span>/mo</span></div>
+      <ul>
+        <li>10 agent devices</li>
+        <li>500 concurrent jobs</li>
+        <li>50 plugins</li>
+        <li>25 team members</li>
+        <li>Email &amp; Slack support</li>
+        <li>90-day execution history</li>
+        <li>Custom storage backends</li>
+        <li>SSO (SAML/OIDC)</li>
+        <li>Audit logs export</li>
+      </ul>
+    </div>
+    <div class="tier">
+      <h3>Enterprise</h3>
+      <div class="price">Custom</div>
+      <ul>
+        <li>Unlimited agents</li>
+        <li>Unlimited concurrency</li>
+        <li>Unlimited plugins</li>
+        <li>Unlimited members</li>
+        <li>Dedicated support engineer</li>
+        <li>99.9% SLA</li>
+        <li>On-premise control plane</li>
+        <li>Custom integrations</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Interactive Pricing Calculator</h3>
+  <div class="calc-wrap">
+    <div class="calc-row">
+      <label>Agent devices</label>
+      <input type="range" id="calc-agents" min="1" max="50" value="10">
+      <span class="calc-val" id="calc-agents-val">10</span>
+    </div>
+    <div class="calc-row">
+      <label>Team members</label>
+      <input type="range" id="calc-members" min="1" max="100" value="10">
+      <span class="calc-val" id="calc-members-val">10</span>
+    </div>
+    <div class="calc-total">
+      <span class="label">Estimated monthly cost</span>
+      <span class="value" id="calc-total">$799</span>
+    </div>
+    <p style="font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem;">Includes base plan + add-ons. Enterprise custom quoted.</p>
+  </div>
+
+  <h3>Add-on Pricing (Team Plan)</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Add-on</th><th>Price</th><th>Notes</th></tr>
+      <tr><td>Additional agent (beyond 10)</td><td>$99/agent/mo</td><td>Discounted to $79 at 25+</td></tr>
+      <tr><td>Additional team member (beyond 25)</td><td>$19/user/mo</td><td></td></tr>
+      <tr><td>Priority support (4h response)</td><td>$299/mo</td><td>Included in Enterprise</td></tr>
+      <tr><td>Extra worker slots</td><td>$49/slot/mo</td><td>Beyond 500 concurrent</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ============ 5. REVENUE MODEL ============ -->
+<div class="section" id="sec-monetization">
+  <h2>Revenue Model <span class="count">Section 5</span></h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>Primary: SaaS Subscription</h4>
+      <p>Monthly or annual subscription for the Sentra control plane (dashboard, API, agent orchestration). Multi-tenant SaaS with on-premise option for Enterprise.</p>
+    </div>
+    <div class="card">
+      <h4>Secondary: Compute Credits</h4>
+      <p>Pre-purchased blocks of agent compute time (agent-minutes or GB-processed). Captures value from heavy pipeline usage while keeping base subscription affordable.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>Revenue Model Comparison</h4>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Model</th><th>Pros</th><th>Cons</th><th>Sentra Approach</th></tr>
+        <tr><td>Per-seat</td><td>Simple, predictable</td><td>Penalizes team growth</td><td>Soft limit, not primary metric</td></tr>
+        <tr><td><strong>Per-GB processed</strong></td><td>Scales with value</td><td>Customers fear runaway costs</td><td><span class="badge badge-red">NOT using</span></td></tr>
+        <tr><td><strong>Per-agent/worker</strong></td><td>Ties to infra value</td><td>Limits small deploys</td><td><span class="badge badge-blue">Primary metric</span></td></tr>
+        <tr><td>Per-storage (metadata)</td><td>Easy to measure</td><td>Storage is customer-provided</td><td><span class="badge badge-red">Not charging</span></td></tr>
+        <tr><td><strong>SaaS subscription</strong></td><td>Recurring, predictable</td><td>Churn risk</td><td><span class="badge badge-green">Core model</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>Conversion Funnel</h3>
+  <div class="funnel">
+    <div class="funnel-step"><div class="funnel-bar" style="width: 100%"></div><span class="funnel-label">Visit website</span><span class="funnel-pct">100%</span></div>
+    <div class="funnel-step"><div class="funnel-bar" style="width: 65%"></div><span class="funnel-label">Signup (create org)</span><span class="funnel-pct">5–8%</span></div>
+    <div class="funnel-step"><div class="funnel-bar" style="width: 40%"></div><span class="funnel-label">Activation (install agent + dataset)</span><span class="funnel-pct">40–50%</span></div>
+    <div class="funnel-step"><div class="funnel-bar" style="width: 28%"></div><span class="funnel-label">Value (first pipeline)</span><span class="funnel-pct">60–70%</span></div>
+    <div class="funnel-step"><div class="funnel-bar" style="width: 14%"></div><span class="funnel-label">Hits free limit</span><span class="funnel-pct">20–30%</span></div>
+    <div class="funnel-step"><div class="funnel-bar" style="width: 4%"></div><span class="funnel-label"><strong>Upgrade to Team</strong></span><span class="funnel-pct">15–25%</span></div>
+  </div>
+  <p style="font-size: 0.8rem; color: var(--muted); text-align: center;">Net conversion: <strong style="color: var(--accent);">2–4%</strong> of signups → paid customers</p>
+
+  <h3>Monetization Flow</h3>
+  <div class="card">
+    <ol style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+      <li><strong>Signup</strong> — Free plan activated</li>
+      <li><strong>Activation</strong> — Install agents, run pipelines (free)</li>
+      <li><strong>Conversion trigger</strong> — Hits a limit (2nd agent, 4th member)</li>
+      <li><strong>Upgrade</strong> — Banner CTA → Stripe Checkout</li>
+      <li><strong>Billing</strong> — Monthly subscription, 20% annual discount</li>
+      <li><strong>Expansion</strong> — Add-ons as usage grows</li>
+    </ol>
+  </div>
+</div>
+
+<!-- ============ 6. GO-TO-MARKET ============ -->
+<div class="section" id="sec-gtm">
+  <h2>Go-to-Market Strategy <span class="count">Section 6</span></h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>Phase 1: PLG (Months 1–3)</h4>
+      <ul>
+        <li>Self-serve signup, no sales call</li>
+        <li>Stripe Checkout from dashboard</li>
+        <li>Usage banners: "You've used 2/1 agents"</li>
+        <li>Email drip for free users (d3, d7, d14, d30)</li>
+        <li>Launch on Product Hunt, HN, Reddit</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Phase 2: Outbound (Months 3–6)</h4>
+      <ul>
+        <li>Enterprise AE for 10+ agent accounts</li>
+        <li>30-day POC with onboarding call</li>
+        <li>AWS/Azure/GCP marketplace listings</li>
+        <li>Content marketing &amp; community (Discord, GitHub)</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Marketing Channels</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Channel</th><th>Strategy</th><th>Cost</th><th>Expected Impact</th></tr>
+      <tr><td>Product Hunt</td><td>Launch with demo video</td><td>$0</td><td>2–5K signups</td></tr>
+      <tr><td>Hacker News</td><td>"Show HN: data processing without data movement"</td><td>$0</td><td>5–15K visits</td></tr>
+      <tr><td>Content marketing</td><td>Architecture blogs, "Why we built another ETL"</td><td>$0</td><td>SEO growth</td></tr>
+      <tr><td>Cloud marketplaces</td><td>AWS/Azure/GCP listings</td><td>15–20% rev share</td><td>$50K+ ACV deals</td></tr>
+      <tr><td>LinkedIn ads</td><td>Data engineering managers</td><td>$3–5K/mo</td><td>100–200 leads/mo</td></tr>
+      <tr><td>Conferences</td><td>KubeCon, Data Engineering Summit</td><td>$5–15K/event</td><td>Brand + enterprise contacts</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ============ 7. COMPETITION ============ -->
+<div class="section" id="sec-competition">
+  <h2>Competitive Landscape <span class="count">Section 7</span></h2>
+
+  <div class="table-wrap">
+    <table>
+      <tr><th>Competitor</th><th>Category</th><th>Pricing</th><th>Sentra Advantage</th></tr>
+      <tr>
+        <td><strong>Fivetran</strong></td>
+        <td>ETL / Data movement</td>
+        <td>Per-row, expensive at scale</td>
+        <td><span class="badge badge-green">No per-row pricing</span> Process where data lives</td>
+      </tr>
+      <tr>
+        <td><strong>Airbyte</strong></td>
+        <td>Open-source ETL</td>
+        <td>Free OSS / Cloud per-GB</td>
+        <td><span class="badge badge-green">Distributed agents</span> Full pipeline execution</td>
+      </tr>
+      <tr>
+        <td><strong>dbt</strong></td>
+        <td>Data transformation</td>
+        <td>$100–200/seat/mo</td>
+        <td><span class="badge badge-blue">Complementary</span> Preprocesses before ingest</td>
+      </tr>
+      <tr>
+        <td><strong>Prefect / Airflow</strong></td>
+        <td>Workflow orchestration</td>
+        <td>Free OSS / per-worker</td>
+        <td><span class="badge badge-green">Built-in dataset ops</span> Chunking, merging, plugins</td>
+      </tr>
+      <tr>
+        <td><strong>Databricks</strong></td>
+        <td>Data + AI platform</td>
+        <td>Per-DBU, expensive</td>
+        <td><span class="badge badge-green">Edge-native</span> No Spark cluster needed</td>
+      </tr>
+      <tr>
+        <td><strong>Hammerspace / VAST</strong></td>
+        <td>Data orchestration</td>
+        <td>Enterprise license, very expensive</td>
+        <td><span class="badge badge-green">Developer-friendly</span> API-first, self-serve</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h4>Sentra's Competitive Moat</h4>
+    <ol>
+      <li><strong>Data gravity advantage:</strong> Processes where data lives — no egress, no transfer time, no compliance risk.</li>
+      <li><strong>Single-binary agent:</strong> <code>curl -fsSL https://sentra.sh/install | bash</code> — seconds to install.</li>
+      <li><strong>Plugin ecosystem:</strong> Custom processing in JS/WASM, signed and sandboxed. Marketplace potential.</li>
+      <li><strong>Multi-cloud by default:</strong> S3, Azure, GCS, MinIO, R2, NFS — no vendor lock-in.</li>
+      <li><strong>No data tax:</strong> Pricing by compute capacity, not data volume. Predictable bills.</li>
+    </ol>
+  </div>
+</div>
+
+<!-- ============ 8. ROADMAP ============ -->
+<div class="section" id="sec-roadmap">
+  <h2>Implementation Roadmap <span class="count">Section 8</span></h2>
+  <p>Click each phase to expand details.</p>
+
+  <div class="timeline">
+    <div class="timeline-item open">
+      <div class="phase">Month 1 — Foundation</div>
+      <h4>Stripe Billing Integration</h4>
+      <div class="tl-body">
+        <ul>
+          <li>Integrate Stripe Checkout for Team plan subscriptions</li>
+          <li>Create Stripe pricing table with plan + addons</li>
+          <li>Webhook handler for subscription lifecycle</li>
+          <li>Add <code>org_subscriptions</code> + <code>billing_invoices</code> tables</li>
+          <li>Sync Stripe events → DB via Edge Function</li>
+        </ul>
+      </div>
+    </div>
+    <div class="timeline-item">
+      <div class="phase">Month 1–2 — Gating</div>
+      <h4>Plan Limit Enforcement</h4>
+      <div class="tl-body">
+        <ul>
+          <li>Middleware: check <code>org_quotas</code> vs <code>plan_limits</code> on API calls</li>
+          <li>Soft gating: warning banners ("You've used X/Y devices")</li>
+          <li>Hard gating: reject agent registration over device limit</li>
+          <li>Plan comparison modal from settings/banners</li>
+        </ul>
+      </div>
+    </div>
+    <div class="timeline-item">
+      <div class="phase">Month 2 — Self-Serve</div>
+      <h4>Conversion UX</h4>
+      <div class="tl-body">
+        <ul>
+          <li>In-app Stripe Checkout → plan activated immediately</li>
+          <li>Downgrade flow: end of period → Free tier</li>
+          <li>Billing tab in Settings with invoices</li>
+          <li>Live quota consumption dashboard</li>
+        </ul>
+      </div>
+    </div>
+    <div class="timeline-item">
+      <div class="phase">Month 3 — Launch</div>
+      <h4>Public Launch &amp; Growth</h4>
+      <div class="tl-body">
+        <ul>
+          <li>Product Hunt + Hacker News launch</li>
+          <li>Content marketing: architecture blogs, comparisons</li>
+          <li>Community Discord / Slack</li>
+          <li>Open-source plugin SDK release</li>
+        </ul>
+      </div>
+    </div>
+    <div class="timeline-item">
+      <div class="phase">Month 4–6 — Enterprise</div>
+      <h4>Enterprise Sales Motion</h4>
+      <div class="tl-body">
+        <ul>
+          <li>Cloud marketplace listings (AWS, Azure, GCP)</li>
+          <li>Enterprise POC program with onboarding</li>
+          <li>On-premise control plane (Docker Compose / Helm)</li>
+          <li>SLA monitoring, SSO/SAML, annual contracts</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h3>Technical Implementation</h3>
+  <div class="grid-2">
+    <div class="card">
+      <h4>Database Tables to Add</h4>
+      <pre>
+CREATE TABLE org_subscriptions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL REFERENCES orgs(id),
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT UNIQUE,
+  plan TEXT NOT NULL DEFAULT 'free',
+  status TEXT NOT NULL DEFAULT 'active',
+  current_period_start TIMESTAMPTZ,
+  current_period_end TIMESTAMPTZ,
+  cancel_at_period_end BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE billing_invoices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL REFERENCES orgs(id),
+  stripe_invoice_id TEXT UNIQUE,
+  amount_total INTEGER,
+  currency TEXT DEFAULT 'usd',
+  status TEXT,
+  paid_at TIMESTAMPTZ,
+  invoice_pdf TEXT,
+  period_start TIMESTAMPTZ,
+  period_end TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now()
+);</pre>
+    </div>
+    <div class="card">
+      <h4>Edge Functions to Build</h4>
+      <pre>stripe-webhook/          Handle Stripe events
+create-checkout-session  Stripe Checkout
+create-portal-session    Customer billing portal
+check-plan-access        RLS helper for gating
+sync-org-quotas          Update org_quotas usage
+enforce-plan-limits      API gating middleware
+get-subscription         Current plan details
+list-invoices            Billing history</pre>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 9. FINANCIALS ============ -->
+<div class="section" id="sec-financials">
+  <h2>Financial Projections <span class="count">Section 9</span></h2>
+
+  <h3>3-Year ARR Projection</h3>
+  <div class="chart-wrap">
+    <svg viewBox="0 0 500 250" style="max-height: 250px;">
+      <!-- Grid lines -->
+      <line x1="60" y1="210" x2="460" y2="210" stroke="var(--border)" stroke-width="1"/>
+      <line x1="60" y1="168" x2="460" y2="168" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4"/>
+      <line x1="60" y1="126" x2="460" y2="126" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4"/>
+      <line x1="60" y1="84" x2="460" y2="84" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4"/>
+      <line x1="60" y1="42" x2="460" y2="42" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4"/>
+      <!-- Y axis labels -->
+      <text x="55" y="214" fill="var(--muted)" font-size="9" text-anchor="end">$0</text>
+      <text x="55" y="172" fill="var(--muted)" font-size="9" text-anchor="end">$12.5M</text>
+      <text x="55" y="130" fill="var(--muted)" font-size="9" text-anchor="end">$25M</text>
+      <text x="55" y="88" fill="var(--muted)" font-size="9" text-anchor="end">$37.5M</text>
+      <text x="55" y="46" fill="var(--muted)" font-size="9" text-anchor="end">$50M</text>
+      <!-- Bars Y1 -->
+      <rect x="85" y="200" width="60" height="10" rx="3" fill="var(--accent)" opacity="0.7">
+        <animate attributeName="height" from="0" to="10" dur="0.6s" fill="freeze"/>
+        <animate attributeName="y" from="210" to="200" dur="0.6s" fill="freeze"/>
+      </rect>
+      <text x="115" y="224" fill="var(--muted)" font-size="9" text-anchor="middle">Y1</text>
+      <text x="115" y="194" fill="var(--accent)" font-size="8" text-anchor="middle">$1.8M</text>
+      <!-- Bars Y2 -->
+      <rect x="185" y="160" width="60" height="50" rx="3" fill="var(--accent)" opacity="0.85">
+        <animate attributeName="height" from="0" to="50" dur="0.6s" begin="0.2s" fill="freeze"/>
+        <animate attributeName="y" from="210" to="160" dur="0.6s" begin="0.2s" fill="freeze"/>
+      </rect>
+      <text x="215" y="224" fill="var(--muted)" font-size="9" text-anchor="middle">Y2</text>
+      <text x="215" y="154" fill="var(--accent)" font-size="8" text-anchor="middle">$11.3M</text>
+      <!-- Bars Y3 -->
+      <rect x="285" y="40" width="60" height="170" rx="3" fill="url(#grad)">
+        <animate attributeName="height" from="0" to="170" dur="0.6s" begin="0.4s" fill="freeze"/>
+        <animate attributeName="y" from="210" to="40" dur="0.6s" begin="0.4s" fill="freeze"/>
+      </rect>
+      <text x="315" y="224" fill="var(--muted)" font-size="9" text-anchor="middle">Y3</text>
+      <text x="315" y="34" fill="var(--accent)" font-size="8" text-anchor="middle">$49.8M</text>
+      <!-- Gradient -->
+      <defs>
+        <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--accent)"/>
+          <stop offset="100%" stop-color="var(--purple)"/>
+        </linearGradient>
+      </defs>
+    </svg>
+  </div>
+
+  <h3>Detailed Projection</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Metric</th><th>Year 1</th><th>Year 2</th><th>Year 3</th></tr>
+      <tr><td>Total signups</td><td>2,500</td><td>8,000</td><td>20,000</td></tr>
+      <tr><td>Free users</td><td>2,400</td><td>7,500</td><td>18,000</td></tr>
+      <tr><td>Team customers</td><td>90</td><td>400</td><td>1,500</td></tr>
+      <tr><td>Enterprise customers</td><td>10</td><td>100</td><td>500</td></tr>
+      <tr><td>Paid conversion rate</td><td>4%</td><td>6.25%</td><td>10%</td></tr>
+      <tr><td>Team MRR</td><td>$99,000</td><td>$440,000</td><td>$1,650,000</td></tr>
+      <tr><td>Enterprise MRR</td><td>$50,000</td><td>$500,000</td><td>$2,500,000</td></tr>
+      <tr style="background: var(--surface-2);"><td><strong>Total MRR</strong></td><td><strong>$149,000</strong></td><td><strong>$940,000</strong></td><td><strong>$4,150,000</strong></td></tr>
+      <tr style="background: var(--surface-2);"><td><strong>Annualized ARR</strong></td><td><strong>$1.79M</strong></td><td><strong>$11.3M</strong></td><td><strong>$49.8M</strong></td></tr>
+      <tr><td>Monthly churn (paid)</td><td>5%</td><td>3.5%</td><td>2%</td></tr>
+      <tr><td>Customer acquisition cost</td><td>$500</td><td>$400</td><td>$300</td></tr>
+      <tr><td>LTV</td><td>$6,600</td><td>$11,600</td><td>$25,000</td></tr>
+      <tr><td>LTV:CAC ratio</td><td>13.2x</td><td>29x</td><td>83x</td></tr>
+    </table>
+  </div>
+
+  <h3>Cost Structure</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th>Category</th><th>Monthly (Y1)</th><th>Monthly (Y3)</th><th>% of Revenue (Y3)</th></tr>
+      <tr><td>Infrastructure</td><td>$2,000</td><td>$15,000</td><td>3%</td></tr>
+      <tr><td>Engineering (2–10)</td><td>$30,000</td><td>$150,000</td><td>30%</td></tr>
+      <tr><td>Sales &amp; Marketing</td><td>$5,000</td><td>$80,000</td><td>16%</td></tr>
+      <tr><td>Customer support</td><td>$3,000</td><td>$30,000</td><td>6%</td></tr>
+      <tr><td>G&A / Legal / Compliance</td><td>$2,000</td><td>$20,000</td><td>4%</td></tr>
+      <tr style="background: var(--surface-2);"><td><strong>Total OpEx</strong></td><td><strong>$42,000</strong></td><td><strong>$295,000</strong></td><td><strong>59%</strong></td></tr>
+      <tr><td><strong>Gross margin</strong></td><td><strong>72%</strong></td><td><strong>93%</strong></td><td></td></tr>
+    </table>
+  </div>
+
+  <h3>Pricing Summary</h3>
+  <div class="table-wrap">
+    <table>
+      <tr><th></th><th>Free</th><th>Team</th><th>Enterprise</th></tr>
+      <tr><td>Monthly price</td><td>$0</td><td>$799</td><td>$2,500–10,000+</td></tr>
+      <tr><td>Annual (20% off)</td><td>$0</td><td>$7,670</td><td>$24,000–96,000+</td></tr>
+      <tr><td>Avg. revenue per customer</td><td>$0</td><td>$1,050 (incl. addons)</td><td>$5,000</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- ============ 10. RISKS ============ -->
+<div class="section" id="sec-risks">
+  <h2>Risks &amp; Mitigations <span class="count">Section 10</span></h2>
+  <p>Click each risk to view mitigations.</p>
+
+  <div class="risk-card open" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>⚠️ Low Conversion: Free → Paid</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--amber-bg); color: var(--amber);">Likelihood: Medium</span></p>
+      <p>Free plan is generous (1 agent). Users may stay free indefinitely.</p>
+      <p><strong>Mitigation:</strong> Show comparison banners. Add "Team-only" features (SSO, audit export, custom storage configs, 90-day history) that create genuine upgrade motivation.</p>
+    </div>
+  </div>
+
+  <div class="risk-card" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>😓 Churn Due to Complexity</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--red-bg); color: var(--red);">Likelihood: Medium-High</span></p>
+      <p>Developer-oriented product with learning curve. Non-technical users may struggle.</p>
+      <p><strong>Mitigation:</strong> Improve onboarding wizard, sample pipelines, interactive tutorial, quickstart datasets. Monitor time-to-first-pipeline as core metric.</p>
+    </div>
+  </div>
+
+  <div class="risk-card" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>🆚 Competition from OSS Tools</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--red-bg); color: var(--red);">Likelihood: High</span></p>
+      <p>Airbyte, Prefect, dbt all OSS with large communities. Edge focus is a differentiator but not insurmountable.</p>
+      <p><strong>Mitigation:</strong> Double down on "data sovereignty + edge processing" narrative. Open-source agent or plugin SDK to build community. Better UX than OSS alternatives.</p>
+    </div>
+  </div>
+
+  <div class="risk-card" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>🐌 Long Enterprise Sales Cycles</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--amber-bg); color: var(--amber);">Likelihood: Medium</span></p>
+      <p>Enterprise deals often take 6–12 months, starving early revenue.</p>
+      <p><strong>Mitigation:</strong> Focus on self-serve PLG for first 6 months. Enterprise should be inbound-led (free → Team → Enterprise upgrade path).</p>
+    </div>
+  </div>
+
+  <div class="risk-card" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>🔗 Stripe + Supabase Vendor Lock-in</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--green-bg); color: var(--green);">Likelihood: Low-Medium</span></p>
+      <p>Both are well-established but increase dependency.</p>
+      <p><strong>Mitigation:</strong> Abstract billing behind service layer. Supabase can be self-hosted (open-source). Keep billing logic in Edge Functions with clean interfaces.</p>
+    </div>
+  </div>
+
+  <div class="risk-card" onclick="toggleRisk(this)">
+    <div class="risk-header">
+      <h4>🔐 Security &amp; Compliance Burden</h4>
+      <span class="risk-toggle">▼</span>
+    </div>
+    <div class="risk-body">
+      <p><span class="likelihood" style="background: var(--amber-bg); color: var(--amber);">Likelihood: Medium</span></p>
+      <p>Enterprise customers will demand SOC 2, HIPAA, GDPR compliance.</p>
+      <p><strong>Mitigation:</strong> Start SOC 2 Type II in Year 1. Document data flows for GDPR. Offer on-premise control plane for regulated industries. Plugin signing keys already built.</p>
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  <p>Sentra Commercialization Plan — Confidential</p>
+  <p>Prepared June 2026</p>
+</div>
+
+</div><!-- /container -->
+
+<script>
+// Navigation tabs
+const navBtns = document.querySelectorAll('.nav-btn');
+const sections = {};
+
+navBtns.forEach(btn => {
+  const tab = btn.dataset.tab;
+  sections[tab] = document.getElementById('sec-' + tab);
+  btn.addEventListener('click', () => {
+    navBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    Object.values(sections).forEach(s => s.classList.remove('active'));
+    sections[tab].classList.add('active');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+});
+
+// Reading progress
+window.addEventListener('scroll', () => {
+  const scrollTop = window.scrollY;
+  const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+  const progress = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+  document.getElementById('progress-bar').style.width = progress + '%';
+});
+
+// Count-up animation
+function animateCounts() {
+  document.querySelectorAll('.count-up').forEach(el => {
+    const target = parseInt(el.dataset.target);
+    if (target === 0) { el.textContent = '0'; return; }
+    const duration = 1000;
+    const start = performance.now();
+    function update(now) {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      el.textContent = Math.round(eased * target);
+      if (progress < 1) requestAnimationFrame(update);
+    }
+    requestAnimationFrame(update);
+  });
+}
+document.addEventListener('DOMContentLoaded', animateCounts);
+
+// Timeline expand/collapse
+document.querySelectorAll('.timeline-item').forEach(item => {
+  item.addEventListener('click', () => {
+    item.classList.toggle('open');
+  });
+});
+
+// Risk toggle
+function toggleRisk(el) {
+  el.classList.toggle('open');
+}
+
+// Pricing calculator
+const calcAgents = document.getElementById('calc-agents');
+const calcMembers = document.getElementById('calc-members');
+
+function updateCalc() {
+  const agents = parseInt(calcAgents.value);
+  const members = parseInt(calcMembers.value);
+
+  document.getElementById('calc-agents-val').textContent = agents;
+  document.getElementById('calc-members-val').textContent = members;
+
+  let base = 799; // Team plan base
+  let addons = 0;
+
+  // Extra agents beyond 10
+  if (agents > 10) {
+    const extra = agents - 10;
+    const rate = extra > 15 ? 79 : 99;
+    addons += extra * rate;
+  }
+
+  // Extra members beyond 25
+  if (members > 25) {
+    addons += (members - 25) * 19;
+  }
+
+  const total = base + addons;
+  document.getElementById('calc-total').textContent = '$' + total.toLocaleString();
+}
+
+calcAgents.addEventListener('input', updateCalc);
+calcMembers.addEventListener('input', updateCalc);
+
+// Keyboard navigation
+document.addEventListener('keydown', (e) => {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  const activeIdx = [...navBtns].findIndex(b => b.classList.contains('active'));
+  if (e.key === 'ArrowRight' && activeIdx < navBtns.length - 1) {
+    navBtns[activeIdx + 1].click();
+  }
+  if (e.key === 'ArrowLeft' && activeIdx > 0) {
+    navBtns[activeIdx - 1].click();
+  }
+});
+</script>
+
+</body>
+</html>
