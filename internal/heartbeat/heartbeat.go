@@ -3,7 +3,10 @@ package heartbeat
 import (
 	"context"
 	"log"
+	"math"
+	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
@@ -14,7 +17,27 @@ import (
 	"sentra-agent/internal/sysinfo"
 )
 
-const heartbeatInterval = 10 * time.Second
+var heartbeatInterval = 600 * time.Second // 10min — metrics are already sent during poll_state calls
+
+func init() {
+	if v := os.Getenv("SENTRA_HEARTBEAT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			heartbeatInterval = d
+		}
+	}
+}
+
+var (
+	lastHeartbeat struct {
+		mu          sync.Mutex
+		activeWorkers int
+		cpuUsage     float64
+		memFreeGB    float64
+		gpuAvailable bool
+		derivedStatus string
+		hasValue     bool
+	}
+)
 
 // -----------------------------------------------------------------------------
 // Public entrypoint
@@ -106,11 +129,36 @@ func performHeartbeat(
 	}
 
 	// -----------------------------------------------------------------
-	// Send heartbeat to backend (BEST EFFORT)
+	// Conditional heartbeat — skip if metrics unchanged <10%
+	// -----------------------------------------------------------------
+
+	gpuAvailable := sys.GPUModel != ""
+	needsSend := true
+
+	lastHeartbeat.mu.Lock()
+	if lastHeartbeat.hasValue {
+		if activeWorkers == lastHeartbeat.activeWorkers &&
+			math.Abs(sys.CPUUsagePercent-lastHeartbeat.cpuUsage) < 10.0 &&
+			math.Abs(memFreeGB-lastHeartbeat.memFreeGB) < 0.5 &&
+			gpuAvailable == lastHeartbeat.gpuAvailable {
+			needsSend = false
+		}
+	}
+	if needsSend {
+		lastHeartbeat.activeWorkers = activeWorkers
+		lastHeartbeat.cpuUsage = sys.CPUUsagePercent
+		lastHeartbeat.memFreeGB = memFreeGB
+		lastHeartbeat.gpuAvailable = gpuAvailable
+		lastHeartbeat.hasValue = true
+	}
+	lastHeartbeat.mu.Unlock()
+
+	// -----------------------------------------------------------------
+	// Send heartbeat to backend (BEST EFFORT, only if needed)
 	// -----------------------------------------------------------------
 
 	platform := runtimev2.GetCurrentPlatform()
-	if execClient != nil {
+	if execClient != nil && needsSend {
 		policyResult, err := execClient.SendDeviceHeartbeat(
 			ctx,
 			backend.DeviceHeartbeat{
@@ -120,7 +168,7 @@ func performHeartbeat(
 				TotalMemoryGB:    sys.TotalMemoryGB,
 				MemoryFreeGB:     memFreeGB,
 				NetworkLatencyMs: sys.NetworkLatency,
-				GPUAvailable:     sys.GPUModel != "",
+				GPUAvailable:     gpuAvailable,
 				CPUUsagePercent:  sys.CPUUsagePercent,
 				IncomingWorkload: 0,
 				ActiveWorkers:    activeWorkers,
@@ -146,13 +194,15 @@ func performHeartbeat(
 	// Local visibility
 	// -----------------------------------------------------------------
 
-	log.Printf(
-		"💓 heartbeat | workers=%d queue=%d cpu_free=%d/%d mem_free=%.1fGB gpu=%t",
-		activeWorkers,
-		queueLen,
-		cpuFree,
-		totalCPU,
-		memFreeGB,
-		sys.GPUModel != "",
-	)
+	if needsSend {
+		log.Printf(
+			"💓 heartbeat | workers=%d queue=%d cpu_free=%d/%d mem_free=%.1fGB gpu=%t",
+			activeWorkers,
+			queueLen,
+			cpuFree,
+			totalCPU,
+			memFreeGB,
+			gpuAvailable,
+		)
+	}
 }

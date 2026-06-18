@@ -320,7 +320,7 @@ func executeJobSafe(id int, req jobRequest) {
 	// ============================================================
 	// STRICT VALIDATION: execution_id MUST be present
 	// ============================================================
-	if req.executionID == "" {
+	if req.executionID == "" && req.jobType != "scan_dataset" {
 		obs.Error("dispatcher: FATAL - execution_id missing at execution start", obs.Field{
 			"job_id":   req.jobID,
 			"job_type": req.jobType,
@@ -393,7 +393,7 @@ func executeJobSafe(id int, req jobRequest) {
 				})
 			}
 
-			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), nil)
+			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), nil, true, false)
 			// Removed duplicate ReportJobComplete - CompleteJob already reports completion
 			if result.IsStaleExecution() {
 				obs.Warn("job failure reported but completion rejected - stale execution", obs.Field{
@@ -433,7 +433,7 @@ func executeJobSafe(id int, req jobRequest) {
 		log.Printf("[DEBUG] BEFORE complete_job → job_id=%s execution_id=%s",
 			req.jobID, req.executionID)
 		
-		result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "completed", duration.Milliseconds(), nil)
+		result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "completed", duration.Milliseconds(), nil, true, false)
 
 		if result.IsStaleExecution() {
 			obs.Warn("job execution succeeded but completion rejected - stale execution", obs.Field{
@@ -496,7 +496,8 @@ func SubmitJobWithMeta(
 	}
 	
 	// execution_id is CRITICAL - required for completion
-	if executionID == "" {
+	// scan_dataset jobs are background tasks that never have an execution_id
+	if executionID == "" && jobType != "scan_dataset" {
 		obs.Error("dispatcher: rejecting job with empty execution_id", obs.Field{
 			"job_id":   jobID,
 			"job_type": jobType,

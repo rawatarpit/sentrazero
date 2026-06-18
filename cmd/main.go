@@ -205,11 +205,18 @@ func main() {
 	// Plugin signing key fetcher
 	// ---------------------------------------------------------------------
 
+	keyCacheTTL := 60 * time.Minute
+	if v := os.Getenv("SENTRA_KEY_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			keyCacheTTL = d
+		}
+	}
+
 	keyFetcher := plugin.NewKeyFetcher(
 		cfg.BackendURL,
 		cfg.BackendAnonKey,
 		cfg.Token,
-		1*time.Hour,
+		keyCacheTTL,
 	)
 
 	loadSigningKeys := func() {
@@ -234,8 +241,15 @@ func main() {
 
 	loadSigningKeys()
 
+	keyReloadTTL := 60 * time.Minute
+	if v := os.Getenv("SENTRA_KEY_RELOAD_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			keyReloadTTL = d
+		}
+	}
+
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(keyReloadTTL)
 		defer ticker.Stop()
 		for {
 			select {
@@ -251,18 +265,28 @@ func main() {
 	// Plugin auto-update (background ticker)
 	// ---------------------------------------------------------------------
 
+	pluginAutoUpdateInterval := 60 * time.Minute
+	if v := os.Getenv("SENTRA_PLUGIN_AUTO_UPDATE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			pluginAutoUpdateInterval = d
+		}
+	}
+
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(pluginAutoUpdateInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				updated, skipped, failed, err := plugin.AutoUpdatePlugins(ctx)
+				updated, skipped, failed, newPlugins, err := plugin.AutoUpdatePlugins(ctx)
 				if err != nil {
 					log.Printf("⚠️ AutoUpdatePlugins error: %v", err)
 					continue
 				}
-				log.Printf("📦 AutoUpdatePlugins: updated=%d skipped=%d failed=%d", updated, skipped, failed)
+				if len(newPlugins) > 0 {
+					dispatcher.PopulatePluginIDMap(newPlugins)
+				}
+				log.Printf("📦 AutoUpdatePlugins: updated=%d skipped=%d failed=%d new=%d", updated, skipped, failed, len(newPlugins))
 			case <-ctx.Done():
 				return
 			}
@@ -360,6 +384,20 @@ func main() {
 		log.Printf("⚠️ reconcile_agent failed: %v", err)
 	}
 
+	// ---------------------------------------------------------------------
+	// Worker pool
+	// ---------------------------------------------------------------------
+
+	workers := cfg.MaxConcurrencyAtomic.Load()
+	if workers < 1 {
+		workers = int32(runtime.NumCPU() / 2)
+		if workers < 1 {
+			workers = 1
+		}
+	}
+
+	dispatcher.InitWorkerPool(int(workers))
+
 	// Fetch and dispatch any jobs already assigned to this device
 	// (reconcile may have assigned jobs that polling won't return)
 	assignedJobs, err := execClient.GetAssignedJobs(ctx)
@@ -382,20 +420,6 @@ func main() {
 			}
 		}
 	}
-
-	// ---------------------------------------------------------------------
-	// Worker pool
-	// ---------------------------------------------------------------------
-
-	workers := cfg.MaxConcurrencyAtomic.Load()
-	if workers < 1 {
-		workers = int32(runtime.NumCPU() / 2)
-		if workers < 1 {
-			workers = 1
-		}
-	}
-
-	dispatcher.InitWorkerPool(int(workers))
 
 	// ---------------------------------------------------------------------
 	// Heartbeat

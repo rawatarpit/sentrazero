@@ -23,6 +23,7 @@ type Job struct {
 	PluginName      string          `json:"plugin_name,omitempty"`
 	PluginID        string          `json:"plugin_id,omitempty"`
 	RetryAttempt    int             `json:"retry_attempt,omitempty"`
+	TotalSteps      int             `json:"total_steps,omitempty"`
 	InputPath       string          `json:"input_path,omitempty"`
 	OutputPath      string          `json:"output_path,omitempty"`
 	Payload         json.RawMessage `json:"payload"`

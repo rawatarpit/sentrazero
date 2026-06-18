@@ -130,107 +130,164 @@ func SyncPluginsFromAPI(ctx context.Context) ([]DBPlugin, error) {
 			skipped++
 			continue
 		}
-
-		if p.SignedURL == "" {
-			log.Printf("⚠️  Plugin %s has no signed URL, skipping", p.Name)
+		installed, err := InstallPlugin(ctx, p, dir)
+		if err != nil {
+			log.Printf("⚠️  Failed to install plugin %s: %v", p.Name, err)
 			continue
 		}
-
-		manifest := Manifest{
-			Name:           p.Name,
-			Version:        p.Version,
-			Filename:       filepath.Base(p.StoragePath),
-			URL:            p.SignedURL,
-			Checksum:       p.Checksum,
-			PluginType:     p.PluginType,
-			Language:       p.Language,
-			Trusted:        p.Trusted,
-			Network:        p.Network,
-			Resources:      PluginResources{},
-			Signature:      p.Signature,
-			SignatureKeyID: p.SignatureKeyID,
+		if installed {
+			downloaded++
 		}
+	}
 
-		if len(p.RuntimeDeps) > 0 {
-			var deps []RuntimeDependency
-			if err := json.Unmarshal(p.RuntimeDeps, &deps); err == nil {
+	log.Printf("📦 Plugin sync complete: %d downloaded, %d skipped, %d total", downloaded, skipped, len(plugins))
+	return plugins, nil
+}
+
+func FetchAndInstallPluginByID(ctx context.Context, pluginID string) (*DBPlugin, error) {
+	device, token, err := auth.LoadIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("load identity: %w", err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	plugins, err := FetchPluginsFromAPI(ctx, device.DeviceID, device.OrgID, cfg.BackendURL, cfg.BackendAnonKey, token)
+	if err != nil {
+		return nil, fmt.Errorf("fetch plugins: %w", err)
+	}
+
+	var match *DBPlugin
+	for i := range plugins {
+		if plugins[i].ID == pluginID {
+			match = &plugins[i]
+			break
+		}
+	}
+	if match == nil {
+		return nil, fmt.Errorf("plugin ID %s not found on server", pluginID)
+	}
+
+	baseDir, err := EnsurePluginDir()
+	if err != nil {
+		return nil, fmt.Errorf("plugin dir: %w", err)
+	}
+
+	installed, err := InstallPlugin(ctx, *match, baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("install plugin %s: %w", match.Name, err)
+	}
+	if !installed {
+		log.Printf("ℹ️  Plugin %s already cached, mapping added", match.Name)
+	}
+
+	log.Printf("✅ On-demand installed plugin %s (%s)", match.Name, match.ID)
+	return match, nil
+}
+
+func InstallPlugin(ctx context.Context, p DBPlugin, baseDir string) (bool, error) {
+	if p.SignedURL == "" {
+		return false, nil
+	}
+
+	manifest := Manifest{
+		Name:           p.Name,
+		Version:        p.Version,
+		Filename:       filepath.Base(p.StoragePath),
+		URL:            p.SignedURL,
+		Checksum:       p.Checksum,
+		PluginType:     p.PluginType,
+		Language:       p.Language,
+		Trusted:        p.Trusted,
+		Network:        p.Network,
+		Resources:      PluginResources{},
+		Signature:      p.Signature,
+		SignatureKeyID: p.SignatureKeyID,
+	}
+
+	if len(p.RuntimeDeps) > 0 {
+		var deps []RuntimeDependency
+		if err := json.Unmarshal(p.RuntimeDeps, &deps); err == nil {
+			manifest.Dependencies = deps
+		} else {
+			var depMap map[string]string
+			if err := json.Unmarshal(p.RuntimeDeps, &depMap); err == nil {
+				for name, version := range depMap {
+					deps = append(deps, RuntimeDependency{Name: name, Version: version})
+				}
 				manifest.Dependencies = deps
 			} else {
-				var depMap map[string]string
-				if err := json.Unmarshal(p.RuntimeDeps, &depMap); err == nil {
-					for name, version := range depMap {
-						deps = append(deps, RuntimeDependency{Name: name, Version: version})
+				var langDepMap map[string]map[string]string
+				if err := json.Unmarshal(p.RuntimeDeps, &langDepMap); err == nil {
+					for _, pkgMap := range langDepMap {
+						for name, version := range pkgMap {
+							deps = append(deps, RuntimeDependency{Name: name, Version: version, Source: "python"})
+						}
 					}
 					manifest.Dependencies = deps
 				}
 			}
 		}
-
-		if len(p.Resources) > 0 {
-			if err := json.Unmarshal(p.Resources, &manifest.Resources); err != nil {
-				log.Printf("⚠️  Failed to parse resources for %s: %v", p.Name, err)
-			}
-		}
-
-		pluginOS := p.OS
-		pluginArch := p.Arch
-		if pluginOS == "" || pluginArch == "" {
-			pluginOS = runtime.GOOS
-			pluginArch = runtime.GOARCH
-		}
-
-		pluginDir := filepath.Join(dir, p.Name, pluginOS+"-"+pluginArch)
-		if err := os.MkdirAll(pluginDir, 0700); err != nil {
-			log.Printf("⚠️ Failed to create plugin directory for %s: %v", p.Name, err)
-			continue
-		}
-
-		localManifestPath := filepath.Join(pluginDir, p.Name+".json")
-		data, _ := json.MarshalIndent(manifest, "", " ")
-
-		if err := os.WriteFile(localManifestPath+".tmp", data, 0600); err != nil {
-			log.Printf("⚠️  Failed to save manifest for %s: %v", p.Name, err)
-			continue
-		}
-		os.Rename(localManifestPath+".tmp", localManifestPath)
-
-		outPath := filepath.Join(pluginDir, manifest.Filename)
-		if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
-			if p.Checksum != "" {
-				if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
-					log.Printf("⚠️ Cached plugin %s failed checksum verification: %v - re-downloading", p.Name, err)
-					os.Remove(outPath)
-				} else {
-					log.Printf("⏭️ Plugin %s already cached and verified", p.Name)
-					downloaded++
-					continue
-				}
-			} else {
-				log.Printf("⏭️ Plugin %s already cached (no checksum)", p.Name)
-				downloaded++
-				continue
-			}
-		}
-
-		if err := downloadWithRetries(ctx, p.SignedURL, outPath); err != nil {
-			log.Printf("⚠️  Failed to download plugin %s: %v", p.Name, err)
-			continue
-		}
-
-		if p.Checksum != "" {
-			if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
-				log.Printf("⚠️  Plugin %s checksum verification failed: %v", p.Name, err)
-				os.Remove(outPath)
-				continue
-			}
-		}
-
-		downloaded++
-		log.Printf("✅ Synced plugin: %s (version: %s)", p.Name, p.Version)
 	}
 
-	log.Printf("📦 Plugin sync complete: %d downloaded, %d skipped, %d total", downloaded, skipped, len(plugins))
-	return plugins, nil
+	if len(p.Resources) > 0 {
+		if err := json.Unmarshal(p.Resources, &manifest.Resources); err != nil {
+			log.Printf("⚠️  Failed to parse resources for %s: %v", p.Name, err)
+		}
+	}
+
+	pluginOS := p.OS
+	pluginArch := p.Arch
+	if pluginOS == "" || pluginArch == "" {
+		pluginOS = runtime.GOOS
+		pluginArch = runtime.GOARCH
+	}
+
+	pluginDir := filepath.Join(baseDir, p.Name, pluginOS+"-"+pluginArch)
+	if err := os.MkdirAll(pluginDir, 0700); err != nil {
+		return false, fmt.Errorf("create plugin directory: %w", err)
+	}
+
+	localManifestPath := filepath.Join(pluginDir, p.Name+".json")
+	data, _ := json.MarshalIndent(manifest, "", " ")
+
+	if err := os.WriteFile(localManifestPath+".tmp", data, 0600); err != nil {
+		return false, fmt.Errorf("save manifest: %w", err)
+	}
+	os.Rename(localManifestPath+".tmp", localManifestPath)
+
+	outPath := filepath.Join(pluginDir, manifest.Filename)
+	if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
+		if p.Checksum != "" {
+			if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
+				log.Printf("⚠️ Cached plugin %s failed checksum verification: %v - re-downloading", p.Name, err)
+				os.Remove(outPath)
+			} else {
+				log.Printf("⏭️ Plugin %s already cached and verified", p.Name)
+				return true, nil
+			}
+		} else {
+			log.Printf("⏭️ Plugin %s already cached (no checksum)", p.Name)
+			return true, nil
+		}
+	}
+
+	if err := downloadWithRetries(ctx, p.SignedURL, outPath); err != nil {
+		return false, fmt.Errorf("download plugin: %w", err)
+	}
+
+	if p.Checksum != "" {
+		if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
+			os.Remove(outPath)
+			return false, fmt.Errorf("checksum verification failed: %w", err)
+		}
+	}
+
+	log.Printf("✅ Synced plugin: %s (version: %s)", p.Name, p.Version)
+	return true, nil
 }
 
 func loadConfig() (*Config, error) {

@@ -8,6 +8,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"sentra-agent/internal/dispatcher"
 	"sentra-agent/internal/obs"
 	agentredis "sentra-agent/internal/redis"
+	"sentra-agent/internal/sysinfo"
 )
 
 type RealtimeJobPayload struct {
@@ -83,13 +87,45 @@ type PollingClient struct {
 	anonKey     string
 	deviceToken string
 	sentJobs    sync.Map
+
+	currentInterval atomic.Int64 // nanoseconds, for adaptive backoff
+	redisWakeupCh  chan struct{} // signaled when Redis publishes a new job notification
 }
 
 var (
-	pollingClient *PollingClient
-	pollingOnce   sync.Once
-	pollInterval  = 5 * time.Second
+	pollingClient    *PollingClient
+	pollingOnce      sync.Once
+	pollInterval     = 30 * time.Second
+	minPollInterval  = 5 * time.Second
+	maxPollInterval  = 60 * time.Second
+	backoffMultiplier = 2.0
+	intervalLoadOnce sync.Once
 )
+
+func loadIntervalsFromEnv() {
+	intervalLoadOnce.Do(func() {
+		if v := os.Getenv("SENTRA_POLL_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				pollInterval = d
+			}
+		}
+		if v := os.Getenv("SENTRA_MIN_POLL_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				minPollInterval = d
+			}
+		}
+		if v := os.Getenv("SENTRA_MAX_POLL_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				maxPollInterval = d
+			}
+		}
+		if v := os.Getenv("SENTRA_POLL_BACKOFF_MULTIPLIER"); v != "" {
+			if m, err := strconv.ParseFloat(v, 64); err == nil && m > 1.0 {
+				backoffMultiplier = m
+			}
+		}
+	})
+}
 
 func RunPollingClient(
 	ctx context.Context,
@@ -98,14 +134,16 @@ func RunPollingClient(
 	deviceToken string,
 	redisClient *agentredis.Client,
 ) {
+	loadIntervalsFromEnv()
 	pollingOnce.Do(func() {
 		pollingClient = &PollingClient{
-			device:      device,
-			cfg:         cfg,
-			redisClient: redisClient,
-			baseURL:     cfg.BackendURL,
-			anonKey:     cfg.BackendAnonKey,
-			deviceToken: deviceToken,
+			device:        device,
+			cfg:           cfg,
+			redisClient:   redisClient,
+			baseURL:       cfg.BackendURL,
+			anonKey:       cfg.BackendAnonKey,
+			deviceToken:   deviceToken,
+			redisWakeupCh: make(chan struct{}, 64),
 			client: &http.Client{
 				Timeout: 10 * time.Second,
 			},
@@ -120,10 +158,15 @@ func (p *PollingClient) start(ctx context.Context) {
 	p.cancel = cancel
 
 	p.running.Store(true)
+	p.currentInterval.Store(int64(minPollInterval))
 
-	log.Printf("[realtime] starting low-latency polling for device %s", p.device.ID)
+	log.Printf("[realtime] starting adaptive polling for device %s (min=%s max=%s)", p.device.ID, minPollInterval, maxPollInterval)
 
-	go p.pollLoop()
+	if p.redisClient != nil && p.cfg.OrgID != "" {
+		go p.listenForRedisJobs()
+	}
+
+	go p.pollLoopAdaptive()
 }
 
 func (p *PollingClient) pollLoop() {
@@ -149,23 +192,117 @@ func (p *PollingClient) pollLoop() {
 	}
 }
 
-func (p *PollingClient) fetchNewJobs() {
+func (p *PollingClient) pollLoopAdaptive() {
+
+	// immediate first poll
+	jobCount := p.fetchNewJobs()
+	current := time.Duration(p.currentInterval.Load())
+	if jobCount > 0 {
+		current = minPollInterval
+	} else {
+		next := time.Duration(float64(current) * backoffMultiplier)
+		if next > maxPollInterval {
+			next = maxPollInterval
+		}
+		current = next
+	}
+	p.currentInterval.Store(int64(current))
+
+	ticker := time.NewTicker(current)
+	defer ticker.Stop()
+
+	for {
+		select {
+
+		case <-p.ctx.Done():
+			p.running.Store(false)
+			log.Printf("[realtime] adaptive polling stopped for device %s", p.device.ID)
+			return
+
+		case <-ticker.C:
+			ticker.Stop()
+
+			jobCount := p.fetchNewJobs()
+			current := time.Duration(p.currentInterval.Load())
+			if jobCount > 0 {
+				current = minPollInterval
+			} else {
+				next := time.Duration(float64(current) * backoffMultiplier)
+				if next > maxPollInterval {
+					next = maxPollInterval
+				}
+				current = next
+			}
+			p.currentInterval.Store(int64(current))
+
+			ticker = time.NewTicker(current)
+			log.Printf("[realtime] adaptive poll: got %d jobs, next interval=%s", jobCount, current)
+
+		case <-p.redisWakeupCh:
+			ticker.Stop()
+			p.fetchNewJobs()
+			p.currentInterval.Store(int64(minPollInterval))
+			ticker = time.NewTicker(minPollInterval)
+			log.Printf("[realtime] redis wakeup: immediate poll, next interval=%s", minPollInterval)
+		}
+	}
+}
+
+// listenForRedisJobs subscribes to the sentra:newjob:{org_id} Redis Pub/Sub channel.
+// When a job notification arrives, it signals the polling loop to wake up immediately.
+func (p *PollingClient) listenForRedisJobs() {
+	channel := fmt.Sprintf("sentra:newjob:%s", p.cfg.OrgID)
+	pubsub := p.redisClient.Subscribe(p.ctx, channel)
+	defer pubsub.Close()
+
+	log.Printf("[realtime] subscribed to Redis channel %s for instant job wake-up", channel)
+
+	for {
+		msg, err := pubsub.ReceiveMessage(p.ctx)
+		if err != nil {
+			log.Printf("[realtime] Redis subscription error: %v (falling back to polling only)", err)
+			return
+		}
+
+		// Non-blocking send to the wakeup channel (don't pile up if polling is already busy)
+		select {
+		case p.redisWakeupCh <- struct{}{}:
+		default:
+		}
+
+		_ = msg // message payload is informational only — the actual claim happens via HTTP
+	}
+}
+
+func (p *PollingClient) fetchNewJobs() int {
 
 	if p.ctx.Err() != nil {
-		return
+		return 0
 	}
 
-	url := fmt.Sprintf("%s/functions/v1/claim_jobs_for_device", p.baseURL)
+	// Consolidated poll_state endpoint replaces claim_jobs_for_device + agent_health_policy
+	url := fmt.Sprintf("%s/functions/v1/poll_state", p.baseURL)
 
 	body, _ := json.Marshal(map[string]any{
 		"limit":             10,
 		"lease_ttl_seconds": 1800,
+		"metrics": map[string]any{
+			"active_workers": dispatcher.CurrentWorkerCount(),
+			"total_cpu_cores": runtime.NumCPU(),
+			"cpu_cores_free":  int(dispatcher.MaxWorkersCount()) - dispatcher.CurrentWorkerCount(),
+			"memory_free_gb":  sysinfo.Detect().AvailableMemoryGB,
+			"total_memory_gb": sysinfo.Detect().TotalMemoryGB,
+			"cpu_usage_percent": sysinfo.Detect().CPUUsagePercent,
+			"network_latency_ms": sysinfo.Detect().NetworkLatency,
+			"gpu_available":      sysinfo.Detect().GPUModel != "",
+			"io_bandwidth_mb_s":  0,
+		},
 	})
 
 	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("[realtime] failed to create request: %v", err)
-		return
+		return 0
 	}
 
 	req.Header.Set("Authorization", "Bearer "+p.anonKey)
@@ -175,20 +312,20 @@ func (p *PollingClient) fetchNewJobs() {
 	resp, err := p.client.Do(req)
 	if err != nil {
 		log.Printf("[realtime] request failed: %v", err)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		log.Printf("[realtime] unexpected status: %d body=%s", resp.StatusCode, string(respBody))
-		return
+		return 0
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[realtime] failed to read response body: %v", err)
-		return
+		return 0
 	}
 
 	var result struct {
@@ -198,10 +335,11 @@ func (p *PollingClient) fetchNewJobs() {
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		log.Printf("[realtime] failed to decode response: %v", err)
-		return
+		return 0
 	}
 
-	log.Printf("[realtime] poll response: jobs=%d, body_len=%d", len(result.Jobs), len(respBody))
+	jobCount := len(result.Jobs)
+	log.Printf("[realtime] poll response: jobs=%d, body_len=%d", jobCount, len(respBody))
 
 	// DEBUG: Log all raw jobs from first parse
 	for i, j := range result.Jobs {
@@ -244,7 +382,7 @@ func (p *PollingClient) fetchNewJobs() {
 
 	if !result.Ok {
 		log.Printf("[realtime] ⚠️ result.Ok is false, dropping %d jobs", len(result.Jobs))
-		return
+		return 0
 	}
 
 	for _, job := range result.Jobs {
@@ -270,10 +408,11 @@ func (p *PollingClient) fetchNewJobs() {
 			continue
 		}
 		
-		// execution_id is CRITICAL - required for completion tracking
+		// execution_id is needed for execution-scoped jobs but not for
+		// background tasks like scan_dataset. Log a warning so we spot
+		// unexpected cases, but don't drop the job.
 		if executionID == "" {
-			log.Printf("[realtime] ⚠️ dropped malformed job: missing execution_id job_id=%s job_type=%s", jobID, job.JobType)
-			continue
+			log.Printf("[realtime] ⚠️ job without execution_id (ok for background tasks): job_id=%s job_type=%s", jobID, job.JobType)
 		}
 		
 		// Validate payload if present
@@ -287,7 +426,7 @@ func (p *PollingClient) fetchNewJobs() {
 		// ============================================================
 		
 		if p.redisClient != nil {
-			added, err := p.redisClient.MarkJobProcessed(p.ctx, jobID, sentJobsTTL)
+			added, err := p.redisClient.MarkJobProcessed(p.ctx, p.device.ID, jobID, sentJobsTTL)
 			if err != nil {
 				log.Printf("[realtime] ⚠️ Redis dedup error for job %s: %v", jobID, err)
 				continue
@@ -353,6 +492,7 @@ func (p *PollingClient) fetchNewJobs() {
 			log.Printf("[realtime] dispatch failed for job %s: %v", jobID, err)
 		}
 	}
+	return len(result.Jobs)
 }
 
 func (p *PollingClient) IsRunning() bool {

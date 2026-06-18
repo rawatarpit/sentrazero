@@ -3,6 +3,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![Supabase](https://img.shields.io/badge/Supabase-3ECF8E?style=flat&logo=supabase)](https://supabase.com)
 [![License](https://img.shields.io/badge/License-Proprietary-red?style=flat)]()
+[![OS](https://img.shields.io/badge/OS-macOS%20|%20Linux%20|%20Windows-blue?style=flat)]()
 
 A decentralized compute platform that transforms idle developer machines, servers, and workstations into a distributed processing cluster. Organizations can run data pipelines, ML inference, ETL jobs, and batch processing workloads across their own infrastructure—without expensive cloud compute costs.
 
@@ -78,11 +79,12 @@ Data to be processed:
 
 ### 4. Jobs (`agent_jobs`)
 Atomic units of work:
-- **Types**: `scan_dataset`, `process`, `preprocess`, `merge_dataset`, `plan_chunks`, `embedding`, `validate`
-- **Two levels**: Step-level coordination jobs (no `chunk_id`) → immediately completed as markers; Chunk-level processing jobs (with `chunk_id`) → routed to native plugin handler
-- **Lifecycle**: `pending` → `assigned` → `running` → `completed`/`failed`
-- **Lease-based**: Devices acquire leases to prevent duplicate processing
-- **Retry logic**: Automatic retry with exponential backoff (max 3 by default)
+- **Types**: `scan_dataset`, `process` (chunk-level plugin execution), `preprocess` (marker, completes immediately), `merge_dataset` (combines chunk outputs)
+- **Two levels**: Step-level coordination jobs (no `chunk_id`) → immediately completed as markers to unblock pipeline step; Chunk-level processing jobs (with `chunk_id`) → routed to native plugin handler
+- **Lifecycle**: `pending` → `assigned` → `running` → `completed`/`failed` → `dead_letter` (after max retries exhausted)
+- **Lease-based**: Devices acquire leases (default TTL) to prevent duplicate processing; leases verified at both start and completion time
+- **Retry logic**: Automatic retry with exponential backoff (max 3 by default); dead-lettered after exhaustion
+- **Compound jobs** (not currently active): Multi-step pipeline packed into a single agent_job. Each step has its own `plugin_id` + `config`, steps chain through a local cache dir (`~/.sentra/cache/{execID}/{chunkID}/`), and only the final step's output uploads to S3. The `advance_pipeline` edge function no longer creates compound jobs — it creates per-step agent_jobs instead.
 
 ### 5. Pipelines (`pipeline_templates` + `executions`)
 Multi-step data processing workflows:
@@ -761,7 +763,7 @@ Edge functions use one of the following auth mechanisms:
 | `register_device` | POST | None (service_role) | Register with existing org using claim code |
 | `verifyAgentToken` | POST | Agent Token (x-agent-token + Authorization) | Verify device token |
 | `bootstrap` | **GET** | Bootstrap Token (x-bootstrap-token) | Get backend config (zero-config) |
-| `agent_health_policy` | POST | Agent Token | Report health, get concurrency (5s cooldown) |
+| `poll_state` | POST | Agent Token | **Consolidated** poll for jobs + report health (replaces separate claim_jobs_for_device + agent_health_policy calls) |
 | `reconcile_agent` | POST | Agent Token | Reconcile state on restart |
 
 #### Job Management (8 functions)
@@ -782,8 +784,8 @@ Edge functions use one of the following auth mechanisms:
 | Function | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `run_pipeline` | POST | Relay Key (x-relay-key) | Activate pipeline |
-| `advance_pipeline` | POST | Relay Key (x-relay-key) | Advance to next step |
-| `plan_dataset_chunks` | POST | Relay Key (x-relay-key) | Plan chunking strategy (creates/resizes chunks, generates 16-dim chunk_vectors) |
+| `advance_pipeline` | POST | Relay Key (x-relay-key) | Advance to next step (publishes Redis notification for retry/merge/dead-letter) |
+| `plan_dataset_chunks` | POST | Relay Key (x-relay-key) | Plan chunking strategy (publishes Redis notification on job creation) |
 | `pre_chunk_dataset` | POST | Relay Key (x-relay-key) | Create chunk records via pre_chunk_dataset_smart |
 | `calculate_optimal_chunk_size` | POST | Agent Token | Calculate chunk size based on device benchmarks |
 | `approve_dataset_and_plan_chunks` | POST | Relay Key (x-relay-key) | Approve dataset scan and plan chunks |
@@ -816,9 +818,10 @@ Edge functions use one of the following auth mechanisms:
 
 | Function | Method | Auth | Description |
 |----------|--------|------|-------------|
+| `poll_state` | POST | Agent Token | **Consolidated** poll + heartbeat — returns available jobs + updates device health in one call |
 | `agent_stream` | GET | Agent Token | SSE job stream (polls every 30s inside ReadableStream, not WebSocket) |
-| `relay_job_event` | POST | Dual: Relay Key OR Device Token | Relay events to agents (supports process_dataset and assign_job dispatch types) |
-| `notify_available_device` | POST | Agent Token | Notify availability (updates metrics, derives busy/available status) |
+| `relay_job_event` | POST | Dual: Relay Key OR Device Token | Relay events to agents (supports process_dataset and assign_job dispatch types) — kept for reliability since Redis Pub/Sub is fire-and-forget |
+| `notify_available_device` | POST | Agent Token | Notify availability (updates metrics, derives busy/available status) — heartbeat now embedded in poll_state calls |
 | `dispatch_http_jobs` | POST | Cron Secret (x-cron-secret) | Process http_queue (5 retries, exponential backoff, max 50 per batch) |
 | `cleanup_job_notification_queue` | POST | None (service_role) | Clean old notifications (>24h) |
 
@@ -856,95 +859,140 @@ Data: { "jobs_sent": 3, "timestamp": "2026-05-06T14:30:00Z" }
 ```
 sentrazero/
 ├── cmd/
-│   ├── sentra/main.go              # CLI entry point (run, debug, replay, version)
+│   ├── main.go                    # Agent entrypoint (identity, heartbeat, polling, dispatcher)
 │   └── agent/
-│       ├── runtime/                # Runtime environments
-│       │   ├── runtime.go         # Runtime interface
-│       │   ├── python.go         # Python runtime
-│       │   ├── node.go           # Node.js runtime
-│       │   └── v2/              # Runtime v2 (warm pools)
-│       │       ├── manager.go    # Pool manager
-│       │       ├── python.go     # Python v2 with caching
-│       │       └── node.go       # Node.js v2 with caching
-│       ├── executor/             # Job executor
-│       │   ├── executor.go      # Executor interface
-│       │   └── v2/             # Executor v2 with sandbox
-│       └── sandbox/              # Sandbox isolation
-│           └── sandbox.go       # Resource limits
+│       ├── runtime/               # Runtime environments
+│       │   ├── runtime.go        # Runtime interface
+│       │   ├── python.go        # Python runtime
+│       │   ├── node.go          # Node.js runtime
+│       │   └── v2/             # Runtime v2 (warm pools)
+│       │       ├── manager.go   # Pool manager
+│       │       ├── python.go    # Python v2 with caching
+│       │       └── node.go      # Node.js v2 with caching
+│       ├── executor/            # Job executor
+│       │   ├── executor.go     # Executor interface
+│       │   └── v2/            # Executor v2 with sandbox
+│       └── sandbox/             # Sandbox isolation
+│           └── sandbox.go      # Resource limits
 │
-├── internal/                      # Core packages
-│   ├── auth/                    # Authentication
-│   │   ├── identity.go         # Device identity
-│   │   ├── claim.go           # Device claiming
-│   │   └── token_store.go     # Token storage (keyring/file)
+├── internal/                     # Core packages
+│   ├── auth/                   # Authentication
+│   │   ├── identity.go        # Device identity management
+│   │   ├── claim.go          # Device claiming flow
+│   │   └── token_store.go    # Token storage (keyring/file)
 │   │
-│   ├── backend/                 # Supabase client
-│   │   └── client.go          # HTTP client for edge functions
+│   ├── backend/                # Supabase HTTP client
+│   │   ├── client.go         # Backend-facing client (claim, heartbeat, assign)
+│   │   └── execution_client.go # Execution-facing client (complete_job, start_job, lease verify)
 │   │
-│   ├── bootstrap/               # Zero-config bootstrap
-│   │   └── bootstrap.go       # Initial setup logic
+│   ├── bootstrap/              # Zero-config bootstrap
+│   │   └── bootstrap.go      # Initial setup logic
 │   │
-│   ├── config/                  # Configuration
-│   │   ├── config.go          # Config loading
-│   │   └── defaults.go        # Default values
+│   ├── config/                 # Configuration management
+│   │   ├── config.go         # Config loading from env/file
+│   │   └── defaults.go       # Default values
 │   │
-│   ├── dataset/                 # Dataset operations
-│   │   ├── merge.go           # Merge logic
-│   │   ├── lock.go            # Merge locks
-│   │   └── recovery.go       # Recovery logic
+│   ├── dataset/                # Dataset operations (merge, lock, recovery)
+│   │   ├── merge.go          # Chunk merge logic (streaming + tree merge)
+│   │   ├── lock.go           # Merge lock management
+│   │   └── recovery.go      # Recovery logic
 │   │
-│   ├── dispatcher/              # Job dispatcher
-│   │   ├── worker_pool.go     # Worker pool management + backpressure
-│   │   ├── execute.go         # Job execution — five-way routing
-│   │   ├── job.go             # Job definitions
-│   │   ├── job_dedup.go       # Persistent job dedup across restarts
-│   │   ├── plugin_lookup.go   # UUID plugin_id → human plugin_name map
-│   │   ├── handlers_unix.go   # executeProcessChunk, step chaining, v2 fallback
-│   │   ├── choose_mode.go     # Execution mode selection
-│   │   ├── native_runner.go   # Native binary execution (CGO)
+│   ├── dispatcher/             # Job dispatcher — core execution engine
+│   │   ├── worker_pool.go    # Worker pool with backpressure, lease verification,
+│   │   │                     #   completion reporting, graceful drain
+│   │   ├── execute.go        # Five-way routing: scan/process/merge/preprocess/v2
+│   │   ├── job.go            # Job struct definitions (Job, PluginContext)
+│   │   ├── job_dedup.go      # File-based persistent dedup store (60min TTL)
+│   │   ├── plugin_lookup.go  # UUID plugin_id → human plugin_name resolution
+│   │   ├── handlers_unix.go  # executeProcessChunk, executeScanDataset,
+│   │   │                     #   executeMergeDataset, compound job execution
+│   │   ├── choose_mode.go    # Execution mode selection (small/fast/gguf/onnx)
+│   │   ├── native_runner.go  # Native binary execution (CGO)
 │   │   ├── native_runner_stub.go # No-CGO stub
-│   │   └── introspection.go   # Metrics (worker count, queue length, etc.)
+│   │   └── introspection.go  # Metrics (worker count, queue length, etc.)
 │   │
-│   ├── plugin/                  # Plugin system
-│   │   ├── manager.go         # Plugin manager
-│   │   ├── manifest.go        # Manifest handling
-│   │   ├── key_fetcher.go    # Signing key fetching
-│   │   └── sandbox.go         # Plugin sandbox
+│   ├── heartbeat/             # Device heartbeat loop (every 10min, conditional)
+│   │   └── heartbeat.go      # Sends metrics to notify_available_device
 │   │
-│   ├── redis/                   # Redis client
-│   │   └── client.go          # Connection pooling
+│   ├── plugin/                # Plugin lifecycle management
+│   │   ├── manager.go        # Plugin cache, sync from API
+│   │   ├── manifest.go       # Manifest parsing & verification
+│   │   ├── key_fetcher.go   # Signing key fetching from backend
+│   │   └── sandbox.go        # Plugin sandbox execution
 │   │
-│   ├── realtime/                # Real-time communication
-│   │   ├── supabase_realtime.go # Polling client (5s interval)
-│   │   ├── realtime_ws.go     # Supabase Realtime WebSocket
-│   │   ├── sse_client.go      # SSE client + circuit breaker
-│   │   └── available.go       # Announce available at startup
+│   ├── redis/                 # Redis client
+│   │   └── client.go        # Connection pooling
 │   │
-│   ├── storage/                 # Storage backends
-│   │   ├── config.go          # Storage configuration
-│   │   └── s3http.go         # S3 HTTP transport
+│   ├── realtime/              # Real-time job communication
+│   │   ├── supabase_realtime.go # Adaptive polling (5-60s) via poll_state, Redis Pub/Sub wake-up
+│   │   ├── realtime_ws.go    # Supabase Realtime WebSocket
+│   │   ├── sse_client.go     # SSE stream client + circuit breaker
+│   │   └── available.go     # Announce availability at startup
 │   │
-│   ├── obs/                     # Observability
-│   │   ├── logger.go         # Structured logging
-│   │   └── trace.go          # Distributed tracing
+│   ├── sandbox/               # OS-native sandbox isolation per platform
+│   │   ├── sandboxer.go      # Interface + config + factory (noop vs native)
+│   │   ├── limits.go         # Resource limit detection (memory, CPUs, temp dir)
+│   │   ├── limits_darwin.go  # macOS memory detection via sysctl
+│   │   ├── limits_linux.go   # Linux memory detection via /proc/meminfo
+│   │   ├── limits_windows.go # Windows memory detection
+│   │   ├── sandboxer_darwin.go  # macOS sandbox with Seatbelt profiles
+│   │   ├── sandboxer_linux.go   # Linux sandbox with namespaces + cgroups v2
+│   │   ├── sandboxer_windows.go # Windows sandbox with Job Objects
+│   │   └── sandboxer_stub.go    # Fallback for unsupported platforms
 │   │
-│   └── healthcheck/             # Health endpoint
-│       └── server.go          # HTTP health server
+│   ├── storage/               # Storage backend abstraction
+│   │   ├── config.go        # Storage configuration resolution
+│   │   └── s3http.go        # S3 HTTP transport
+│   │
+│   ├── obs/                   # Observability
+│   │   ├── logger.go        # Structured logging
+│   │   └── trace.go         # Distributed tracing
+│   │
+│   ├── reporter/              # Execution heartbeat
+│   │   └── heartbeat.go     # Per-job execution heartbeat via relay_job_event
+│   │
+│   └── healthcheck/           # Health endpoint
+│       └── server.go        # HTTP health server
 │
 ├── supabase/
-│   ├── functions/               # 48 Edge Functions (Deno/TypeScript)
-│   │   ├── _shared/           # Shared utilities
-│   │   │   ├── auth.ts       # Authentication helpers
-│   │   │   ├── cors.ts       # CORS headers
-│   │   │   └── security.ts   # Security utilities
-│   │   ├── agent_stream/     # SSE streaming
-│   │   ├── complete_job/     # Job completion
-│   │   └── ...              # (48 functions total)
-│   └── migrations/            # SQL migrations
+│   ├── functions/              # Edge Functions (Deno/TypeScript)
+│   │   ├── _shared/          # Shared utilities
+│   │   │   ├── auth.ts      # Authentication helpers
+│   │   │   ├── cors.ts      # CORS headers
+│   │   │   ├── security.ts  # Security utilities
+│   │   │   └── redis.ts     # Upstash REST API publish (supports https:// + rediss:// URLs)
+│   │   ├── poll_state/      # Consolidated poll + heartbeat endpoint
+│   │   ├── run_pipeline/    # Pipeline activation
+│   │   ├── advance_pipeline/ # Step-transition orchestrator (publishes to Redis on retry/merge/dead-letter)
+│   │   ├── plan_dataset_chunks/ # Chunk planning + job creation (publishes to Redis on job creation)
+│   │   ├── complete_job/    # Job completion handler
+│   │   ├── claim_jobs_for_device/ # Batch job claiming
+│   │   ├── assign_agent_job/ # Single job assignment
+│   │   ├── start_job/       # Job start with lease
+│   │   ├── report_dataset_scan/ # Scan metadata → DB
+│   │   ├── notify_available_device/ # Device heartbeat
+│   │   └── ...             # (48 functions total)
+│   └── migrations/           # SQL migrations
+│
+├── plugins/                    # Pipeline plugin manifests and scripts
+│   ├── scrape/               # URL scraping plugin
+│   │   ├── scrape.json      # Manifest (python, network=true, resource limits)
+│   │   └── scrape.py        # Scrapes product attributes from URLs
+│   ├── coverage/             # Platform coverage plugin
+│   │   ├── coverage.json    # Manifest
+│   │   └── coverage.py      # Searches platforms for product coverage
+│   ├── compare/              # Product comparison plugin
+│   │   ├── compare.json     # Manifest
+│   │   └── compare.py       # Compares two URL/attribute columns
+│   ├── dedup/                # Deduplication plugin
+│   │   ├── dedup.json       # Manifest
+│   │   └── dedup.py         # Finds duplicates by configurable field similarity
+│   └── RISEOTB_Pipeline_RunGuide.md  # Pipeline run guide
 │
 ├── Dockerfile                   # Docker build
 ├── Makefile                     # Build automation
-└── go.mod / go.sum             # Go dependencies
+├── go.mod / go.sum             # Go dependencies
+└── .gitignore                  # Git ignore rules
 ```
 
 ### Key Go Interfaces
@@ -987,18 +1035,74 @@ func (d *Dispatcher) ReportCompletion(job *agent.Job, result *ExecutionResult) e
 
 The `ExecuteJob` function implements five-way routing based on payload shape:
 
-1. **`plugin_code` present** → Routes to v2 executor (`executor/v2/executor.go`) which runs inline plugin code directly. Used for edge function dispatch and inline script execution. Validates `PluginCode != ""` early and returns `system_error` if empty.
+1. **`plugin_code` present** → Routes to v2 executor (`executor/v2/executor.go`) which runs inline plugin code directly. Used for edge function dispatch and inline script execution. Validates `PluginCode != ""` early.
 
-2. **`chunk_id` present + no `plugin_code`** → Routes to `executeProcessChunk` (`handlers_unix.go:526`):
-   - Resolves `plugin_id` UUID → human name via `pluginIDToName` sync.Map (populated at startup from `SyncPluginsFromAPI`)
-   - Loads cached plugin binary via `LoadAndUpdatePlugin`
-   - Selects execution mode: native CGO dlopen → Docker sandbox → v2 runtime fallback
-   - Implements step chaining: `StepIndex > 0` reads from `results/chunk_N.out`, `StepIndex == 0` reads from `chunks/chunk_N.bin`
-   - On Docker error, calls `fallbackToV2Runtime` which reads cached plugin file, maps language to `RuntimeType`, and calls `executorInstance.ExecuteJob`
+2. **`chunk_id` present + no `plugin_code`** → Routes to `executeProcessChunk` (`handlers_unix.go:629`):
+   - Resolves `plugin_id` UUID → human name via `pluginIDToName` sync.Map
+   - Loads cached plugin binary via `plugin.LoadAndUpdatePlugin` with Ed25519 signature verification
+   - Constructs `PluginContext` with `input_path`, `output_path`, `config`, step metadata
+   - Creates sandbox work dir, passes input to plugin via stdin JSON, reads output from stdout
+   - On plugin failure, falls back to v2 runtime manager
+   - Determines storage mode (shared_mount vs S3) from payload
+   - Uploads output to S3 (if not shared_mount) after plugin completion
 
-3. **No `chunk_id` + `dataset_id` present** → Step-level coordination job. Returns nil immediately — these are markers created by `activate_pipeline` that exist only to trigger pipeline advancement.
-4. **`plugin_code` present** → Routes to v2 executor for inline code execution.
-5. **Everything else** → Falls through to v2 executor (catch-all).
+3. **`job_type = "scan_dataset"`** → Routes to built-in `executeScanDataset`:
+   - Resolves storage backend, lists source objects, downloads a sample file
+   - Extracts metadata via `scanDatasetBuiltin` (CSV/JSON/Parquet detection, headers, schema, row counts)
+   - Enriches summary with data from ALL listed objects (file count, total size, file types)
+   - POSTs metadata to `/functions/v1/report_dataset_scan` which writes it to `datasets` table
+   - Does **not** write processed data to storage — purely introspective
+
+4. **`job_type = "merge_dataset"`** → Routes to built-in `executeMergeDataset`:
+   - Combines all chunk output files into one merged dataset
+   - Supports shared_mount (local file merge) and S3 (streaming merge) modes
+   - Handles tree merge for large datasets via `dataset.StreamMergeTree`
+   - Cleans up individual chunk outputs after successful merge
+   - Updates dataset status via `complete_job`
+
+5. **`job_type = "preprocess"` or step-level `process` with no `chunk_id`** → Marker jobs completed immediately. These are coordination markers created by `activate_pipeline` to trigger pipeline advancement without actual work.
+
+#### Compound Job Execution (inactive)
+
+The agent supports `executeCompoundProcessChunk` (`handlers_unix.go:1051`) for multi-step pipelines packed into a single job. When `IsCompound` is true and `Steps` is non-empty:
+- Each step executes a different `plugin_id` with its own `config`
+- Outputs chain through `~/.sentra/cache/{executionID}/{chunkID}/step_{N}.out`
+- Resumes from `current_step_index` on retry (cache preserved on failure)
+- Only the **final step's output** is uploaded to S3 (intermediate outputs are local-cached only)
+- Per `STATUS.md`: The edge function `plan_dataset_chunks` does not create compound jobs — agents don't receive `is_compound: true`. This is built but unwired.
+
+#### Storage Decisions Per Step
+
+| Scenario | Step 0 | Intermediate Steps | Final Step | Control Flow |
+|----------|--------|-------------------|------------|--------------|
+| **shared_mount** (default) | Reads `chunk_N.bin` → writes `chunk_N.out` locally | Reads `chunk_N.out` → writes `chunk_N.out` locally | Reads → writes locally | No S3 at all. `is_local=true` for all steps. Merge combines local `.out` files. |
+| **S3 + non-compound** | Downloads source from S3 → uploads result to S3 | Downloads previous result from S3 → uploads result to S3 | Downloads → uploads to S3 | **Every step uploads** individually (line 927 of handlers_unix.go). `is_last_step` determines which step triggers the final merge. |
+| **S3 + compound** (inactive) | Downloads source from S3 → writes to local cache | Reads from cache dir → writes to cache dir | Uploads final output to S3 | Only the final step uploads. Intermediate outputs are cached locally and discarded on success. |
+
+#### Agent Job Lifecycle (Full)
+
+```
+Redis Pub/Sub notification  ──────┐
+(sentra:newjob:{org_id})          │
+                                  ▼
+poll_state  (adaptive 5-60s — consolidated poll + heartbeat)
+        │
+        ▼  (job assigned with lease)
+VerifyJobLease → StartJob (transition: assigned → running)
+        │
+        ▼
+Worker pool: ExecuteJob (plugin execution in sandbox)
+        │
+        ├── Success → CompleteJob → advance_pipeline (publishes Redis on retry/merge)
+        │
+        └── Failure → ReportJobFailure → retry (×3) → dead_letter (publishes Redis notification)
+```
+
+#### Plugin Name Resolution (`internal/dispatcher/plugin_lookup.go`)
+
+- `pluginIDToName` is a `sync.Map` keyed by UUID `plugin_id` → human-readable `plugin_name`
+- `PopulatePluginIDMap(plugins)` is called at startup from `main.go` after `SyncPluginsFromAPI`
+- `ResolvePluginName(pluginID, pluginName)` resolves UUID → name, falling back to provided `pluginName`
 
 ### Plugin Name Resolution (`internal/dispatcher/plugin_lookup.go`)
 
@@ -1030,6 +1134,27 @@ The `ExecuteJob` function implements five-way routing based on payload shape:
   "signature_key_id": "key-001"
 }
 ```
+
+### Pipeline Plugins (RISEOTB)
+
+The repository ships four Python pipeline plugins under `plugins/` for e-commerce data processing:
+
+| Plugin | Directory | Network | Purpose | Configurable Fields |
+|--------|-----------|---------|---------|-------------------|
+| `plugin_scrape` | `plugins/scrape/` | Yes | Scrape product attributes from URLs | `url_columns`, `platforms`, `user_agent`, `mock_mode` |
+| `plugin_coverage` | `plugins/coverage/` | Yes | Search platforms for product coverage | `platform_configs`, `max_results_per_platform`, `user_agent` |
+| `plugin_compare` | `plugins/compare/` | Yes | Compare two URL/attribute columns for match decisions | `compare_method`, `weights`, `thresholds` |
+| `plugin_dedup` | `plugins/dedup/` | No | Remove duplicate products by field similarity | `match_fields`, `similarity_threshold`, `variant_fields` |
+
+**Pipeline patterns:**
+- Scrape → Coverage (2-step)
+- Scrape → Compare (2-step)
+- Scrape → Dedup (2-step)
+- Scrape → Coverage → Compare → Dedup (4-step)
+
+Each plugin reads job context from **stdin** as JSON (`PluginContext`) and writes result to **stdout** as JSON (`{ success, data, error }`). They are installed to `~/.sentra/plugins/{plugin_name}/{os}-{arch}/` and locked to `0700`.
+
+See [`plugins/RISEOTB_Pipeline_RunGuide.md`](./plugins/RISEOTB_Pipeline_RunGuide.md) for full installation and configuration instructions.
 
 ### Registration Flow (Backend Handles Signing)
 
@@ -1108,6 +1233,63 @@ Agent                        Edge Function              Plugin Binary
 
 ---
 
+## Dataset Metadata & Plugin Configuration
+
+### Metadata Flow (scan_dataset → DB)
+
+When a dataset is ingested, an automatic `scan_dataset` job is created. The agent:
+
+1. Lists all source objects in storage
+2. Downloads a sample file
+3. Extracts metadata using built-in format detectors:
+
+| Format | Extracted Info |
+|--------|----------------|
+| **CSV/TSV** | Delimiter auto-detection, headers, column count, per-column type hints, sample rows (up to 10), estimated row count |
+| **JSON/JSONL** | Array length, key names, nested schema |
+| **Parquet** | Schema, column types, row groups |
+
+4. Enriches with aggregate data: file count, total size bytes, file type distribution, source file keys
+5. POSTs to `/functions/v1/report_dataset_scan` which writes to the `datasets` table:
+
+```json
+// datasets.metadata (JSONB column)
+{
+  "scanned_at":          "2026-06-13T10:00:00Z",
+  "storage_type":        "s3",
+  "scan_completed":      true,
+  "file_count":          3,
+  "total_size_bytes":    15728640,
+  "file_types":          { ".csv": 2, ".parquet": 1 },
+  "file_type":           "csv",
+  "schema":              { "title": "string", "price": "number", "url": "string" },
+  "headers":             ["title", "price", "url", "brand", "upc"],
+  "columns":             ["title", "price", "url", "brand", "upc"],
+  "sample_row_count":    100,
+  "sample_file":         "products.csv",
+  "format":              "csv",
+  "delimiter":           ",",
+  "estimated_row_count": 50000,
+  "source_files":        ["datasets/abc123/products.csv"]
+}
+```
+
+### How Plugins Can Use Metadata
+
+When `run_pipeline` creates jobs via `plan_dataset_chunks`, the pipeline step `config` from `pipeline_templates.steps[].config` is embedded in each job's payload. Currently this config is static (defined in the template).
+
+**Gap:** The `datasets.metadata` JSONB column already contains rich per-dataset information (column names, types, row counts, format), but `plan_dataset_chunks` does not inject this metadata into job payloads. This means plugins cannot adapt their behavior based on dataset characteristics.
+
+**Potential use cases for metadata-aware plugins:**
+- **scrape**: Use `datasets.metadata.columns` to determine which URL columns exist, rather than hardcoding column names in the pipeline config
+- **coverage**: Use `estimated_row_count` to throttle API request rate per-platform
+- **compare**: Use `schema` type hints to select comparison method (exact match for numeric columns, similarity for text)
+- **dedup**: Use `headers` to auto-detect available match fields and field mapping
+
+Closing this gap would involve passing `datasets.metadata` (or selected fields) into the job `payload` when `plan_dataset_chunks` creates per-chunk agent_jobs.
+
+---
+
 ## Security Model
 
 ### 1. Authentication & Authorization
@@ -1154,16 +1336,52 @@ CREATE FUNCTION get_current_org_id() RETURNS uuid AS $$
 $$ LANGUAGE sql STABLE;
 ```
 
-### 3. Plugin Sandbox
+### 3. Plugin Execution Sandbox
 
-| Protection | Implementation |
-|-------------|-----------------|
-| **Memory Limit** | `ulimit -v <bytes>` (Unix) |
-| **CPU Time** | `ulimit -t <seconds>` (Unix) |
-| **Wall-clock Timeout** | `context.WithTimeout()` (Go) |
-| **Network** | `manifest.Network` flag (default: false) |
-| **File System** | Isolated temp directories |
-| **Process Isolation** | Fork/exec with resource limits |
+The agent uses a **platform-native sandbox** (`internal/sandbox/`) that provides OS-level isolation per operating system. Configured via `SENTRA_SANDBOX_*` env vars.
+
+#### Sandbox Interface
+
+```go
+type Sandboxer interface {
+    Prepare(ctx context.Context, jobID string, manifest PluginManifest, network bool) (*SandboxEnv, error)
+    Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd) error
+    Destroy(ctx context.Context, env *SandboxEnv) error
+}
+```
+
+Each plugin runs in a sandboxed work directory (`~/.sentra/sandbox/{jobID}/`) with resource limits enforced at the OS level. The `SandboxConfig` controls default/ max resource budgets, seccomp profiles, cgroups, and UID/GID sandboxing.
+
+#### Platform-Specific Isolation
+
+| Platform | Sandbox Mode | Implementation |
+|----------|-------------|----------------|
+| **Linux** | `native` | Linux namespaces (PID, mount, network, UTS) + cgroups v2 (memory, CPU) + seccomp BPF profiles. UID/GID drops to `65534` (nobody). |
+| **macOS** | `native` | Seatbelt sandbox profiles (App Sandbox equivalent). Resource limits via `setrlimit`. Temp directory isolation. |
+| **Windows** | `native` or `off` | Windows Job Objects (process group limits). Configured via `SANDBOX_WINDOWS_JOB_OBJECT`. Falls back to `off` when unavailable. |
+| **Fallback** | `off` | `noopSandbox` — creates work dir, runs process, cleans up. No OS isolation. |
+
+#### Resource Enforcement
+
+| Protection | Method |
+|------------|--------|
+| **Memory Limit** | `setrlimit(RLIMIT_AS/RLIMIT_DATA)` on Unix; cgroup memory.max on Linux; Job Object memory limit on Windows |
+| **CPU Time** | `setrlimit(RLIMIT_CPU)` on Unix; cgroup cpu.max on Linux |
+| **Wall-clock Timeout** | `context.WithTimeout()` in Go — kills process tree |
+| **Network** | `manifest.Network` flag (default: false); Linux: isolated netns when disabled |
+| **File System** | Per-job temp directory (`~/.sentra/sandbox/{jobID}/`), cleaned up after completion |
+| **Process Isolation** | Fork/exec with dropped privileges; Linux: PID namespace isolation |
+| **Seccomp** | Default seccomp profile (Linux) blocks ~50+ syscalls not needed by script plugins |
+
+#### Plugin Execution Flow
+
+1. Agent resolves `plugin_id` UUID → human `plugin_name` via `internal/dispatcher/plugin_lookup.go`
+2. `plugin.LoadAndUpdatePlugin()` loads cached plugin binary from `~/.sentra/plugins/`, verifies Ed25519 signature
+3. Sandbox prepares isolated environment via `Prepare()` — creates work dir, sets up OS isolation
+4. Plugin binary receives input as JSON on **stdin** (shape: `PluginContext` with `job_id`, `org_id`, `dataset_id`, `execution_id`, `step_index`, `chunk_id`, `input_path`, `output_path`, `config`)
+5. Output is read from **stdout** as JSON `{ "success": bool, "data": {...}, "error": "..." }`
+6. Fallback chain: native plugin → Docker sandbox → v2 runtime manager (pre-warmed Python/Node venv)
+7. Sandbox destroys environment via `Destroy()` — cleans up temp files
 
 ### 4. Message Sanitization
 
@@ -1188,12 +1406,19 @@ func SanitizeErrorMessage(msg string) string {
 |----------|----------|---------|-------------|
 | `SENTRA_CLAIM_CODE` | * | - | Claim code for first-time registration |
 | `SENTRA_BACKEND_URL` | No | auto-detect | Supabase project URL |
-| `SENTRA_REDIS_URL` | No | - | Redis URL for coordination |
+| `SENTRA_REDIS_URL` | No | - | Redis URL for Pub/Sub coordination |
 | `MAX_CONCURRENCY` | No | auto | Max concurrent jobs |
 | `LOG_LEVEL` | No | `info` | Log level (debug, info, warn, error) |
 | `HEALTH_CHECK_PORT` | No | `8080` | Health endpoint port |
 | `AGENT_ENVIRONMENT_TYPE` | No | `production` | Environment type |
 | `AGENT_STORAGE_TYPE` | No | `local` | Storage backend |
+| `SENTRA_POLL_INTERVAL` | No | `5s` | Minimum polling interval |
+| `SENTRA_POLL_MAX_INTERVAL` | No | `60s` | Maximum polling interval |
+| `SENTRA_HEARTBEAT_INTERVAL` | No | `10m0s` | Heartbeat interval |
+| `SENTRA_JOB_HEARTBEAT_INTERVAL` | No | `60s` | Per-job execution heartbeat (via relay_job_event) |
+| `SENTRA_KEY_CACHE_TTL` | No | `60m` | Plugin signing key cache TTL |
+| `SENTRA_KEY_RELOAD_INTERVAL` | No | `60m` | Plugin key reload interval |
+| `SENTRA_PLUGIN_AUTO_UPDATE_INTERVAL` | No | `60m` | Plugin auto-update check interval |
 
 ### Runtime Pool Configuration
 
@@ -1214,6 +1439,8 @@ func SanitizeErrorMessage(msg string) string {
 | `CRON_SECRET` | Secret for cron jobs |
 | `PLATFORM_SIGNING_PUBLIC_KEY_B64` | Ed25519 public key |
 | `PLATFORM_SIGNING_PRIVATE_KEY_B64` | Ed25519 private key |
+| `Redis_url` | Upstash Redis REST URL (https://...) or connection URL (rediss://...) |
+| `Redis_token` | Upstash Redis REST API token |
 
 ---
 
@@ -1444,32 +1671,40 @@ WHERE lease_expires_at < NOW() AND status IN ('assigned', 'running');
 
 Base URL: `https://<project>.supabase.co/functions/v1/`
 
-#### Job Lifecycle
+#### Device Management
 
 ```
 POST /claim_device              # Register device (no auth)
 GET  /bootstrap                 # Get config (x-bootstrap-token auth)
 POST /register_device           # Register (no auth, service_role)
+POST /poll_state                # Consolidated poll + heartbeat (Agent Token)
+POST /reconcile_agent           # Reconcile state on restart (Agent Token)
+```
 
+#### Job Lifecycle
+
+```
 POST /assign_agent_job         # Request job (Agent Token) — POST only
-POST /claim_jobs_for_device     # Batch claim (Agent Token) — returns dataset_id, chunk_index, step_index
+POST /claim_jobs_for_device     # Batch claim (Agent Token) — legacy, use poll_state
 POST /start_job                 # Start job (Agent Token)
 POST /complete_job              # Complete job (Agent Token)
-POST /report_job_error          # Report error (Agent Token)
+POST /report_job_error          # Report error (Agent Token) — dead-letters after 3 retries
 POST /verify_job_lease          # Verify lease (Agent Token)
+POST /cleanup_stuck_jobs        # Recover stuck jobs (CRON_SECRET)
 ```
 
 #### Dataset & Pipeline
 
 ```
 POST /run_pipeline                          # Activate pipeline
-POST /advance_pipeline                      # Advance step
-POST /plan_dataset_chunks                   # Plan chunks
+POST /advance_pipeline                      # Advance step (publishes Redis notification)
+POST /plan_dataset_chunks                   # Plan chunks (publishes Redis notification)
 POST /pre_chunk_dataset                     # Create chunks
 POST /calculate_optimal_chunk_size          # Calc chunk size
 POST /approve_dataset_and_plan_chunks      # Approve & plan
 POST /report_dataset_scan                   # Report scan
 POST /schedule_merge_job                    # Schedule merge
+POST /record_dataset_metadata               # Record scan metadata
 ```
 
 #### Plugin Management
@@ -1481,14 +1716,22 @@ GET  /list_plugins_for_org     # List org plugins (Bearer)
 GET  /list_all_plugins         # List all (Bearer)
 POST /get_plugin_signing_key   # Get key (Agent Token)
 GET  /list_plugin_signing_keys # List keys (Bearer)
+POST /decrypt_vault_secret     # Decrypt Vault secrets (service_role)
 ```
 
-#### Real-time
+#### Real-time & Events
 
 ```
 GET  /agent_stream              # SSE stream (Agent Token)
-POST /relay_job_event          # Relay event
-POST /notify_available_device  # Notify available
+POST /relay_job_event          # Relay event (Relay Key or Device Token) — reliable fallback
+POST /notify_available_device  # Notify availability (Agent Token) — heartbeat embedded in poll_state
+POST /dispatch_http_jobs       # Process HTTP queue (CRON_SECRET)
+```
+
+#### Redis Pub/Sub Channels
+
+```
+sentra:newjob:{org_id}         # Published by plan_dataset_chunks and advance_pipeline
 ```
 
 ---
@@ -1518,4 +1761,4 @@ Part of the SentraZero Compute Platform.
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — End-to-end flow with two-tier chunking design
 - [TESTING_FLOW.md](./TESTING_FLOW.md) — Detailed phase-by-phase testing guide
 
-**Last Updated:** 2026-05-12
+**Last Updated:** 2026-06-18

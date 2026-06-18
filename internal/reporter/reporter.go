@@ -3,9 +3,20 @@ package reporter
 import (
 	"context"
 	"log"
+	"os"
 	"sync"
 	"time"
 )
+
+var jobHeartbeatInterval = 60 * time.Second
+
+func init() {
+	if v := os.Getenv("SENTRA_JOB_HEARTBEAT_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			jobHeartbeatInterval = d
+		}
+	}
+}
 
 // ExecutionClient is the minimal contract required by the reporter.
 // This intentionally mirrors backend.ExecutionClient behavior.
@@ -36,7 +47,7 @@ func StartExecutionHeartbeat(
 	hbs[jobID] = cancel
 
 	go func() {
-		ticker := time.NewTicker(20 * time.Second)
+		ticker := time.NewTicker(jobHeartbeatInterval)
 		defer ticker.Stop()
 
 		for {

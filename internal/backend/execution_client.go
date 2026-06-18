@@ -301,11 +301,13 @@ type JobHeartbeat struct {
 }
 
 type JobComplete struct {
-	Type       string    `json:"type"`
-	JobID      string    `json:"job_id"`
-	DurationMs int64     `json:"duration_ms"`
-	FinishedAt time.Time `json:"finished_at"`
-	Result     any       `json:"result,omitempty"`
+	Type        string    `json:"type"`
+	JobID       string    `json:"job_id"`
+	DurationMs  int64     `json:"duration_ms"`
+	FinishedAt  time.Time `json:"finished_at"`
+	Result      any       `json:"result,omitempty"`
+	IsLocal     bool      `json:"is_local,omitempty"`
+	IsLastStep  bool      `json:"is_last_step,omitempty"`
 }
 
 type JobFail struct {
@@ -374,7 +376,7 @@ func (c *ExecutionClient) SendJobExecutionHeartbeat(ctx context.Context, jobID s
 	})
 }
 
-func (c *ExecutionClient) ReportJobComplete(ctx context.Context, jobID string, durationMs int64, result any) error {
+func (c *ExecutionClient) ReportJobComplete(ctx context.Context, jobID string, durationMs int64, result any, isLocal bool, isLastStep bool) error {
 	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: JobComplete{
@@ -383,6 +385,8 @@ func (c *ExecutionClient) ReportJobComplete(ctx context.Context, jobID string, d
 			DurationMs: durationMs,
 			FinishedAt: time.Now().UTC(),
 			Result:     result,
+			IsLocal:    isLocal,
+			IsLastStep: isLastStep,
 		},
 	})
 }
@@ -543,6 +547,8 @@ type execCompleteJobRequest struct {
 	DurationMs int64           `json:"duration_ms,omitempty"`
 	Output    json.RawMessage `json:"output,omitempty"`
 	Error     string          `json:"error,omitempty"`
+	IsLocal    bool            `json:"is_local,omitempty"`
+	IsLastStep bool            `json:"is_last_step,omitempty"`
 }
 
 type execCompleteJobResponse struct {
@@ -602,13 +608,15 @@ const (
 	ErrCodeInternalError     ErrorCode = "INTERNAL_ERROR"
 )
 
-func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, jobID string, status string, durationMs int64, resultData any) *CompleteJobResult {
-	log.Printf("[EXEC-CLIENT] CompleteJob: executionID=%s jobID=%s status=%s", executionID, jobID, status)
+func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, jobID string, status string, durationMs int64, resultData any, isLocal bool, isLastStep bool) *CompleteJobResult {
+	log.Printf("[EXEC-CLIENT] CompleteJob: executionID=%s jobID=%s status=%s isLocal=%v isLastStep=%v", executionID, jobID, status, isLocal, isLastStep)
 
 	reqBody := map[string]any{
 		"job_id":       jobID,
 		"execution_id": executionID,
 		"status":       status,
+		"is_local":     isLocal,
+		"is_last_step": isLastStep,
 	}
 	if durationMs > 0 {
 		reqBody["duration_ms"] = durationMs
@@ -680,33 +688,31 @@ type DeviceAssignedJob struct {
 
 // GetAssignedJobs fetches jobs assigned to this device that are in assigned or running state
 func (c *ExecutionClient) GetAssignedJobs(ctx context.Context) ([]DeviceAssignedJob, error) {
-	url := fmt.Sprintf("%s/rest/v1/agent_jobs?agent_id=eq.%s&status=in.(assigned,running)&select=id,job_type,payload,execution_id,execution_step_id,org_id,status",
-		c.baseURL, c.deviceID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/get_assigned_jobs", nil, nil)
 	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("apikey", c.anonKey)
-	req.Header.Set("Authorization", "Bearer "+c.anonKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get_assigned_jobs request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("get_assigned_jobs read failed: %w", err)
+	}
+
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("get_assigned_jobs failed: HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("get_assigned_jobs failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var jobs []DeviceAssignedJob
-	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
-		return nil, err
+	var result struct {
+		Ok   bool               `json:"ok"`
+		Jobs []DeviceAssignedJob `json:"jobs"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("get_assigned_jobs decode failed: %w", err)
+	}
+	if !result.Ok {
+		return nil, fmt.Errorf("get_assigned_jobs rejected")
 	}
 
-	return jobs, nil
+	return result.Jobs, nil
 }

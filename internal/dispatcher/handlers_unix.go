@@ -123,13 +123,12 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		executionID = job.ExecutionID
 	}
 	
-	// VALIDATION: execution_id is REQUIRED for completion
+	// execution_id may be empty for background scan jobs
 	if executionID == "" {
-		obs.Error("executeScanDataset: missing execution_id - job will fail at completion", obs.Field{
+		obs.Warn("executeScanDataset: no execution_id (background scan)", obs.Field{
 			"job_id":     job.ID,
 			"dataset_id": job.DatasetID,
 		})
-		return errors.New("missing execution_id - aborting execution")
 	}
 	
 	// Use executionID from context, inject into job for downstream
@@ -239,7 +238,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 			})
 		}
 	} else {
-		remotePath = storage.GetRemotePath(job.DatasetID, 0, "source")
+		return fmt.Errorf("source_path is required for scan_dataset (no /source/ prefix fallback)")
 	}
 
 	obs.Info("executeScanDataset: listing remote objects", obs.Field{
@@ -300,10 +299,36 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		return errors.New("scan returned nil output")
 	}
 
+	// Override summary with accurate data from ALL listed objects, not just the sample
+	summary["file_count"] = len(objects)
+
+	fileTypes := map[string]int{}
+	for _, obj := range objects {
+		ext := filepath.Ext(obj.Key)
+		if ext == "" {
+			ext = "(no extension)"
+		}
+		fileTypes[ext]++
+	}
+	summary["file_types"] = fileTypes
+	for ext := range fileTypes {
+		summary["file_type"] = strings.TrimPrefix(ext, ".")
+		break
+	}
+
+	summary["total_size_bytes"] = totalSize
+
+	sourceFiles := make([]string, len(objects))
+	for i, obj := range objects {
+		sourceFiles[i] = obj.Key
+	}
+	summary["source_files"] = sourceFiles
+
 	obs.Info("scan completed", obs.Field{
 		"job_id":        job.ID,
 		"dataset_id":    job.DatasetID,
 		"summary_keys": len(summary),
+		"file_count":    len(objects),
 	})
 
 	// Report scan results to backend - non-critical, don't fail job on error
@@ -315,58 +340,6 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 		})
 		// Don't return error - reporting is non-critical
 	}
-
-	// Create chunk file from source for the pipeline process step
-	if err := createChunkFromSource(ctx, backend, job.DatasetID, remotePath, objects); err != nil {
-		obs.Warn("failed to create chunk from source", obs.Field{
-			"job_id":     job.ID,
-			"dataset_id": job.DatasetID,
-			"error":      err.Error(),
-		})
-	}
-
-	return nil
-}
-
-func createChunkFromSource(ctx context.Context, backend storage.StorageBackend, datasetID, remotePath string, objects []storage.ObjectInfo) error {
-	if backend == nil {
-		return errors.New("backend is nil")
-	}
-
-	var sourceKey string
-	if len(objects) > 0 {
-		sourceKey = objects[0].Key
-	} else {
-		sourceKey = remotePath
-	}
-
-	if sourceKey == "" {
-		return errors.New("no source found to create chunk")
-	}
-
-	chunkKey := storage.GetRemotePath(datasetID, 0, "chunk")
-	if chunkKey == "" {
-		return errors.New("failed to build chunk key")
-	}
-
-	obs.Info("creating chunk file from source", obs.Field{
-		"source_key": sourceKey,
-		"chunk_key":  chunkKey,
-	})
-
-	reader, err := backend.ReadObject(ctx, sourceKey)
-	if err != nil {
-		return fmt.Errorf("failed to read source: %w", err)
-	}
-	defer reader.Close()
-
-	if err := backend.WriteObject(ctx, chunkKey, reader); err != nil {
-		return fmt.Errorf("failed to write chunk: %w", err)
-	}
-
-	obs.Info("chunk file created", obs.Field{
-		"chunk_key": chunkKey,
-	})
 
 	return nil
 }
@@ -634,6 +607,22 @@ type ProcessPayload struct {
 	Rows        int             `json:"rows,omitempty"`
 	Checksum    string          `json:"checksum,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
+
+	// Chunking metadata
+	TotalChunks int    `json:"total_chunks,omitempty"`
+	SourcePath  string `json:"source_path,omitempty"`
+
+	// Compound job fields (in nested payload)
+	IsCompound       bool            `json:"is_compound,omitempty"`
+	Steps            []CompoundStep  `json:"steps,omitempty"`
+	TotalSteps       int             `json:"total_steps,omitempty"`
+	CurrentStepIndex int             `json:"current_step_index,omitempty"`
+}
+
+type CompoundStep struct {
+	StepIndex int             `json:"step_index"`
+	PluginID  string          `json:"plugin_id"`
+	Config    json.RawMessage `json:"config"`
 }
 
 func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
@@ -693,10 +682,19 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	if storageMode == "" {
 		storageMode = "shared_mount"
 	}
+	storageMode = normalizeStorageModeForJob(storageMode)
 
 	backend := GetStorageBackend()
 	if backend == nil {
 		return errors.New("storage backend not initialized")
+	}
+
+	// Reconcile storage mode with actual backend:
+	// if the global backend reads/writes locally, force local paths.
+	if storageMode != "shared_mount" {
+		if _, isSharedMount := backend.(*storage.SharedMountBackend); isSharedMount {
+			storageMode = "shared_mount"
+		}
 	}
 
 	datasetID := processPayload.DatasetID
@@ -704,6 +702,11 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	chunkIndex := processPayload.ChunkIndex
 
 	resultKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
+
+	// ── Compound job branch ──
+	if processPayload.IsCompound && len(processPayload.Steps) > 0 {
+		return executeCompoundProcessChunk(ctx, &job, &processPayload, &processPayload, datasetID, datasetSlug, chunkIndex, resultKey, backend, storageMode)
+	}
 
 	workDirID := job.ID
 	if workDirID == "" {
@@ -741,31 +744,48 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		processPayload.OutputPath = outputPath
 	} else {
 		// S3/object storage: download input based on step index
-		var inputKey string
 		if stepIndex > 0 {
-			inputKey = resultKey
-		} else {
-			base := datasetID
-			if datasetSlug != "" {
-				base = datasetSlug
+			objReader, err := backend.ReadObject(ctx, resultKey)
+			if err != nil {
+				return fmt.Errorf("failed to read result object: %w", err)
 			}
-			inputKey = fmt.Sprintf("%s.csv", base)
-		}
-		objReader, err := backend.ReadObject(ctx, inputKey)
-		if err != nil {
-			return fmt.Errorf("failed to read input object: %w", err)
-		}
-		defer objReader.Close()
+			defer objReader.Close()
 
-		inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.bin", chunkIndex))
-		inputFile, err := os.Create(inputPath)
-		if err != nil {
-			return fmt.Errorf("failed to create input file: %w", err)
-		}
-		_, err = io.Copy(inputFile, objReader)
-		inputFile.Close()
-		if err != nil {
-			return fmt.Errorf("failed to write input file: %w", err)
+			inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.bin", chunkIndex))
+			inputFile, err := os.Create(inputPath)
+			if err != nil {
+				return fmt.Errorf("failed to create input file: %w", err)
+			}
+			_, err = io.Copy(inputFile, objReader)
+			inputFile.Close()
+			if err != nil {
+				return fmt.Errorf("failed to write input file: %w", err)
+			}
+		} else {
+			// Step 0: read source files
+			if processPayload.SourcePath != "" {
+				// Single root-level CSV from source_path
+				objReader, err := backend.ReadObject(ctx, processPayload.SourcePath)
+				if err != nil {
+					return fmt.Errorf("failed to read source %s: %w", processPayload.SourcePath, err)
+				}
+				ext := filepath.Ext(processPayload.SourcePath)
+				outPath := filepath.Join(workDir, "source"+ext)
+				outFile, createErr := os.Create(outPath)
+				if createErr != nil {
+					objReader.Close()
+					return fmt.Errorf("failed to create source file: %w", createErr)
+				}
+				_, copyErr := io.Copy(outFile, objReader)
+				objReader.Close()
+				outFile.Close()
+				if copyErr != nil {
+					return fmt.Errorf("failed to write source file: %w", copyErr)
+				}
+				inputPath = outPath
+			} else {
+				return fmt.Errorf("source_path is required for S3 process jobs (no /source/ prefix fallback)")
+			}
 		}
 
 		outputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
@@ -790,7 +810,7 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		pluginID = nestedPayload.PluginID
 	}
 
-	pluginName := ResolvePluginName(pluginID, job.PluginName)
+	pluginName := ResolvePluginName(ctx, pluginID, job.PluginName)
 	if pluginName == "" {
 		obs.Warn("no plugin name or ID in job payload — agent cannot load plugin", obs.Field{
 			"job_id":    job.ID,
@@ -827,11 +847,17 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	env := system.DetectExecutionEnv()
 	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
 	if err != nil {
-		// If Docker is unavailable and this is a script plugin, fall back to v2 runtime
-		if strings.Contains(err.Error(), "Docker") || strings.Contains(err.Error(), "docker") {
-			obs.Info("docker sandbox unavailable, falling back to v2 runtime", obs.Field{
-				"plugin": manifest.Name,
-				"error":  err.Error(),
+		// If Docker is unavailable or script plugin fails (likely missing deps), fall back to v2 runtime
+		errStr := err.Error()
+		isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+		isScriptPlugin := isScriptLanguage(manifest.Language)
+		if isDockerErr || isScriptPlugin {
+			obs.Info("falling back to v2 runtime", obs.Field{
+				"plugin":        manifest.Name,
+				"language":      manifest.Language,
+				"docker_error":  isDockerErr,
+				"script_plugin": isScriptPlugin,
+				"error":         errStr,
 			})
 			execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, &processPayload, &job)
 			if err != nil {
@@ -849,21 +875,53 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		}
 	}
 
+	// Ensure the output file exists on disk
+	if _, statErr := os.Stat(outputPath); os.IsNotExist(statErr) {
+		var actualPath string
+		if data, ok := result["data"].(map[string]any); ok {
+			if p, ok := data["output_path"].(string); ok && p != "" {
+				actualPath = p
+			}
+		}
+		if actualPath != "" {
+			if info, err := os.Stat(actualPath); err == nil && !info.IsDir() {
+				os.MkdirAll(filepath.Dir(outputPath), 0755)
+				if err := os.Rename(actualPath, outputPath); err != nil {
+					obs.Warn("rename fallback: copying instead", obs.Field{"from": actualPath, "to": outputPath, "error": err.Error()})
+					if copyErr := copyFile(actualPath, outputPath); copyErr != nil {
+						obs.Warn("copy fallback also failed", obs.Field{"error": copyErr.Error()})
+					}
+				}
+			}
+		}
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			os.MkdirAll(filepath.Dir(outputPath), 0755)
+			os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+			obs.Info("created output file from plugin stdout", obs.Field{"output_path": outputPath})
+		}
+	}
+
 	if storageMode != "shared_mount" {
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
 			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err == nil {
 				os.WriteFile(outputPath, []byte(execResult.Output), 0644)
 			}
 		}
+		// Upload to S3 for all steps (compound jobs chain locally, but separate steps need S3)
 		outputFile, err := os.Open(outputPath)
 		if err != nil {
 			return fmt.Errorf("failed to open output file: %w", err)
 		}
-		defer outputFile.Close()
 
 		if err := backend.WriteObject(ctx, resultKey, outputFile); err != nil {
+			outputFile.Close()
 			return fmt.Errorf("failed to write result: %w", err)
 		}
+		outputFile.Close()
+		obs.Info("chunk result uploaded to S3", obs.Field{
+			"chunk_id":   processPayload.ChunkID,
+			"result_key": resultKey,
+		})
 	}
 
 	obs.Info("chunk processed", obs.Field{
@@ -871,6 +929,293 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		"chunk_id":    pluginCtx.ChunkID,
 		"output_path": pluginCtx.OutputPath,
 	})
+
+	return nil
+}
+
+// ── Compound job helpers ──
+
+func getCompoundCacheDir(executionID, chunkID string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "sentra-cache", executionID, chunkID)
+	}
+	return filepath.Join(homeDir, ".sentra", "cache", executionID, chunkID)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func reportStepProgress(ctx context.Context, jobID, executionID, chunkID string, stepIndex int, status, errorMsg string) {
+	deviceToken, err := auth.GetToken()
+	if err != nil {
+		obs.Warn("reportStepProgress skipped: no token", obs.Field{"error": err.Error()})
+		return
+	}
+	data := map[string]any{
+		"type":         "step_progress",
+		"job_id":       jobID,
+		"execution_id": executionID,
+		"chunk_id":     chunkID,
+		"step_index":   stepIndex,
+		"step_status":  status,
+	}
+	if errorMsg != "" {
+		data["error"] = errorMsg
+	}
+	body, _ := json.Marshal(map[string]any{
+		"channel": "agent-" + getAgentID(),
+		"data":    data,
+	})
+	httpc := httpclient.NewClient(supabaseBaseURL, supabaseAnonKey, deviceToken)
+	resp, err := httpc.DoWithReq(ctx, "POST", "/functions/v1/relay_job_event", body, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+supabaseAnonKey)
+		r.Header.Set("x-agent-token", deviceToken)
+	})
+	if err != nil {
+		obs.Warn("reportStepProgress HTTP failed", obs.Field{"error": err.Error()})
+		return
+	}
+	resp.Body.Close()
+}
+
+func executePluginStep(ctx context.Context, job *Job, processPayload *ProcessPayload, pluginID string, config json.RawMessage, stepIndex int, inputPath, outputPath string) error {
+	pluginName := ResolvePluginName(ctx, pluginID, "")
+	if pluginName == "" {
+		return fmt.Errorf("no plugin name for ID %s", pluginID)
+	}
+
+	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
+	if err != nil {
+		return fmt.Errorf("load plugin %s: %w", pluginName, err)
+	}
+
+	pluginCtx := PluginContext{
+		JobID:       job.ID,
+		OrgID:       job.OrgID,
+		DatasetID:   processPayload.DatasetID,
+		ExecutionID: job.ExecutionID,
+		StepIndex:   stepIndex,
+		ChunkID:     processPayload.ChunkID,
+		ChunkIndex:  processPayload.ChunkIndex,
+		InputPath:   inputPath,
+		OutputPath:  outputPath,
+		Config:      config,
+	}
+
+	inJSON, _ := json.Marshal(pluginCtx)
+	env := system.DetectExecutionEnv()
+	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
+	if err != nil {
+		errStr := err.Error()
+		isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+		isScriptPlugin := isScriptLanguage(manifest.Language)
+		if isDockerErr || isScriptPlugin {
+			processPayload.InputPath = inputPath
+			processPayload.OutputPath = outputPath
+			execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, processPayload, job)
+			if err != nil {
+				return fmt.Errorf("step %d plugin failed (native+v2): %w", stepIndex, err)
+			}
+		} else {
+			return fmt.Errorf("step %d plugin failed: %w", stepIndex, err)
+		}
+	}
+
+	if execResult != nil && execResult.Output != "" {
+		var result map[string]any
+		json.Unmarshal([]byte(execResult.Output), &result)
+	}
+
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+		os.MkdirAll(filepath.Dir(outputPath), 0755)
+		os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+	}
+
+	return nil
+}
+
+func executeCompoundProcessChunk(
+	ctx context.Context,
+	job *Job,
+	processPayload *ProcessPayload,
+	nestedPayload *ProcessPayload,
+	datasetID, datasetSlug string,
+	chunkIndex int,
+	resultKey string,
+	backend storage.StorageBackend,
+	storageMode string,
+) error {
+	chunkID := processPayload.ChunkID
+	if chunkID == "" {
+		chunkID = nestedPayload.ChunkID
+	}
+	executionID := job.ExecutionID
+
+	steps := processPayload.Steps
+	startStep := processPayload.CurrentStepIndex
+	lastStep := len(steps) - 1
+
+	cacheDir := getCompoundCacheDir(executionID, chunkID)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+
+	workDirID := job.ID
+	if workDirID == "" {
+		workDirID = chunkID
+	}
+	workDir, cleanup, err := plugin.PrepareJobWorkDir(workDirID)
+	if err != nil {
+		return fmt.Errorf("prepare work dir: %w", err)
+	}
+	defer cleanup()
+
+	var pluginErr error
+	var lastOutputPath string
+
+	mountBasePath := deriveMountBasePath(storageMode)
+
+	for si := startStep; si <= lastStep; si++ {
+		step := steps[si]
+		var inputPath string
+
+		if si == 0 {
+			if storageMode == "shared_mount" {
+				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+			} else {
+				// Step 0: read source files
+				if processPayload.SourcePath != "" {
+					// Single root-level CSV from source_path
+					objReader, readErr := backend.ReadObject(ctx, processPayload.SourcePath)
+					if readErr != nil {
+						pluginErr = fmt.Errorf("step %d: read source %s: %w", si, processPayload.SourcePath, readErr)
+						break
+					}
+					ext := filepath.Ext(processPayload.SourcePath)
+					outPath := filepath.Join(workDir, "source"+ext)
+					outFile, createErr := os.Create(outPath)
+					if createErr != nil {
+						objReader.Close()
+						pluginErr = fmt.Errorf("step %d: create source file: %w", si, createErr)
+						break
+					}
+					_, copyErr := io.Copy(outFile, objReader)
+					objReader.Close()
+					outFile.Close()
+					if copyErr != nil {
+						pluginErr = fmt.Errorf("step %d: copy source: %w", si, copyErr)
+						break
+					}
+					inputPath = outPath
+				} else {
+					pluginErr = fmt.Errorf("step %d: source_path is required for S3 process jobs (no /source/ prefix fallback)", si)
+					break
+				}
+			}
+		} else {
+			cachedPath := filepath.Join(cacheDir, fmt.Sprintf("step_%d.out", si-1))
+			if fileExists(cachedPath) {
+				inputPath = cachedPath
+			} else if storageMode == "shared_mount" {
+				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
+				if !fileExists(inputPath) {
+					pluginErr = fmt.Errorf("step %d: prev output not found at %s", si, inputPath)
+					break
+				}
+			} else {
+				obs.Warn("compound: cached step output not found, downloading from S3", obs.Field{
+					"step": si - 1,
+					"path": cachedPath,
+				})
+				inputKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
+				objReader, err := backend.ReadObject(ctx, inputKey)
+				if err != nil {
+					pluginErr = fmt.Errorf("step %d: download prev output: %w", si, err)
+					break
+				}
+				inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
+				inputFile, createErr := os.Create(inputPath)
+				if createErr != nil {
+					objReader.Close()
+					pluginErr = fmt.Errorf("step %d: create prev file: %w", si, createErr)
+					break
+				}
+				_, copyErr := io.Copy(inputFile, objReader)
+				objReader.Close()
+				inputFile.Close()
+				if copyErr != nil {
+					pluginErr = fmt.Errorf("step %d: copy prev: %w", si, copyErr)
+					break
+				}
+			}
+		}
+
+		outputPath := filepath.Join(cacheDir, fmt.Sprintf("step_%d.out", si))
+
+		if err := executePluginStep(ctx, job, processPayload, step.PluginID, step.Config, si, inputPath, outputPath); err != nil {
+			pluginErr = fmt.Errorf("step %d: %w", si, err)
+			reportStepProgress(ctx, job.ID, executionID, chunkID, si, "failed", pluginErr.Error())
+			break
+		}
+
+		reportStepProgress(ctx, job.ID, executionID, chunkID, si, "completed", "")
+		lastOutputPath = outputPath
+	}
+
+	if pluginErr != nil {
+		// Preserve cache for retry — don't clean up
+		obs.Warn("compound job failed, cache preserved for retry", obs.Field{
+			"cache_dir": cacheDir,
+			"error":     pluginErr.Error(),
+		})
+		return pluginErr
+	}
+
+	// Upload final output to S3 or copy to shared mount
+	if storageMode != "shared_mount" {
+		if _, err := os.Stat(lastOutputPath); os.IsNotExist(err) {
+			return fmt.Errorf("final output not found at %s", lastOutputPath)
+		}
+		outputFile, err := os.Open(lastOutputPath)
+		if err != nil {
+			return fmt.Errorf("open final output: %w", err)
+		}
+		defer outputFile.Close()
+
+		if err := backend.WriteObject(ctx, resultKey, outputFile); err != nil {
+			return fmt.Errorf("write final result: %w", err)
+		}
+
+		obs.Info("compound job completed, final result uploaded", obs.Field{
+			"execution_id": executionID,
+			"chunk_id":     chunkID,
+			"steps":        len(steps),
+			"result_key":   resultKey,
+		})
+	} else {
+		mountBasePath := deriveMountBasePath(storageMode)
+		finalOutputPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
+		if err := os.MkdirAll(filepath.Dir(finalOutputPath), 0755); err != nil {
+			return fmt.Errorf("create output dir: %w", err)
+		}
+		if err := copyFile(lastOutputPath, finalOutputPath); err != nil {
+			return fmt.Errorf("copy final output to shared mount: %w", err)
+		}
+		obs.Info("compound job completed, final result copied to shared mount", obs.Field{
+			"execution_id": executionID,
+			"chunk_id":     chunkID,
+			"steps":        len(steps),
+			"output_path":  finalOutputPath,
+		})
+	}
+
+	// Clean up cache on success
+	if err := os.RemoveAll(cacheDir); err != nil {
+		obs.Warn("compound cache cleanup failed", obs.Field{"cache_dir": cacheDir, "error": err.Error()})
+	}
 
 	return nil
 }
@@ -1004,14 +1349,14 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 				}
 				defer objReader.Close()
 
-				destKey := storage.GetRemotePath(ingestPayload.DatasetID, 0, "source") + "/" + filepath.Base(obj.Key)
+				destKey := ingestPayload.DatasetID + "/" + filepath.Base(obj.Key)
 				if err := backend.WriteObject(ctx, destKey, objReader); err != nil {
 					return fmt.Errorf("failed to write object %s: %w", destKey, err)
 				}
 			}
 		}
 
-		sourcePath = storage.GetRemotePath(ingestPayload.DatasetID, 0, "source")
+		sourcePath = ingestPayload.DatasetID
 		chunksPath = storage.GetRemotePath(ingestPayload.DatasetID, 0, "chunk")
 		resultsPath = storage.GetRemotePath(ingestPayload.DatasetID, 0, "result")
 		mergedPath = storage.GetRemotePath(ingestPayload.DatasetID, 0, "merged")
@@ -1025,7 +1370,7 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 		}
 	}
 
-	pluginName := ResolvePluginName(job.PluginID, job.PluginName)
+	pluginName := ResolvePluginName(ctx, job.PluginID, job.PluginName)
 	if pluginName == "" {
 		return fmt.Errorf("no plugin_id in job payload — cannot determine which plugin to execute for ingestion")
 	}
@@ -1729,4 +2074,28 @@ func mapDepsToV2(deps []plugin.RuntimeDependency) []runtimev2.Dependency {
 		}
 	}
 	return out
+}
+
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
+func isScriptLanguage(lang string) bool {
+	switch lang {
+	case "python", "python3", "python2", "node", "nodejs", "javascript", "typescript", "ruby", "bash", "shell":
+		return true
+	default:
+		return false
+	}
 }

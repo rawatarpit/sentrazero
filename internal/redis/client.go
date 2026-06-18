@@ -256,11 +256,11 @@ func (c *Client) Del(ctx context.Context, keys ...string) error {
 	return c.client.Del(ctx, keys...).Err()
 }
 
-func (c *Client) MarkJobProcessed(ctx context.Context, jobID string, ttl time.Duration) (bool, error) {
-	return c.client.SetNX(ctx, "sentra:dedup:"+jobID, "1", ttl).Result()
+func (c *Client) MarkJobProcessed(ctx context.Context, deviceID, jobID string, ttl time.Duration) (bool, error) {
+	return c.client.SetNX(ctx, "sentra:dedup:"+deviceID+":"+jobID, "1", ttl).Result()
 }
 
-func (c *Client) IsJobProcessed(ctx context.Context, jobID string) (bool, error) {
-	exists, err := c.client.Exists(ctx, "sentra:dedup:"+jobID).Result()
+func (c *Client) IsJobProcessed(ctx context.Context, deviceID, jobID string) (bool, error) {
+	exists, err := c.client.Exists(ctx, "sentra:dedup:"+deviceID+":"+jobID).Result()
 	return exists == 1, err
 }

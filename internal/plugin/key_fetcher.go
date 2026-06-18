@@ -35,12 +35,10 @@ type KeyFetcher struct {
 
 func NewKeyFetcher(baseURL, anonKey, deviceToken string, cacheTTL time.Duration) *KeyFetcher {
 	if cacheTTL <= 0 {
-		// Bug #12 fix: Reduced TTL from 1 hour to 5 minutes for faster revocation detection
-		cacheTTL = 5 * time.Minute
+		cacheTTL = 60 * time.Minute
 	}
-	// Cap maximum TTL to prevent stale keys from being accepted too long
-	if cacheTTL > 10*time.Minute {
-		cacheTTL = 10 * time.Minute
+	if cacheTTL > 120*time.Minute {
+		cacheTTL = 120 * time.Minute
 	}
 
 	return &KeyFetcher{

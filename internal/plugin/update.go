@@ -7,13 +7,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"sentra-agent/internal/auth"
 )
 
-func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err error) {
+func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPlugins []DBPlugin, err error) {
 	log.Println("🔄 Checking for plugin updates...")
 
 	baseDir, err := EnsurePluginDir()
@@ -23,17 +24,17 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err e
 
 	device, token, err := auth.LoadIdentity()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to load device identity: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("failed to load device identity: %w", err)
 	}
 
 	cfg, err := loadConfig()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to load config: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
 	remotePlugins, err := FetchPluginsFromAPI(ctx, device.DeviceID, device.OrgID, cfg.BackendURL, cfg.BackendAnonKey, token)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("fetch remote plugins from DB: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("fetch remote plugins from DB: %w", err)
 	}
 
 	remoteMap := map[string]DBPlugin{}
@@ -42,9 +43,11 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err e
 		remoteMap[key] = rp
 	}
 
+	localDirs := map[string]bool{}
+
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("read base plugin dir: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("read base plugin dir: %w", err)
 	}
 
 	for _, e := range entries {
@@ -53,6 +56,7 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err e
 		}
 
 		pluginName := e.Name()
+		localDirs[pluginName] = true
 		platformDir := filepath.Join(baseDir, pluginName)
 
 		platformEntries, err := os.ReadDir(platformDir)
@@ -171,7 +175,37 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, err e
 		}
 	}
 
-	log.Printf("📦 Plugin update summary: Updated=%d | Skipped=%d | Failed=%d", updated, skipped, failed)
+	// Install any plugins that exist remotely but are missing locally
+	for _, rp := range remotePlugins {
+		if !ShouldRunPlugin(device.DeviceID, rp.RolloutPercentage) {
+			continue
+		}
+
+		pluginOS := rp.OS
+		pluginArch := rp.Arch
+		if pluginOS == "" || pluginArch == "" {
+			pluginOS = runtime.GOOS
+			pluginArch = runtime.GOARCH
+		}
+		localName := rp.Name
+
+		if localDirs[localName] {
+			continue
+		}
+
+		installed, err := InstallPlugin(ctx, rp, baseDir)
+		if err != nil {
+			log.Printf("⚠️ Failed to install new plugin %s: %v", rp.Name, err)
+			failed++
+			continue
+		}
+		if installed {
+			newPlugins = append(newPlugins, rp)
+			log.Printf("✅ Installed new plugin: %s (version: %s)", rp.Name, rp.Version)
+		}
+	}
+
+	log.Printf("📦 Plugin update summary: Updated=%d | Skipped=%d | Failed=%d | New=%d", updated, skipped, failed, len(newPlugins))
 	return
 }
 

@@ -36,14 +36,6 @@ func TestGetRemotePathWithSlug_Result(t *testing.T) {
 	}
 }
 
-func TestGetRemotePathWithSlug_Source(t *testing.T) {
-	path := GetRemotePathWithSlug("uuid-1234", "my-dataset", 0, "source")
-	expected := "my-dataset/source"
-	if path != expected {
-		t.Errorf("expected %q, got %q", expected, path)
-	}
-}
-
 func TestGetRemotePathWithSlug_UnknownType(t *testing.T) {
 	path := GetRemotePathWithSlug("uuid-1234", "my-dataset", 0, "unknown")
 	expected := ""

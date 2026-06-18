@@ -447,8 +447,6 @@ func GetRemotePathWithSlug(datasetID, datasetSlug string, chunkIndex int, pathTy
 		base = datasetSlug
 	}
 	switch pathType {
-	case "source":
-		return fmt.Sprintf("%s/source", base)
 	case "chunk":
 		return fmt.Sprintf("%s/chunks/chunk_%d.bin", base, chunkIndex)
 	case "result":

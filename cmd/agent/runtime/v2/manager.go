@@ -41,9 +41,10 @@ type CachedEnvironment struct {
 	LastUsed       time.Time
 	CreatedAt      time.Time
 	Platform       PlatformInfo
-	mu             sync.RWMutex
-	setupCh        chan struct{}
-	readych        chan struct{}
+	mu               sync.RWMutex
+	setupCh          chan struct{}
+	readych          chan struct{}
+	closeReadychOnce sync.Once
 }
 
 type PlatformInfo struct {
@@ -868,8 +869,10 @@ func (rm *RuntimeManager) ExecuteWithMetrics(ctx context.Context, spec RuntimeSp
 
 	rm.envPool.ReleaseEnvironment(env, keepWarm)
 
-	// Signal any waiters that the env is ready
-	close(env.readych)
+	// Signal any waiters that the env is ready (only once)
+	env.closeReadychOnce.Do(func() {
+		close(env.readych)
+	})
 
 	go func() {
 		if env.UseCount >= 3 {

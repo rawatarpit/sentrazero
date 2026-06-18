@@ -8,14 +8,14 @@
 *.pub
 
 # Runtime state
-~/.sentra/
+.sentra/
 
 # Binaries & Large Archives
 bin/
 main
 sentra-agent*
 agent
-server/sentra-agent
+server/
 *.zip
 *.tar.gz
 *.dump

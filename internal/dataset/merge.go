@@ -1,6 +1,3 @@
-//go:build linux || darwin
-// +build linux darwin
-
 package dataset
 
 import (
@@ -21,8 +18,6 @@ import (
 
 	"sentra-agent/internal/obs"
 )
-
-import "syscall"
 
 const (
 	DiskSafetyMarginPercent = 15
@@ -149,15 +144,6 @@ func getCompressionType(path string) CompressionType {
 
 func IsCompressed(path string) bool {
 	return getCompressionType(path) != CompressionNone
-}
-
-func getAvailableDiskSpace(path string) (int64, error) {
-	var stat syscall.Statfs_t
-	err := syscall.Statfs(path, &stat)
-	if err != nil {
-		return 0, err
-	}
-	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
 func calculateRequiredSpace(chunks []ChunkInfo) int64 {
