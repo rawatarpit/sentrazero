@@ -473,56 +473,34 @@ Plugin Developer               Dashboard           Edge Function         Agent
 
 ### Prerequisites
 
-- **Go 1.25+** (to build the agent)
-- **Supabase project** with database and edge functions enabled
-- **PostgreSQL** with pgvector extension
-- **Redis** (optional, for multi-agent coordination)
+- **Go 1.25+** (to build from source)
 - **Python 3.8+** or **Node.js 18+** (if using runtime plugins)
+- **Redis** (optional, for multi-agent Pub/Sub coordination)
 
-### 1. Set Up Supabase Backend
+### 1. Build the Agent
 
 ```bash
-# Clone this repository
 git clone https://github.com/your-org/sentrazero.git
 cd sentrazero
-
-# Link to your Supabase project
-supabase login
-supabase link --project-ref your-project-ref
-
-# Apply database migrations
-supabase db push
-
-# Deploy all edge functions (51 functions)
-supabase functions deploy
+make build
 ```
 
-### 2. Configure Your Organization
+Or download a pre-built binary for your platform from the releases page.
 
-```sql
--- In Supabase SQL Editor:
-INSERT INTO orgs (name, plan) VALUES ('My Org', 'pro');
-
--- Get the claim code for device registration:
-SELECT id, claim_secret FROM orgs WHERE name = 'My Org';
-```
-
-### 3. Build and Run the Agent
+### 2. Run with a Claim Code
 
 ```bash
-# Build the agent binary
-make build
+# Zero-config — agent auto-registers and discovers the backend
+./bin/sentra-agent --claim-code <CLAIM_CODE>
 
-# Run with claim code (zero-config mode)
-./bin/sentra --claim-code YOUR_CLAIM_CODE
-
-# The agent will:
-# 1. Register itself with your organization
-# 2. Receive backend configuration automatically
-# 3. Start processing jobs
+# Or via environment variables:
+export SENTRA_CLAIM_CODE=<claim_code>
+./bin/sentra-agent
 ```
 
-### 4. Deploy with Docker
+The agent will register itself, receive backend configuration, and start processing jobs.
+
+### 3. Deploy with Docker
 
 ```bash
 docker run -d \
@@ -753,7 +731,7 @@ Edge functions use one of the following auth mechanisms:
 
 > **Note:** Several functions use the service_role key directly with no request-level auth validation (see table below). This is a security consideration for production deployments.
 
-### Complete Function List (48 Functions)
+### Complete Function List
 
 #### Device Management (6 functions)
 
@@ -954,25 +932,7 @@ sentrazero/
 │   └── healthcheck/           # Health endpoint
 │       └── server.go        # HTTP health server
 │
-├── supabase/
-│   ├── functions/              # Edge Functions (Deno/TypeScript)
-│   │   ├── _shared/          # Shared utilities
-│   │   │   ├── auth.ts      # Authentication helpers
-│   │   │   ├── cors.ts      # CORS headers
-│   │   │   ├── security.ts  # Security utilities
-│   │   │   └── redis.ts     # Upstash REST API publish (supports https:// + rediss:// URLs)
-│   │   ├── poll_state/      # Consolidated poll + heartbeat endpoint
-│   │   ├── run_pipeline/    # Pipeline activation
-│   │   ├── advance_pipeline/ # Step-transition orchestrator (publishes to Redis on retry/merge/dead-letter)
-│   │   ├── plan_dataset_chunks/ # Chunk planning + job creation (publishes to Redis on job creation)
-│   │   ├── complete_job/    # Job completion handler
-│   │   ├── claim_jobs_for_device/ # Batch job claiming
-│   │   ├── assign_agent_job/ # Single job assignment
-│   │   ├── start_job/       # Job start with lease
-│   │   ├── report_dataset_scan/ # Scan metadata → DB
-│   │   ├── notify_available_device/ # Device heartbeat
-│   │   └── ...             # (48 functions total)
-│   └── migrations/           # SQL migrations
+├── supabase/ (hosted on Supabase, not in repo)
 │
 ├── plugins/                    # Pipeline plugin manifests and scripts
 │   ├── scrape/               # URL scraping plugin
@@ -1550,29 +1510,11 @@ spec:
             cpu: "2"
 ```
 
-### Supabase Edge Functions Deployment
-
-```bash
-# Deploy all functions
-supabase functions deploy
-
-# Deploy specific function
-supabase functions deploy agent_stream
-
-# Set secrets
-supabase secrets set CRON_SECRET=your-secret
-supabase secrets set PLATFORM_SIGNING_PUBLIC_KEY_B64=base64-key
-```
-
 ---
 
 ## Testing
 
-See [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) for comprehensive testing.
-
-See [USER_FLOW_TESTING.md](./USER_FLOW_TESTING.md) for user flow tests.
-
-### Running Existing Tests
+### Running Tests
 
 ```bash
 # Go unit tests
@@ -1742,23 +1684,11 @@ Part of the SentraZero Compute Platform.
 
 ---
 
-## Additional Documentation
-
-- [PRODUCTION_READINESS_CHECKLIST.md](./PRODUCTION_READINESS_CHECKLIST.md) - Comprehensive testing checklist
-- [USER_FLOW_TESTING.md](./USER_FLOW_TESTING.md) - End-to-end user flow tests
-- [DASHBOARD_SPECIFICATION.md](./DASHBOARD_SPECIFICATION.md) - Dashboard design & wiring
-
----
-
 **Built with:**
 - Go 1.25+
 - Supabase (PostgreSQL + Edge Functions + Vault + Realtime)
 - Deno (Edge Functions runtime)
 - pgvector (Vector similarity search)
 - Redis (Optional coordination)
-
-**Additional Documentation:**
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — End-to-end flow with two-tier chunking design
-- [TESTING_FLOW.md](./TESTING_FLOW.md) — Detailed phase-by-phase testing guide
 
 **Last Updated:** 2026-06-18
