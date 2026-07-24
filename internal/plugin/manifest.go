@@ -56,4 +56,8 @@ type PluginResources struct {
 
 	// Wall-clock execution timeout (REQUIRED)
 	TimeoutSeconds int64 `json:"timeout_seconds"`
+
+	// GPU requirement (optional)
+	RequiresGPU bool  `json:"requires_gpu,omitempty"`
+	GPUMemoryMB int64 `json:"gpu_memory_mb,omitempty"`
 }

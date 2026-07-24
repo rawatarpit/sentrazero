@@ -1,0 +1,539 @@
+╔══════════════════════════════════════════════════════╗
+║            RISE OTB — From Manual to Machine         ║
+║  How 4 small programs replace 20+ people doing       ║
+║  repetitive product-data work                        ║
+╚══════════════════════════════════════════════════════╝
+
+
+────────────────────────────────────────────────────
+  1. WHAT IS RISE OTB?
+────────────────────────────────────────────────────
+
+  RISE OTB (Open To Buy) is a retail workflow that
+  Walmart buyers use before approving a new product.
+  It answers three questions:
+
+    [1] "Is this product data correct?"
+        → Compare supplier specs against Walmart's
+          catalog (Part I — Validation & Comparison)
+
+    [2] "Where else is this product sold?"
+        → Search Amazon, Target, eBay etc. to see
+          if the product already has a market
+          (Part II — Coverage)
+
+    [3] "Do we already have this product?"
+        → Find duplicates in the catalog by
+          matching title, UPC, brand, etc.
+          (Part III — Deduplication)
+
+
+────────────────────────────────────────────────────
+  2. THE MANUAL WAY (How It's Done Today)
+────────────────────────────────────────────────────
+
+  Right now ~20+ employees do these three parts by
+  hand. Each part is a separate team with its own
+  spreadsheets, browser tabs, and judgment calls.
+
+  ┌─────────────────────────────────────────────────┐
+  │ PART I — Validation & Comparison  (7 people)     │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  Step 1:  Open Walmart product page.             │
+  │  Step 2:  Copy product title.                    │
+  │  Step 3:  Open supplier's product page.          │
+  │  Step 4:  Compare titles side-by-side.           │
+  │  Step 5:  Check UPC matches.                     │
+  │  Step 6:  Check price matches.                   │
+  │  Step 7:  Check GTIN matches.                    │
+  │  Step 8:  Mark pass/fail in spreadsheet.         │
+  │  Step 9:  Move to next product.                 │
+  │                                                   │
+  │  The problem:                                    │
+  │  • ~500 products per person per day max         │
+  │  • Eyes get tired → mistakes creep in           │
+  │  • Spreadsheet formats differ person-to-person   │
+  │  • No audit trail for why something passed      │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────┐
+  │ PART II — Coverage  (7 people)                   │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  Step 1:  Copy Walmart product name.             │
+  │  Step 2:  Go to Amazon.com.                      │
+  │  Step 3:  Paste name, press search.              │
+  │  Step 4:  Read results. Is this the same         │
+  │           product? Scroll. Compare. Decide.      │
+  │  Step 5:  Copy URL if yes, skip if no.           │
+  │  Step 6:  Go to Target.com. Repeat steps 3-5.    │
+  │  Step 7:  Go to eBay.com. Repeat.               │
+  │  Step 8:  Go to next product.                   │
+  │                                                   │
+  │  The problem:                                    │
+  │  • 8 marketplaces × 500 products = 4000         │
+  │    searches per person per day                   │
+  │  • Most products aren't found → wasted clicks    │
+  │  • Hard to stay consistent on "is this a match?" │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────┐
+  │ PART III — Deduplication  (6 people)             │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  Step 1:  Look at product list.                  │
+  │  Step 2:  See two rows that look similar.        │
+  │  Step 3:  Check title — similar but not exact.   │
+  │  Step 4:  Check UPC — missing in one row.        │
+  │  Step 5:  Check brand — same brand.              │
+  │  Step 6:  Use judgment: duplicate or not?        │
+  │  Step 7:  Mark or skip. Move to next pair.      │
+  │                                                   │
+  │  The problem:                                    │
+  │  • Human judgment varies person-to-person        │
+  │  • Impossible to check all N×N pairs for         │
+  │    a large catalog                               │
+  │  • Duplicates slip through → "we'll get it       │
+  │    later" → never get it                        │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────
+  3. THE FIX: 4 Plugins
+────────────────────────────────────────────────────
+
+  Each "plugin" is a small program (100-400 lines)
+  that does one job. They pass data as CSV files
+  — no database, no server, just files on disk.
+
+
+  ┌─────────────────────────────────────────────────┐
+  │         PIPELINE (How they chain together)       │
+  │                                                   │
+  │    ┌──────────┐    ┌──────────┐                  │
+  │    │ dedup.py │───►│scrape.py │                  │
+  │    └──────────┘    └────┬─────┘                  │
+  │                         │                        │
+  │                  ┌──────▼───────┐                │
+  │                  │  coverage.py  │               │
+  │                  └──────┬───────┘                │
+  │                         │                        │
+  │                  ┌──────▼───────┐                │
+  │                  │  compare.py  │               │
+  │                  └──────┬───────┘                │
+  │                         │                        │
+  │                  ┌──────▼───────┐                │
+  │                  │  Final CSV   │                │
+  │                  └──────────────┘                │
+  │                                                   │
+  │  Each step reads the previous step's output.     │
+  │  If any step fails, the pipeline stops.          │
+  └─────────────────────────────────────────────────┘
+
+
+  ┌─────────────────────────────────────────────────┐
+  │ PLUGIN 1: dedup.py                               │
+  │ Replaces Part III — 6 people                     │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  WHAT IT DOES:                                    │
+  │  Reads all rows, groups similar ones together.    │
+  │  If two rows have the same UPC → exact match.    │
+  │  If titles are 90% similar → possible match.     │
+  │  Marks all duplicates in the output.             │
+  │                                                   │
+  │  HOW IT WORKS (simplified):                      │
+  │  1. Sort by UPC/GTIN prefix (= blocking).        │
+  │     Only compare products in the same block.     │
+  │     → Avoids O(n²) across the whole catalog.     │
+  │  2. For each pair in a block:                    │
+  │     - Compare each field (title, brand, UPC...)  │
+  │     - Weighted average = similarity score        │
+  │     - If score > threshold → mark as duplicate   │
+  │  3. Union-Find groups connected duplicates       │
+  │     together (if A≈B and B≈C, all three grouped) │
+  │                                                   │
+  │  EXAMPLE:                                         │
+  │  Input rows:                                      │
+  │    "Nike Air Max"      UPC: 123456               │
+  │    "Nike Air Max 270"  UPC: (missing)            │
+  │    "Adidas Ultraboost" UPC: 789012               │
+  │                                                   │
+  │  Output:                                          │
+  │    Row 1 & Row 2 → 92% similar → DUPLICATE       │
+  │    Row 3          → unique                       │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+  ┌─────────────────────────────────────────────────┐
+  │ PLUGIN 2: scrape.py                              │
+  │ Data collector — shared by all parts             │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  WHAT IT DOES:                                    │
+  │  Takes a list of URLs. Visits each one.           │
+  │  Reads the page (like a browser would).           │
+  │  Extracts: title, brand, UPC, price, images,      │
+  │  description, size, color.                        │
+  │                                                   │
+  │  HOW IT WORKS (simplified):                      │
+  │  1. Detect which store the URL belongs to         │
+  │     (Walmart uses different HTML than Amazon)     │
+  │  2. Fetch the page with retries if it fails       │
+  │  3. Extract structured data from the page:        │
+  │     - JSON-LD (hidden product data in HTML)       │
+  │     - HTML selectors (title tags, price spans)    │
+  │  4. Save everything as columns in the CSV         │
+  │                                                   │
+  │  EXAMPLE:                                         │
+  │  Input:                                           │
+  │    walmart_url = https://walmart.com/ip/ABC123   │
+  │                                                   │
+  │  Output columns added:                            │
+  │    walmart_url_title       "Nike Air Max 270"    │
+  │    walmart_url_brand       "Nike"                │
+  │    walmart_url_upc         "123456789012"        │
+  │    walmart_url_price       129.99                │
+  │    walmart_url_attributes_json  {full data dump} │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+  ┌─────────────────────────────────────────────────┐
+  │ PLUGIN 3: coverage.py                            │
+  │ Replaces Part II — 7 people                      │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  WHAT IT DOES:                                    │
+  │  For each Walmart product, searches up to 8      │
+  │  other marketplaces. Reports: "found on Amazon    │
+  │  (92% match)" or "not found anywhere."           │
+  │                                                   │
+  │  HOW IT WORKS (simplified):                      │
+  │  1. Build search query from product data          │
+  │     (by UPC for precision, or title for coverage) │
+  │  2. Send search to each marketplace's URL         │
+  │     (amazon.com/s?k=..., target.com/s?... etc.)   │
+  │  3. Parse the search results page                 │
+  │  4. Score each result by title+brand similarity   │
+  │  5. Keep the best match (0-100%)                 │
+  │                                                   │
+  │  EXAMPLE:                                         │
+  │  Input product: "Nike Air Max 270" (UPC xyz)     │
+  │                                                   │
+  │  Output:                                          │
+  │    Amazon:     Found  | Score: 95% | URL: ...    │
+  │    Target:     Found  | Score: 88% | URL: ...    │
+  │    eBay:       Found  | Score: 91% | URL: ...    │
+  │    Best Buy:   Not found                          │
+  │    Flipkart:   Not found                          │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+  ┌─────────────────────────────────────────────────┐
+  │ PLUGIN 4: compare.py                             │
+  │ Replaces Part I — 7 people                       │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  WHAT IT DOES:                                    │
+  │  Takes two products (Walmart vs supplier).        │
+  │  Compares every field side-by-side.               │
+  │  Gives a "match score" 0-100%.                   │
+  │                                                   │
+  │  HOW IT WORKS (simplified):                      │
+  │  1. Read scraped attributes for both products     │
+  │  2. For each field in compare_fields:            │
+  │     - UPC: exact match (with zero-padding fix)   │
+  │     - GTIN: cross-match with UPC                 │
+  │     - Title: fuzzy similarity (token sort)       │
+  │     - Brand: exact + abbreviation check          │
+  │     - Price: within 10% = partial match          │
+  │     - Size/Color: normalized string compare      │
+  │  3. Weight each field and sum to final score     │
+  │                                                   │
+  │  EXAMPLE:                                         │
+  │  Walmart:  "Nike Air Max 270"  $129.99  123456   │
+  │  Supplier: "Nike Air Max 270"  $134.99  123456   │
+  │                                                   │
+  │  UPC:      exact match → 100% × weight 0.4      │
+  │  Title:    98% match    →  98% × weight 0.3      │
+  │  Price:    96% match    →  96% × weight 0.2      │
+  │  Brand:    exact match → 100% × weight 0.1      │
+  │  ─────────────────────────────────────           │
+  │  FINAL SCORE:  99%                                │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────
+  4. PIPELINE — How They Run Together
+────────────────────────────────────────────────────
+
+  The pipeline.py script is the conductor. It runs
+  plugins one after another, feeding each step's
+  output into the next.
+
+  BUILT-IN COMPOSITIONS:
+
+    pipeline.py scrape            → scrape only
+    pipeline.py compare           → scrape → compare
+    pipeline.py coverage_amazon   → scrape → search Amazon
+    pipeline.py coverage_all      → scrape → search all
+    pipeline.py dedup             → dedup only
+    pipeline.py scrape_dedup      → scrape → dedup
+    pipeline.py full              → dedup → scrape →
+                                    coverage_all → compare
+
+  You can also compose custom pipelines by editing
+  the COMPOSITIONS dict in pipeline.py.
+
+  Each step:
+    • Reads the previous step's CSV
+    • Processes every row
+    • Writes a new CSV with added columns
+    • If a step fails, the pipeline stops and prints
+      the error
+
+  END-TO-END EXAMPLE:
+
+    Input:  10,000 products (raw CSV)
+    Step 1: dedup     → removes 1,200 duplicates
+    Step 2: scrape    → fetches attributes from URLs
+    Step 3: coverage  → searches 8 marketplaces
+    Step 4: compare   → validates against supplier data
+
+    Output: enriched CSV with validation results,
+            coverage findings, and dedup status.
+    Time:   a few hours (vs a week for 20 people)
+
+
+────────────────────────────────────────────────────
+  5. CONFIGURATION REFERENCE
+────────────────────────────────────────────────────
+
+  Every plugin can be customized through its payload
+  — a JSON object that tells the plugin what to do.
+
+  ┌─────────────────────────────────────────────────┐
+  │ dedup.py — Configuration                        │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  FIELD           DEFAULT         WHAT IT DOES    │
+  │  ─────────────────────────────────────────────── │
+  │  match_fields    ["upc","gtin",  Which columns    │
+  │                   "brand",       to compare for   │
+  │                   "title",       similarity       │
+  │                   "description"]                  │
+  │                                                   │
+  │  field_weights   (auto from      How much each    │
+  │                   match_fields)  field matters    │
+  │                                  (auto-normalized │
+  │                                  to sum to 1.0)  │
+  │                                                   │
+  │  similarity_      0.80           How similar two  │
+  │  threshold                       rows must be     │
+  │                                  (0.0 = any match │
+  │                                  1.0 = exact)    │
+  │                                                   │
+  │  id_column       "product_id"    Column used as   │
+  │                                  unique ID        │
+  │                                                   │
+  │  field_mapping   {}              Rename source    │
+  │                                  columns to       │
+  │                                  standard names   │
+  │                                  e.g. {"walmart_  │
+  │                                   upc":"upc"}    │
+  │                                                   │
+  │  EXAMPLE PAYLOAD:                                 │
+  │  {                                                │
+  │    "match_fields": ["title"],                     │
+  │    "field_weights": {"title": 1.0},               │
+  │    "similarity_threshold": 0.90,                  │
+  │    "id_column": "product_id"                     │
+  │  }                                                │
+  │  → Deduplicate by title only, high threshold     │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────┐
+  │ scrape.py — Configuration                       │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  FIELD           DEFAULT         WHAT IT DOES    │
+  │  ─────────────────────────────────────────────── │
+  │  url_columns     ["walmart_url", Which CSV        │
+  │                   "amazon_url",  columns contain  │
+  │                   ...]           URLs to scrape   │
+  │                                                   │
+  │  platforms       {"walmart_url": Which scraper    │
+  │                   "walmart", ...} to use for each │
+  │                                  URL column       │
+  │                                                   │
+  │  attributes      ["title",       Which fields to  │
+  │                   "brand",       extract and      │
+  │                   "upc",         save as flat     │
+  │                   "price", ...]  columns          │
+  │                                  (fewer = smaller │
+  │                                   output CSV)    │
+  │                                                   │
+  │  delay_seconds   0.5             Pause between    │
+  │                                  requests (avoid  │
+  │                                  rate limiting)   │
+  │                                                   │
+  │  request_timeout 30              Max seconds to   │
+  │                                  wait per page    │
+  │                                                   │
+  │  mock_mode       false           Skip real HTTP,  │
+  │                                  return fake data │
+  │                                  (for testing)    │
+  │                                                   │
+  │  EXAMPLE PAYLOAD:                                 │
+  │  {                                                │
+  │    "url_columns": ["walmart_url"],                │
+  │    "platforms": {"walmart_url": "walmart"},       │
+  │    "attributes": ["title", "brand", "price"],     │
+  │    "delay_seconds": 1.0                          │
+  │  }                                                │
+  │  → Scrape only title/brand/price from Walmart    │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────┐
+  │ coverage.py — Configuration                     │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  FIELD           DEFAULT         WHAT IT DOES    │
+  │  ─────────────────────────────────────────────── │
+  │  mode            "amazon"        "amazon" = only │
+  │                                  Amazon search   │
+  │                                  "all" = 8       │
+  │                                  marketplaces    │
+  │                                                   │
+  │  search_fields   ["upc",         Which product   │
+  │                   "title",       fields to use   │
+  │                   "brand"]       for building    │
+  │                                  search queries  │
+  │                                                   │
+  │  walmart_url_    "walmart_url"   Column with     │
+  │  column                          Walmart URL     │
+  │                                                   │
+  │  walmart_        "walmart_url_   Column with     │
+  │  attributes_     attributes_     scraped Walmart  │
+  │  column          json"           attributes       │
+  │                                                   │
+  │  id_column       "walmart_       Column with      │
+  │                   product_id"   product ID        │
+  │                                                   │
+  │  delay_seconds   0.5             Pause between    │
+  │                                  marketplace      │
+  │                                  requests         │
+  │                                                   │
+  │  EXAMPLE PAYLOAD:                                 │
+  │  {                                                │
+  │    "mode": "amazon",                             │
+  │    "search_fields": ["upc"]                      │
+  │  }                                                │
+  │  → Search Amazon by UPC only (fast, exact)       │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────┐
+  │ compare.py — Configuration                     │
+  ├─────────────────────────────────────────────────┤
+  │                                                   │
+  │  FIELD           DEFAULT         WHAT IT DOES    │
+  │  ─────────────────────────────────────────────── │
+  │  compare_fields  ["upc","gtin",  Which attributes │
+  │                   "brand",       to compare       │
+  │                   "title",       between the two  │
+  │                   "description", products         │
+  │                   "price",                        │
+  │                   "size",                         │
+  │                   "color",                        │
+  │                   "pack_count",                   │
+  │                   "quantity"]                     │
+  │                                                   │
+  │  weights         (auto-equal     Custom weights   │
+  │                   if omitted)    for each field   │
+  │                                  (auto-normalized │
+  │                                  to sum to 1.0)  │
+  │                                                   │
+  │  url_column1     "walmart_url"   Left product's   │
+  │                                  URL column       │
+  │                                                   │
+  │  url_column2     "comparison_"   Right product's  │
+  │                   url"          URL column        │
+  │                                                   │
+  │  attributes_     "walmart_url_   Column with      │
+  │  column1         attributes_json" scraped attrs   │
+  │                                  for left product │
+  │                                                   │
+  │  attributes_     "comparison_    Column with      │
+  │  column2         url_attributes_ scraped attrs    │
+  │                  json"           for right product│
+  │                                                   │
+  │  EXAMPLE PAYLOAD:                                 │
+  │  {                                                │
+  │    "compare_fields": ["upc", "title", "price"],   │
+  │    "weights": {"upc": 0.5, "title": 0.3,         │
+  │                "price": 0.2}                     │
+  │  }                                                │
+  │  → Compare UPC/title/price with custom weights   │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────
+  6. BENEFITS SUMMARY
+────────────────────────────────────────────────────
+
+  ┌─────────────────────────────────────────────────┐
+  │                                                   │
+  │   BEFORE (Manual)         AFTER (Plugins)        │
+  │   ─────────────────────────────────────────────  │
+  │   20+ employees           1 machine               │
+  │   ~500 products/day       10,000+ products/day   │
+  │   Fatigue → mistakes      Consistent every run   │
+  │   Subjective decisions    Configurable rules     │
+  │   Hard to scale up        Add more machines      │
+  │   No audit trail          Every run logged       │
+  │   Employee turnover       Configuration in code  │
+  │   → retrain               → just re-run          │
+  │                                                   │
+  │   Bottom line:                                    │
+  │   The same work that takes 20 people a week      │
+  │   can be done in a few hours. Rules are          │
+  │   transparent, results are repeatable, and       │
+  │   scaling means adding hardware — not hiring.    │
+  │                                                   │
+  └─────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────
+  READY TO DEPLOY?
+────────────────────────────────────────────────────
+
+  Each plugin is a single Python file with zero
+  external dependencies beyond pandas + requests.
+  Install once, run anywhere — laptop, server, or
+  SentraZero agent fleet.
+
+  For SentraZero deployment:
+  • Each plugin wraps directly as a SentraZero
+    sandboxed plugin (Ed25519 signed, auto-updated)
+  • pipeline.py steps become SentraZero pipeline
+    compositions with automatic chunking and merge
+  • Device matching routes scrape-heavy jobs to
+    machines with good network, compute-heavy jobs
+    to machines with many cores
+
+  Quick start:
+    python3 pipeline.py compare input.csv
+    python3 pipeline.py coverage_all input.csv
+    python3 pipeline.py full input.csv

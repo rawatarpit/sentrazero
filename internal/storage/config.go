@@ -136,10 +136,17 @@ type SharedMountBackend struct {
 	mountBasePath string
 }
 
+func (b *SharedMountBackend) MountBasePath() string {
+	return b.mountBasePath
+}
+
 func NewSharedMountBackend(mountBasePath string) *SharedMountBackend {
 	if mountBasePath == "" {
-		homeDir, _ := os.UserHomeDir()
-		mountBasePath = filepath.Join(homeDir, "sentra", "data")
+		if mountPath := os.Getenv("SENTRA_MOUNT_PATH"); mountPath != "" {
+			mountBasePath = mountPath
+		} else {
+			mountBasePath = "/data/sentra"
+		}
 	}
 	return &SharedMountBackend{mountBasePath: mountBasePath}
 }
@@ -455,6 +462,17 @@ func GetRemotePathWithSlug(datasetID, datasetSlug string, chunkIndex int, pathTy
 		return fmt.Sprintf("%s_merged.csv", base)
 	}
 	return ""
+}
+
+// GetDatasetSourcePath resolves the correct S3 source path from the dataset record.
+// This ensures S3 paths match the actual source files stored in the bucket, not just
+// the slugified versions that may be used in job payloads.
+func GetDatasetSourcePath(datasetID string) (string, error) {
+	cfg, err := GetConfig()
+	if err != nil {
+		return datasetID, nil
+	}
+	return cfg.GetSourcePath(datasetID), nil
 }
 
 func (s *StorageConfig) GetDatasetPath(datasetID string) string {

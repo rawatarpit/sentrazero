@@ -106,6 +106,13 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 				needsDownload = true
 			}
 
+			// Also re-download if the checksum changed, even if version is the same.
+			// This covers the case where a plugin is patched without a version bump.
+			if !needsDownload && remote.Checksum != "" && local.Checksum != "" && remote.Checksum != local.Checksum {
+				log.Printf("🔄 Plugin %s checksum changed, re-downloading", pluginName)
+				needsDownload = true
+			}
+
 			if needsDownload {
 				if remote.SignedURL == "" {
 					log.Printf("⚠️ Plugin %s has no signed URL, skipping update", pluginName)
@@ -217,9 +224,11 @@ type platformParts struct {
 func splitPlatformKey(key string) *platformParts {
 	knownOS := map[string]bool{
 		"linux": true, "darwin": true, "windows": true, "freebsd": true, "netbsd": true, "openbsd": true,
+		"any": true,
 	}
 	knownArch := map[string]bool{
 		"amd64": true, "386": true, "arm64": true, "arm": true, "armv7": true, "ppc64": true, "riscv64": true,
+		"any": true,
 	}
 
 	for _, sep := range []string{"-", "_", "/"} {

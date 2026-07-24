@@ -52,6 +52,9 @@ SentraZero is a **self-hosted distributed compute platform** that enables organi
 | **Vector Similarity Matching** | Smart device-job matching using pgvector (16-dim device vectors) |
 | **Multi-Tenant** | Complete org isolation via PostgreSQL RLS policies |
 | **Storage Agnostic** | Supports S3, GCS, Azure Blob, or local filesystem |
+| **Rich Media Scan** | Auto-detect and extract metadata from CSV, JSON, Parquet, image, video, PDF, audio, and archive files |
+| **GPU-Aware Scheduling** | Devices report GPU availability/memory; GPU-requiring plugins are routed to GPU-capable agents via sandbox GPU device access |
+| **Byte-Range & File Chunking** | Datasets can be chunked by byte range (for large single files) or file-per-chunk (for multi-file collections) in addition to size-based chunking |
 
 ---
 
@@ -82,8 +85,13 @@ Atomic units of work:
 - **Types**: `scan_dataset`, `process` (chunk-level plugin execution), `preprocess` (marker, completes immediately), `merge_dataset` (combines chunk outputs)
 - **Two levels**: Step-level coordination jobs (no `chunk_id`) → immediately completed as markers to unblock pipeline step; Chunk-level processing jobs (with `chunk_id`) → routed to native plugin handler
 - **Lifecycle**: `pending` → `assigned` → `running` → `completed`/`failed` → `dead_letter` (after max retries exhausted)
-- **Lease-based**: Devices acquire leases (default TTL) to prevent duplicate processing; leases verified at both start and completion time
+- **Lease-based**: Devices acquire leases (default TTL) to prevent duplicate processing; leases verified at both start and completion time. GPU heartbeat fields (`gpu_memory_free`, `gpu_utilization`) reported with each heartbeat.
 - **Retry logic**: Automatic retry with exponential backoff (max 3 by default); dead-lettered after exhaustion
+- **Chunk strategies** (`process` jobs): The `ProcessPayload` includes a `ChunkStrategy` field — `size_based` (default), `byte_range`, or `file_per_chunk`. The agent dispatches to the appropriate handler:
+  - `byte_range`: `executeProcessChunkByteRange` — reads a byte-range window of a single source file, routes through the plugin, writes output
+  - `file_per_chunk`: `executeProcessChunkFileList` — processes a list of source files, routing each through the plugin
+  - `size_based`: Legacy handler (`executeProcessChunk`) — reads chunked dataset files
+- **Merge strategies**: Merges use `ConcatMerge` for `byte_range`/`file_per_chunk` datasets (simple concatenation of chunk outputs) vs tree merge for `size_based` datasets
 - **Compound jobs** (not currently active): Multi-step pipeline packed into a single agent_job. Each step has its own `plugin_id` + `config`, steps chain through a local cache dir (`~/.sentra/cache/{execID}/{chunkID}/`), and only the final step's output uploads to S3. The `advance_pipeline` edge function no longer creates compound jobs — it creates per-step agent_jobs instead.
 
 ### 5. Pipelines (`pipeline_templates` + `executions`)
@@ -266,7 +274,7 @@ Device Operator                     Agent Binary                    Supabase
     │                                   │                             │
 ```
 
-### Flow 3: Dataset Processing Pipeline (Two-Tier Chunking)
+### Flow 3: Dataset Processing Pipeline (Rich Media + Byte-Range/File Chunking + GPU Scheduling)
 
 ```
 Data Engineer                  Dashboard              Supabase            Agent
@@ -291,23 +299,55 @@ Data Engineer                  Dashboard              Supabase            Agent
     │                              │                    │  ◄───────────────┤
     │                              │                    │  SSE: job event  │
     │                              │                    │                  │ Run builtin:scan
-    │                              │                    │                  │ Scan files, metadata
+    │                              │                    │                  │ 6 extractors:
+    │                              │                    │                  │ CSV/JSON/Parquet
+    │                              │                    │                  │ + Image (EXIF)
+    │                              │                    │                  │ + Video (ffprobe)
+    │                              │                    │                  │ + PDF (pdfcpu)
+    │                              │                    │                  │ + Audio (id3 tags)
+    │                              │                    │                  │ + Archive (zip/tar)
+    │                              │                    │                  │ + Binary (magic)
     │                              │                    │                  │
     │ 4. Report scan complete     │                    │                  │
     │                              │                    │  ◄───────────────┤
     │                              │                    │ POST /report_     │
     │                              │                    │  dataset_scan    │
     │                              │                    │                  │
-    │    === TIER 1: PRE-CHUNK (Historical, Automatic) ===              │
+    │    === TIER 1: PRE-CHUNK (Historical, File-Aware) ===             │
     │                              │                    │                  │
     │                              │                    │ TRIGGER:          │
     │                              │                    │ auto_progress_   │
     │                              │                    │ after_scan       │
-    │                              │                    │ → SQL: pre_chunk_│
-    │                              │                    │   dataset_smart()│
-    │                              │                    │ Creates chunks   │
-    │                              │                    │ with historical  │
-    │                              │                    │ device hints     │
+    │                              │                    │ → pre_chunk_     │
+    │                              │                    │   dataset edge   │
+    │                              │                    │   function       │
+    │                              │                    │                  │
+    │                              │                    │ pre_chunk_dataset │
+    │                              │                    │ checks file_     │
+    │                              │                    │ manifest:        │
+    │                              │                    │  • [] (empty) →  │
+    │                              │                    │    pre_chunk_    │
+    │                              │                    │    dataset_smart │
+    │                              │                    │    (size_based)  │
+    │                              │                    │  • non-empty →   │
+    │                              │                    │    pre_chunk_    │
+    │                              │                    │    filebased     │
+    │                              │                    │    (byte_range / │
+    │                              │                    │     file_per_    │
+    │                              │                    │     chunk)       │
+    │                              │                    │                  │
+    │                              │                    │ For multi-file    │
+    │                              │                    │ datasets: chunks │
+    │                              │                    │ created as file_ │
+    │                              │                    │ per_chunk with   │
+    │                              │                    │ SourceFilePath   │
+    │                              │                    │ + FileList       │
+    │                              │                    │                  │
+    │                              │                    │ For large single │
+    │                              │                    │ files: byte_     │
+    │                              │                    │ range strategy   │
+    │                              │                    │ with ByteRange-  │
+    │                              │                    │ Start/End        │
     │                              │                    │ No agent_jobs    │
     │                              │                    │ created          │
     │                              │                    │                  │
@@ -318,30 +358,53 @@ Data Engineer                  Dashboard              Supabase            Agent
     │                              │                    │ → 1 agent_job   │
     │                              │                    │   per step       │
     │                              │                    │                  │
-    │    === TIER 2: LIVE RESIZE (Pipeline-Time) ===                    │
+    │    === TIER 2: LIVE RESIZE (Pipeline-Time, GPU-Aware) ===          │
     │                              │                    │                  │
     │                              │                    │ plan_dataset_    │
-    │                              │                    │ chunks()         │
-    │                              │                    │ → SQL: resize_   │
-    │                              │                    │   chunks_for_    │
-    │                              │                    │   pipeline()     │
-    │                              │                    │ Reassigns chunks │
-    │                              │                    │ using LIVE CPU%  │
-    │                              │                    │ memory_free_gb   │
-    │                              │                    │ available_disk_gb│
-    │                              │                    │ active_jobs      │
+    │                              │                    │ chunks calls     │
+    │                              │                    │ pre_chunk_       │
+    │                              │                    │ dataset edge fn  │
+    │                              │                    │ with chunk_strat │
+    │                              │                    │ passthrough      │
+    │                              │                    │                  │
+    │                              │                    │ GPU bonus:       │
+    │                              │                    │ pre_chunk_       │
+    │                              │                    │ dataset_smart    │
+    │                              │                    │ weights GPU-     │
+    │                              │                    │ capable devices  │
+    │                              │                    │ 1.5x when        │
+    │                              │                    │ selecting agent  │
+    │                              │                    │                  │
+    │                              │                    │ Byte-range disk  │
+    │                              │                    │ check: claim_    │
+    │                              │                    │ jobs_for_device   │
+    │                              │                    │ skips byte_range │
+    │                              │                    │ chunks when      │
+    │                              │                    │ free disk ≤ 10GB │
     │                              │                    │                  │
     │ 6. Agent claims step job    │                    │                  │
     │                              │                    │  ◄───────────────┤
     │                              │                    │ claim_jobs_for_  │
-    │                              │                    │ device (no       │
-    │                              │                    │ rechunk)         │
+    │                              │                    │ device           │
+    │                              │                    │ (byte_range disk │
+    │                              │                    │  guard enabled)  │
     │                              │                    │                  │
-    │ 7. Agent processes chunks   │                    │                  │
-    │                              │                    │                  │ Reads chunks where
-    │                              │                    │                  │ assigned_device_id
-    │                              │                    │                  │ = device_id
-    │                              │                    │                  │ Process via plugin
+    │ 7. Agent dispatches chunk   │                    │                  │
+    │   by ChunkStrategy          │                    │                  │
+    │                              │                    │                  │
+    │                              │                    │                  │ executeProcessChunk
+    │                              │                    │                  │ ← ChunkStrategy?
+    │                              │                    │                  │
+    │                              │                    │                  │ size_based →
+    │                              │                    │                  │   executeProcessChunk
+    │                              │                    │                  │ byte_range →
+    │                              │                    │                  │   executeProcessChunk
+    │                              │                    │                  │   ByteRange (read
+    │                              │                    │                  │   window → plugin)
+    │                              │                    │                  │ file_per_chunk →
+    │                              │                    │                  │   executeProcessChunk
+    │                              │                    │                  │   FileList (iterate
+    │                              │                    │                  │   files → plugin)
     │                              │                    │                  │
     │ 8. Step completes → advance │                    │                  │
     │                              │                    │ advance_pipeline │
@@ -351,11 +414,14 @@ Data Engineer                  Dashboard              Supabase            Agent
     │                              │                    │                  │
     │ 9. All steps done → merge   │                    │                  │
     │                              │                    │  ◄───────────────┤
-    │                              │                    │                  │ Execute merge step
-    │                              │                    │                  │ Output final data
+    │                              │                    │                  │ ConcatMerge for
+    │                              │                    │                  │ byte_range/file_
+    │                              │                    │                  │ per_chunk
+    │                              │                    │                  │ TreeMerge for
+    │                              │                    │                  │ size_based
     │                              │                    │                  │
     │ 10. Pipeline complete       │◄───────────────────┤                  │
-    │                              │ dataset → 'ready'  │                  │
+    │                              │ dataset → 'merged' │                  │
     │                              │                    │                  │
     │ 11. Download result         │                    │                  │
     ├────────────────────────────►│                    │                  │
@@ -367,7 +433,7 @@ Data Engineer                  Dashboard              Supabase            Agent
     │◄────────────────────────────┤                    │                  │
     │ Receive download URL        │                    │                  │
     │                              │                    │                  │
-```
+    ```
 
 ### Flow 4: Plugin Execution
 
@@ -572,7 +638,14 @@ org_plugins ──── (∞) plugin_execution_history
 | `embedding` | vector(16) | 16-dim profile vector |
 | `total_cpu_cores` | integer | Total CPU cores |
 | `total_memory_gb` | numeric | Total RAM |
-| `gpu_available` | boolean | GPU availability |
+| `gpu_available` | boolean | GPU availability (Phase 3) |
+| `gpu_model` | text | GPU model name (e.g. "NVIDIA A100") |
+| `gpu_memory_total_gb` | numeric | Total GPU memory in GB |
+| `gpu_memory_free_gb` | numeric | Free GPU memory in GB |
+| `cuda_version` | text | CUDA version (e.g. "12.4") |
+| `gpu_driver_version` | text | GPU driver version |
+| `gpu_capability_score` | numeric | GPU compute capability (0-10) |
+| `merge_capable` | boolean | Can perform dataset merges |
 | `last_heartbeat` | timestamptz | Last heartbeat |
 
 #### `datasets` - Dataset Registry
@@ -586,8 +659,15 @@ org_plugins ──── (∞) plugin_execution_history
 | `total_size_gb` | double precision | Total size |
 | `file_count` | bigint | Number of files |
 | `source_path` | text | Source location |
-| `dataset_checksum` | text | Integrity checksum |
-| `merge_strategy` | text | `auto`, `sequential`, `tree` |
+| `dataset_slug` | text | URL-friendly slug (auto-generated from name) |
+| `chunk_size_target_gb` | double precision | Target chunk size in GB (default: 2) |
+| `file_manifest` | jsonb | File listing for multi-file datasets — used by `pre_chunk_filebased` to determine byte_range vs file_per_chunk strategy |
+| `detected_columns` | text[] | Column names detected during scan |
+| `scan_completed` | boolean | Scan completion flag |
+| `disk_space_check_enabled` | boolean | Enable disk space validation before byte_range chunk assignment |
+| `merge_strategy` | text | `auto`, `sequential`, `tree`, `byte_range`, `file_per_chunk` |
+| `metadata` | jsonb | Scan metadata (file types, schema, sample rows) |
+| `storage_config_id` | uuid (FK) | Storage backend configuration |
 
 #### `agent_jobs` - Main Job Queue
 | Column | Type | Description |
@@ -597,26 +677,37 @@ org_plugins ──── (∞) plugin_execution_history
 | `agent_id` | uuid (FK) | Assigned device |
 | `job_type` | text | `scan_dataset`, `process`, `merge_dataset`, etc. |
 | `status` | text | `pending`, `assigned`, `running`, `completed`, `failed` |
-| `payload` | jsonb | Job configuration |
+| `payload` | jsonb | Job configuration (includes `ChunkStrategy`, `ByteRangeStart/End`, `FileList`, `SourceFilePath` for process jobs) |
 | `lease_expires_at` | timestamptz | Lease expiration |
 | `execution_id` | uuid (FK) | Pipeline execution |
+| `execution_step_id` | uuid (FK) | Pipeline execution step |
 | `execution_mode` | text | `native`, `docker`, `runtime` |
 | `runtime_type` | text | `python`, `node`, `native` |
 | `retry_count` | integer | Current retry attempt |
 | `max_retries` | integer | Max retries (default: 3) |
 | `failure_classification` | text | `infra_error`, `dependency_error`, `user_code_error`, `timeout_error`, `memory_error` |
+| `heartbeat_at` | timestamptz | Last job execution heartbeat |
+| `gpu_memory_free_mb` | integer | Free GPU memory at last heartbeat (Phase 3) |
+| `gpu_utilization_percent` | numeric | GPU utilization at last heartbeat (Phase 3) |
+| `error` | text | Current error message |
+| `last_error` | text | Previous error message |
+| `agent_id` | uuid (FK) | Device currently processing this job |
 
 #### `batch_chunks` - Dataset Chunks
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | uuid (PK) | Chunk ID |
 | `dataset_id` | uuid (FK) | Parent dataset |
+| `org_id` | uuid (FK) | Organization |
 | `chunk_index` | integer | Chunk sequence number |
 | `status` | text | `pending`, `processing`, `processed`, `failed`, `skipped` |
 | `embedding` | vector(384) | 384-dim embedding |
 | `chunk_vector` | vector(16) | 16-dim for device matching |
 | `chunk_size_gb` | double precision | Chunk size |
 | `assigned_device_id` | uuid (FK) | Processing device |
+| `payload` | jsonb | Chunk strategy payload: `{chunk_strategy, byte_range_start, byte_range_end, file_list, source_file_path}` |
+| `merged_in` | boolean | Whether chunk output was merged into final dataset |
+| `created_by` | uuid (FK) | Agent that created this chunk |
 
 #### `pipeline_templates` - Reusable Pipelines
 | Column | Type | Description |
@@ -666,26 +757,32 @@ org_plugins ──── (∞) plugin_execution_history
 #### Device Management
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `select_best_device` | `(p_org_id, p_job_type, p_chunk_vector)` → uuid | Find best device |
+| `select_best_device` | `(p_org_id, p_job_type, p_chunk_vector)` → uuid | Find best device (Phase 3: applies GPU bonus — GPU-capable devices weighted 1.5x) |
 | `match_best_device` | `(p_org_id, p_chunk_vector, p_job_type)` → table | Device ranking with scores |
 | `recalcualte_device_vector` | `(p_device_id)` → void | Recalculate profile vector |
 | `record_benchmark` | records benchmark | Update device score |
+| `claim_jobs_for_device` | `(p_device_id, p_org_id, p_limit, p_lease_ttl)` → table | Batch claim jobs — **Phase 3**: skips byte_range chunks when device `available_disk_gb ≤ 10 GB` |
 
 #### Pipeline & Chunking
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `pre_chunk_dataset_smart` | `(p_dataset_id, p_org_id)` → jsonb | Tier 1: Create chunks with historical device hints |
+| `activate_pipeline` | `(p_template_id, p_dataset_id, p_org_id)` → jsonb | Start pipeline execution |
+| `pre_chunk_dataset_smart` | `(p_dataset_id, p_chunk_size_target)` → void | **Phase 2**: Create chunks with size-based strategy + GPU bonus for device selection |
+| `pre_chunk_filebased` | `(p_dataset_id)` → void | **Phase 2**: Create chunks using file_manifest — chooses byte_range or file_per_chunk automatically |
+| `pre_chunk_dataset_smart_with_hints` | `(p_dataset_id, p_chunk_size_target, p_org_id)` → void | Pre-chunk with explicit device capacity hints |
 | `resize_chunks_for_pipeline` | `(p_dataset_id, p_org_id, p_job_type)` → jsonb | Tier 2: Reassign chunks using live device metrics |
 | `rechunk_for_device` | `(p_dataset_id, p_device_id, p_org_id, p_job_type)` → jsonb | Legacy — no longer called (deprecated) |
-| `activate_pipeline` | `(p_template_id, p_dataset_id, p_org_id)` → jsonb | Start pipeline execution |
 | `get_execution_detail` | `(p_execution_id)` → table | Execution details |
 
 ### Active Triggers
 
 | Trigger | Table | Event | Function | Purpose |
 |---------|-------|-------|----------|---------|
-| `trg_create_scan_job_on_insert` | `datasets` | AFTER INSERT | `create_scan_job_on_dataset_insert` | Creates scan agent_job automatically |
-| `trg_auto_progress_after_scan` | `datasets` | AFTER UPDATE OF status | `auto_progress_after_scan` | Calls pre_chunk_dataset_smart() on →'scanned' |
+| `trg_create_scan_job_on_insert` | `datasets` | AFTER INSERT | `create_scan_job_on_dataset_insert` | Creates scan agent_job automatically on dataset creation |
+| `trg_notify_agent_on_dataset_register` | `datasets` | AFTER INSERT | `notify_agent_on_dataset_register` | **Phase 2**: Creates scan job + updates status to `scanning` (runs alongside `trg_create_scan_job_on_insert`) |
+| `trg_handle_dataset_scan_trigger` | `datasets` | AFTER INSERT OR UPDATE OF status | `handle_dataset_scan_trigger` | **Phase 2**: Scan job creation with duplicate detection |
+| `trg_auto_progress_after_scan` | `datasets` | AFTER UPDATE OF status | `auto_progress_after_scan` | **Phase 2**: Calls `pre_chunk_dataset_smart()` when status → `scanned`, then `pg_notify('dataset_scanned', ...)` |
+| `trigger_generate_dataset_slug` | `datasets` | BEFORE INSERT | `generate_dataset_slug` | Auto-generates `dataset_slug` from dataset name |
 | `trg_cleanup_leases_on_offline` | `devices` | AFTER UPDATE OF status | `cleanup_leases_on_offline` | Deletes active leases when device goes offline |
 | `touch_device_vector_trigger` | `device_benchmarks` | AFTER INSERT | `touch_device_vector` | Recalculates device 16-dim profile vector |
 | `trg_calculate_optimal_chunk_size` | `device_benchmarks` | AFTER INSERT | `invoke_optimal_chunk_size_calculation` | Invokes chunk size calculation |
@@ -693,6 +790,8 @@ org_plugins ──── (∞) plugin_execution_history
 | `increment_vector_count` | `vector_store` | AFTER INSERT | `update_vector_dataset_count` | Tracks vector count |
 | `org_storage_configs_updated_at` | `org_storage_configs` | BEFORE UPDATE | `update_org_storage_configs_updated_at` | Updates updated_at |
 | `update_pipeline_timestamp` | `pipeline_templates` | BEFORE UPDATE | `update_pipeline_timestamp` | Updates updated_at |
+| `trg_sync_active_jobs` | `agent_jobs` | AFTER INSERT OR DELETE | `trg_sync_active_jobs()` | Syncs active_job count on devices |
+| `trg_reclaim_jobs_on_device_offline` | `devices` | AFTER UPDATE OF status | `reclaim_jobs_on_device_offline` | Reclaims assigned jobs when device goes offline |
 
 ### Ghost Triggers (Defined Functions but NOT Wired)
 
@@ -705,9 +804,7 @@ The following trigger functions exist in the schema but have **no `CREATE TRIGGE
 | `advance_pipeline_on_job_complete` | Insert notification on job completion | Pipeline advancement handled by edge function |
 | `on_merge_job_finished` | Set dataset ready on merge complete | Merge completion flows through pipeline |
 | `enqueue_device_online_event` | Queue event on device online | Event queue not currently used |
-| `handle_dataset_scan_trigger` | Handle dataset INSERT with scan | Replaced by wired `create_scan_job_on_dataset_insert` |
 | `handle_job_failure` | Handle job failure side effects | Handled by edge function `report_job_error` |
-| `notify_agent_on_dataset_register` | Notify on dataset register | Newer version of wired `create_scan_job_on_dataset_insert` |
 | `on_agent_job_failed` | Handle agent job failure | Handled by edge function `report_job_error` |
 | `queue_job_notification` | Queue notification on INSERT | Handled by `job_notification_queue` directly |
 | `manage_agent_job_state` | Enforce state machine transitions | Handled by edge functions + RPCs |
@@ -761,13 +858,13 @@ Edge functions use one of the following auth mechanisms:
 
 | Function | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `run_pipeline` | POST | Relay Key (x-relay-key) | Activate pipeline |
-| `advance_pipeline` | POST | Relay Key (x-relay-key) | Advance to next step (publishes Redis notification for retry/merge/dead-letter) |
-| `plan_dataset_chunks` | POST | Relay Key (x-relay-key) | Plan chunking strategy (publishes Redis notification on job creation) |
-| `pre_chunk_dataset` | POST | Relay Key (x-relay-key) | Create chunk records via pre_chunk_dataset_smart |
+| `run_pipeline` | POST | Relay Key (x-relay-key) | Activate pipeline — calls `plan_dataset_chunks` then `advance_pipeline` |
+| `advance_pipeline` | POST | Relay Key (x-relay-key) | Advance to next step (publishes Redis notification for retry/merge/dead-letter). Handles compound and non-compound executions. On failure: dead-letter retry with agent affinity for cache locality. On completion: `scheduleMerge` — acquires merge lock, creates merge job. |
+| `plan_dataset_chunks` | POST | Relay Key (x-relay-key) | **Phase 2**: Plan chunking strategy. Calls `pre_chunk_dataset` edge function with `chunk_strategy` passthrough. Creates process agent_jobs with chunk strategy info embedded in payload (publishes Redis notification on job creation). |
+| `pre_chunk_dataset` | POST | Relay Key (x-relay-key) | **Phase 2**: Checks `file_manifest` on dataset — if empty, routes to `pre_chunk_dataset_smart` (size_based); if present, routes to `pre_chunk_filebased` (byte_range or file_per_chunk). Creates chunks with appropriate strategy. |
 | `calculate_optimal_chunk_size` | POST | Agent Token | Calculate chunk size based on device benchmarks |
 | `approve_dataset_and_plan_chunks` | POST | Relay Key (x-relay-key) | Approve dataset scan and plan chunks |
-| `report_dataset_scan` | POST | Agent Token | Report scan results |
+| `report_dataset_scan` | POST | Agent Token | Report scan results (file count, size, columns, file types, schema) — sets dataset status to `scanned` |
 | `record_dataset_metadata` | POST | Agent Token | Record dataset metadata after scan, then calls plan_dataset_chunks |
 | `schedule_merge_job` | POST | Agent Token | Schedule dataset merge (selects merge-capable device, acquires merge lock) |
 
@@ -882,8 +979,13 @@ sentrazero/
 │   │   ├── job.go            # Job struct definitions (Job, PluginContext)
 │   │   ├── job_dedup.go      # File-based persistent dedup store (60min TTL)
 │   │   ├── plugin_lookup.go  # UUID plugin_id → human plugin_name resolution
-│   │   ├── handlers_unix.go  # executeProcessChunk, executeScanDataset,
-│   │   │                     #   executeMergeDataset, compound job execution
+│   │   ├── handlers_unix.go  # executeProcessChunk (size_based),
+│   │   │                     #   executeProcessChunkByteRange (Phase 2),
+│   │   │                     #   executeProcessChunkFileList (Phase 2),
+│   │   │                     #   executeConcatMerge (Phase 2),
+│   │   │                     #   executeScanDataset (Phase 1: 6 extractors),
+│   │   │                     #   executeMergeDataset, compound job execution,
+│   │   │                     #   GPU validation (Phase 3)
 │   │   ├── choose_mode.go    # Execution mode selection (small/fast/gguf/onnx)
 │   │   ├── native_runner.go  # Native binary execution (CGO)
 │   │   ├── native_runner_stub.go # No-CGO stub
@@ -997,30 +1099,59 @@ The `ExecuteJob` function implements five-way routing based on payload shape:
 
 1. **`plugin_code` present** → Routes to v2 executor (`executor/v2/executor.go`) which runs inline plugin code directly. Used for edge function dispatch and inline script execution. Validates `PluginCode != ""` early.
 
-2. **`chunk_id` present + no `plugin_code`** → Routes to `executeProcessChunk` (`handlers_unix.go:629`):
-   - Resolves `plugin_id` UUID → human name via `pluginIDToName` sync.Map
-   - Loads cached plugin binary via `plugin.LoadAndUpdatePlugin` with Ed25519 signature verification
-   - Constructs `PluginContext` with `input_path`, `output_path`, `config`, step metadata
-   - Creates sandbox work dir, passes input to plugin via stdin JSON, reads output from stdout
-   - On plugin failure, falls back to v2 runtime manager
-   - Determines storage mode (shared_mount vs S3) from payload
-   - Uploads output to S3 (if not shared_mount) after plugin completion
+2. **`chunk_id` present + no `plugin_code`** → Routes to `executeProcessChunk` (`handlers_unix.go`), which dispatches by `ChunkStrategy`:
 
-3. **`job_type = "scan_dataset"`** → Routes to built-in `executeScanDataset`:
+   - **`size_based` (default)** → `executeProcessChunk`:
+     - Resolves `plugin_id` UUID → human name via `pluginIDToName` sync.Map
+     - Loads cached plugin binary via `plugin.LoadAndUpdatePlugin` with Ed25519 signature verification
+     - Constructs `PluginContext` with `input_path`, `output_path`, `config`, step metadata
+     - Creates sandbox work dir, passes input to plugin via stdin JSON, reads output from stdout
+     - On plugin failure, falls back to v2 runtime manager
+     - Determines storage mode (shared_mount vs S3) from payload
+     - Uploads output to S3 (if not shared_mount) after plugin completion
+
+   - **`byte_range`** → `executeProcessChunkByteRange` (**Phase 2**):
+     - Reads a byte-range window of a single source file (`ByteRangeStart` → `ByteRangeEnd`)
+     - Routes the window content through the plugin
+     - Writes plugin output to chunk output path
+     - Used for large single files (e.g. giant CSVs, binaries)
+
+   - **`file_per_chunk`** → `executeProcessChunkFileList` (**Phase 2**):
+     - Reads `FileList` (list of source file paths)
+     - Processes each file through the plugin sequentially
+     - Aggregates results into a single output
+     - Used for multi-file collections where each chunk = one source file
+
+3. **`job_type = "scan_dataset"`** → Routes to built-in `executeScanDataset` with **Phase 1 Rich Media Extractors**:
    - Resolves storage backend, lists source objects, downloads a sample file
-   - Extracts metadata via `scanDatasetBuiltin` (CSV/JSON/Parquet detection, headers, schema, row counts)
+   - Detects file type and dispatches to the appropriate extractor:
+     - **CSV/JSON/Parquet**: `scanDatasetBuiltin` — delimiter detection, headers, schema, row counts
+     - **Image**: `extractImageMetadata` — EXIF tags, dimensions (via `golang.org/x/image`)
+     - **Video**: `extractVideoMetadata` — codec, duration, resolution, bitrate (via ffprobe/mediainfo)
+     - **PDF**: `extractPDFMetadata` — page count, title, author, PDF version (via `pdfcpu`)
+     - **Audio**: `extractAudioMetadata` — duration, codec, sample rate, tags (via id3lib/ffprobe)
+     - **Archive**: `extractArchiveMetadata` — file count, compression ratio, entries (via `archive/zip`, `archive/tar`)
+     - **Binary**: `extractBinaryMetadata` — MIME type, magic bytes, file size (via `net/http` detection)
    - Enriches summary with data from ALL listed objects (file count, total size, file types)
    - POSTs metadata to `/functions/v1/report_dataset_scan` which writes it to `datasets` table
    - Does **not** write processed data to storage — purely introspective
 
-4. **`job_type = "merge_dataset"`** → Routes to built-in `executeMergeDataset`:
-   - Combines all chunk output files into one merged dataset
+4. **`job_type = "merge_dataset"`** → Routes to built-in `executeMergeDataset` which dispatches by `MergeStrategy`:
+   - **`size_based`**: Uses tree merge (`dataset.StreamMergeTree`) for large chunk output files
+   - **`byte_range` / `file_per_chunk`** (**Phase 2**): Uses `executeConcatMerge` — simple concatenation of all chunk outputs (since byte-range and file-per-chunk outputs are naturally independent)
    - Supports shared_mount (local file merge) and S3 (streaming merge) modes
-   - Handles tree merge for large datasets via `dataset.StreamMergeTree`
    - Cleans up individual chunk outputs after successful merge
    - Updates dataset status via `complete_job`
 
 5. **`job_type = "preprocess"` or step-level `process` with no `chunk_id`** → Marker jobs completed immediately. These are coordination markers created by `activate_pipeline` to trigger pipeline advancement without actual work.
+
+**GPU Validation (Phase 3)**:
+- `plugin/sandbox.go` validates GPU requirements via `PluginResources.RequiresGPU`/`GPUMemoryMB`
+- `sandbox/sandboxer.go` carries GPU device allow-lists per platform
+- `sandboxer_linux.go`: NVIDIA GPU devices (`/dev/nvidia*`) passed through to plugin sandbox
+- `sandboxer_darwin.go`: GPU devices allowed via macOS sandbox profiles
+- `handlers_unix.go`: GPU validation check before plugin execution — fails fast if device lacks required GPU
+- Heartbeat GPU fields (`gpu_memory_free_mb`, `gpu_utilization_percent`) reported in `execution_client.go` and `heartbeat.go`
 
 #### Compound Job Execution (inactive)
 
@@ -1088,12 +1219,21 @@ Worker pool: ExecuteJob (plugin execution in sandbox)
   "resources": {
     "memory_mb": 512,
     "cpu_seconds": 300,
-    "timeout_seconds": 600
+    "timeout_seconds": 600,
+    "requires_gpu": false,
+    "gpu_memory_mb": 0
   },
   "signature": "base64encoded...",
   "signature_key_id": "key-001"
 }
 ```
+
+**Phase 3 GPU Resource Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `resources.requires_gpu` | boolean | Plugin requires GPU for execution |
+| `resources.gpu_memory_mb` | integer | Minimum GPU memory required (MB) |
+| When `requires_gpu: true`, the agent validates GPU availability before execution. The job is only assigned to devices with `gpu_available = true` and sufficient `gpu_memory_free_gb`.
 
 ### Pipeline Plugins (RISEOTB)
 
@@ -1201,13 +1341,19 @@ When a dataset is ingested, an automatic `scan_dataset` job is created. The agen
 
 1. Lists all source objects in storage
 2. Downloads a sample file
-3. Extracts metadata using built-in format detectors:
+3. Detects file type and dispatches to the appropriate extractor (**Phase 1 Rich Media Scan**):
 
-| Format | Extracted Info |
-|--------|----------------|
-| **CSV/TSV** | Delimiter auto-detection, headers, column count, per-column type hints, sample rows (up to 10), estimated row count |
-| **JSON/JSONL** | Array length, key names, nested schema |
-| **Parquet** | Schema, column types, row groups |
+| Format | Extractor | Extracted Info |
+|--------|-----------|----------------|
+| **CSV/TSV** | `scanDatasetBuiltin` | Delimiter auto-detection, headers, column count, per-column type hints, sample rows (up to 10), estimated row count |
+| **JSON/JSONL** | `scanDatasetBuiltin` | Array length, key names, nested schema |
+| **Parquet** | `scanDatasetBuiltin` | Schema, column types, row groups |
+| **Image** (JPEG/PNG/GIF/WebP) | `extractImageMetadata` | EXIF tags, dimensions (width × height), color model, orientation |
+| **Video** (MP4/AVI/MKV/MOV) | `extractVideoMetadata` | Codec, duration (seconds), resolution, bitrate, frame rate |
+| **PDF** | `extractPDFMetadata` | Page count, title, author, creator, PDF version, file size |
+| **Audio** (MP3/FLAC/WAV/OGG) | `extractAudioMetadata` | Duration (seconds), codec, sample rate (Hz), bitrate, channels, ID3 tags |
+| **Archive** (ZIP/TAR/GZ) | `extractArchiveMetadata` | Entry count, compression ratio, file list (first 100), total uncompressed size |
+| **Binary** (unknown) | `extractBinaryMetadata` | MIME type (magic bytes), file size, extension-based type hint |
 
 4. Enriches with aggregate data: file count, total size bytes, file type distribution, source file keys
 5. POSTs to `/functions/v1/report_dataset_scan` which writes to the `datasets` table:
@@ -1230,7 +1376,13 @@ When a dataset is ingested, an automatic `scan_dataset` job is created. The agen
   "format":              "csv",
   "delimiter":           ",",
   "estimated_row_count": 50000,
-  "source_files":        ["datasets/abc123/products.csv"]
+  "source_files":        ["datasets/abc123/products.csv"],
+  "image_dimensions":    { "width": 1920, "height": 1080 },
+  "video_duration_ms":   30500,
+  "pdf_page_count":      42,
+  "audio_duration_ms":   180000,
+  "archive_entry_count": 15,
+  "mime_type":           "text/csv"
 }
 ```
 
@@ -1316,8 +1468,8 @@ Each plugin runs in a sandboxed work directory (`~/.sentra/sandbox/{jobID}/`) wi
 
 | Platform | Sandbox Mode | Implementation |
 |----------|-------------|----------------|
-| **Linux** | `native` | Linux namespaces (PID, mount, network, UTS) + cgroups v2 (memory, CPU) + seccomp BPF profiles. UID/GID drops to `65534` (nobody). |
-| **macOS** | `native` | Seatbelt sandbox profiles (App Sandbox equivalent). Resource limits via `setrlimit`. Temp directory isolation. |
+| **Linux** | `native` | Linux namespaces (PID, mount, network, UTS) + cgroups v2 (memory, CPU) + seccomp BPF profiles. UID/GID drops to `65534` (nobody). **Phase 3 GPU**: NVIDIA devices (`/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`) passed through when plugin requires GPU. |
+| **macOS** | `native` | Seatbelt sandbox profiles (App Sandbox equivalent). Resource limits via `setrlimit`. Temp directory isolation. **Phase 3 GPU**: GPU devices allowed in sandbox profile when plugin requires GPU. |
 | **Windows** | `native` or `off` | Windows Job Objects (process group limits). Configured via `SANDBOX_WINDOWS_JOB_OBJECT`. Falls back to `off` when unavailable. |
 | **Fallback** | `off` | `noopSandbox` — creates work dir, runs process, cleans up. No OS isolation. |
 
@@ -1464,7 +1616,7 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 COPY . .
 RUN apk add --no-cache git
-RUN go build -ldflags="-s -w" -o /bin/sentra ./cmd/sentra
+RUN go build -ldflags="-s -w" -o /bin/sentra ./cmd/main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
@@ -1472,6 +1624,8 @@ COPY --from=builder /bin/sentra /bin/sentra
 EXPOSE 8080
 CMD ["/bin/sentra", "--claim-code", "${SENTRA_CLAIM_CODE}"]
 ```
+
+> **Note:** The agent daemon is built from `./cmd/main.go`, NOT `./cmd/sentra/` (which compiles to a CLI tool, not the agent). The build uses `-ldflags="-s -w"` to strip debug symbols, reducing binary size from ~19 MB to ~13 MB for production. Cross-compile with `GOOS=linux GOARCH=amd64/arm64` for deployment to production servers.
 
 ### Kubernetes Deployment
 
@@ -1691,4 +1845,4 @@ Part of the SentraZero Compute Platform.
 - pgvector (Vector similarity search)
 - Redis (Optional coordination)
 
-**Last Updated:** 2026-06-18
+**Last Updated:** 2026-06-18 (Phase 1: Rich Media Scan · Phase 2: Byte-Range & File Chunking · Phase 3: GPU-Aware Scheduling)

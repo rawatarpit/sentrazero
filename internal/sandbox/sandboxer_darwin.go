@@ -53,6 +53,10 @@ func (s *macSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd
 		memoryMB = s.cfg.MaxMemoryMB
 	}
 
+	if memoryMB > 0 {
+		applyRLimits(cmd, env)
+	}
+
 	netPolicy := macSandboxNetworkAllow()
 	if !env.Network {
 		netPolicy = macSandboxNetworkBlock()
@@ -94,6 +98,12 @@ const macSandboxProfileTpl = `(version 1)
 (allow file-read* (subpath "/"))
 (allow file-read-metadata)
 
+; Allow GPU device access (Metal, IOAccelerator)
+(allow device*)
+(allow iokit-open (require-all
+    (iokit-registry-entry-class "IOAccelerator")
+    (iokit-property "MetalPluginName" "com.apple.Metal")))
+
 ; Allow process execution
 (allow process-exec*)
 (allow process-fork)
@@ -109,19 +119,29 @@ const macSandboxProfileTpl = `(version 1)
 ; Network policy
 %s
 
+; Allow /dev/null (required by Python runtime for subprocess etc.)
+(allow file-read* file-write* (subpath "/dev"))
+(allow file-read* file-write* (subpath "/dev/null"))
+
 ; Deny writes to system paths (read-only enforcement)
 (deny file-write* (subpath "/System"))
 (deny file-write* (subpath "/usr"))
 (deny file-write* (subpath "/bin"))
 (deny file-write* (subpath "/sbin"))
 (deny file-write* (subpath "/private/etc"))
-(deny file-write* (subpath "/private/var"))
+(deny file-write* (subpath "/private/var/db"))
+(deny file-write* (subpath "/private/var/log"))
+(deny file-write* (subpath "/private/var/run"))
+(deny file-write* (subpath "/private/var/root"))
+(deny file-write* (subpath "/private/var/select"))
 (deny file-write* (subpath "/etc"))
 (deny file-write* (subpath "/var"))
 
-; Allow writes to temp directories
+; Allow writes to temp directories (both /tmp and /private/var/folders for macOS temp)
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/var/folders"))
+(allow file-write* (subpath "/var/folders"))
 
 ; Allow writes to Users home directories (needed for .sentra cache etc)
 (allow file-write* (subpath "/Users"))

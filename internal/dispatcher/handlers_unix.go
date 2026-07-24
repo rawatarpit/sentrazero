@@ -4,12 +4,21 @@
 package dispatcher
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +28,8 @@ import (
 	"time"
 
 	"github.com/parquet-go/parquet-go"
+	pdfcpuapi "github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
 	executorv2 "sentra-agent/cmd/agent/executor/v2"
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
@@ -41,6 +52,7 @@ var (
 func init() {
 	projectRef := config.ReadProjectRef()
 	supabaseBaseURL = firstNonEmpty(
+		os.Getenv("BACKEND_URL"),
 		os.Getenv("SUPABASE_URL"),
 		config.BuildBackendURL(projectRef),
 	)
@@ -49,6 +61,7 @@ func init() {
 	)
 	supabaseAnonKey = firstNonEmpty(
 		os.Getenv("SUPABASE_ANON_KEY"),
+		os.Getenv("BACKEND_ANON_KEY"),
 		config.BuildAnonKey(projectRef),
 	)
 }
@@ -69,8 +82,10 @@ func firstNonEmpty(vals ...string) string {
 type MergeStrategy string
 
 const (
-	StrategyAffinity    MergeStrategy = "affinity"
-	StrategySharedMount MergeStrategy = "shared_mount"
+	StrategyAffinity       MergeStrategy = "affinity"
+	StrategySharedMount    MergeStrategy = "shared_mount"
+	StrategyByteRange      MergeStrategy = "byte_range"
+	StrategyFilePerChunk   MergeStrategy = "file_per_chunk"
 )
 
 type MergeChunk struct {
@@ -87,6 +102,7 @@ type MergePayload struct {
 	DeviceOutput      *dataset.DeviceOutput `json:"device_output"`
 	Strategy          MergeStrategy         `json:"strategy"`
 	StorageMode       string                `json:"storage_mode,omitempty"`
+	StorageConfigID   string                `json:"storage_config_id,omitempty"`
 	Chunks            []MergeChunk          `json:"chunks"`
 	MountPath         string                `json:"mount_path,omitempty"`
 	IsPartial         bool                  `json:"is_partial,omitempty"`
@@ -410,11 +426,72 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 	if mergePayload.DatasetID == "" {
 		return errors.New("missing dataset_id")
 	}
-	if mergePayload.AffinityDeviceID == "" && mergePayload.DeviceOutput == nil && !mergePayload.IsPartial {
-		return errors.New("missing affinity_device_id or device_output")
+
+	isConcatMerge := mergePayload.Strategy == StrategyByteRange || mergePayload.Strategy == StrategyFilePerChunk
+
+	if !isConcatMerge {
+		if mergePayload.AffinityDeviceID == "" && mergePayload.DeviceOutput == nil && !mergePayload.IsPartial {
+			return errors.New("missing affinity_device_id or device_output")
+		}
 	}
 	if len(mergePayload.Chunks) == 0 && !mergePayload.IsPartial {
 		return errors.New("no chunks provided")
+	}
+
+	var backend storage.StorageBackend
+
+	// Per-job storage config override: if job has a storage_config_id with a remote
+	// storage mode (S3/GCS/Azure), fetch the config and create a dedicated backend.
+	if mergePayload.StorageConfigID != "" {
+		cfg, err := storage.GetConfigByID(mergePayload.StorageConfigID)
+		if err != nil {
+			return fmt.Errorf("failed to get storage config %s: %w", mergePayload.StorageConfigID, err)
+		}
+		obs.Info("executeMergeDataset: got storage config", obs.Field{
+			"storage_mode":      cfg.StorageMode,
+			"provider":          cfg.Provider,
+			"bucket_name":       cfg.BucketName,
+			"endpoint":          cfg.Endpoint,
+			"storage_config_id": mergePayload.StorageConfigID,
+		})
+		// Determine storage mode from payload or config
+		mode := string(mergePayload.Strategy)
+		if mode == "" {
+			mode = mergePayload.StorageMode
+		}
+		if mode == "" {
+			mode = cfg.StorageMode
+		}
+		cfgCopy := &storage.StorageConfig{
+			StorageMode:   mode,
+			Provider:      cfg.Provider,
+			BucketName:    cfg.BucketName,
+			Region:        cfg.Region,
+			Endpoint:      cfg.Endpoint,
+			MountBasePath: cfg.MountBasePath,
+			Credentials:   cfg.Credentials,
+		}
+		newBackend, err := storage.NewBackend(cfgCopy)
+		if err != nil {
+			return fmt.Errorf("failed to initialize storage backend for %s: %w", mergePayload.StorageConfigID, err)
+		}
+		backend = newBackend
+		obs.Info("executeMergeDataset: created backend from storage_config_id", obs.Field{
+			"backend_type":      fmt.Sprintf("%T", backend),
+			"storage_config_id": mergePayload.StorageConfigID,
+		})
+	}
+
+	if backend == nil {
+		backend = GetStorageBackend()
+		if backend == nil {
+			return errors.New("storage backend not initialized")
+		}
+	}
+
+	// ── Byte-range / file-per-chunk concatenation merge (Phase 2) ──
+	if isConcatMerge {
+		return executeConcatMerge(ctx, &mergePayload, backend)
 	}
 
 	// Try strategy first, then fall back to storage_mode (nested payload)
@@ -431,7 +508,14 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 			storageMode = nested.StorageMode
 		}
 	}
-	backend := GetStorageBackend()
+
+	// Normalize storage mode: if the backend is a SharedMountBackend,
+	// force local paths regardless of what payload says (same logic as process handler)
+	if storageMode != "shared_mount" {
+		if _, isSharedMount := backend.(*storage.SharedMountBackend); isSharedMount {
+			storageMode = "shared_mount"
+		}
+	}
 
 	useS3Merge := backend != nil && storageMode != "shared_mount" && storageMode != "affinity"
 
@@ -443,13 +527,26 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 		for _, chunk := range mergePayload.Chunks {
 			resolvedPath := chunk.Path
 
-			switch mergePayload.Strategy {
+			// Normalize strategy: if empty, fall back to storage_mode
+			mergeStrategy := mergePayload.Strategy
+			if mergeStrategy == "" && mergePayload.StorageMode == "shared_mount" {
+				mergeStrategy = StrategySharedMount
+			}
+
+			switch mergeStrategy {
 			case StrategyAffinity:
 				if !filepath.IsAbs(resolvedPath) {
 					return fmt.Errorf("affinity strategy requires absolute path for chunk %s", chunk.ChunkID)
 				}
 			case StrategySharedMount:
-				if !filepath.IsAbs(resolvedPath) && mergePayload.MountPath != "" {
+				if resolvedPath == "" {
+					// Derive chunk path from mount path and dataset
+					mountPath := mergePayload.MountPath
+					if mountPath == "" {
+						mountPath = deriveMountBasePath("shared_mount")
+					}
+					resolvedPath = filepath.Join(mountPath, "datasets", mergePayload.DatasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunk.ChunkIndex))
+				} else if !filepath.IsAbs(resolvedPath) && mergePayload.MountPath != "" {
 					resolvedPath = filepath.Join(mergePayload.MountPath, resolvedPath)
 				}
 			}
@@ -532,7 +629,12 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 	if deviceOutput == nil {
 		mountPath := mergePayload.MountPath
 		if mountPath == "" {
-			mountPath = deriveMountBasePath(string(mergePayload.Strategy))
+			// Fall back: try Strategy first, then StorageMode
+			strategyForMount := string(mergePayload.Strategy)
+			if strategyForMount == "" {
+				strategyForMount = mergePayload.StorageMode
+			}
+			mountPath = deriveMountBasePath(strategyForMount)
 		}
 		deviceOutput = &dataset.DeviceOutput{
 			DeviceID:  mergePayload.AffinityDeviceID,
@@ -595,6 +697,87 @@ func executeMergeDataset(ctx context.Context, payload json.RawMessage) error {
 	return nil
 }
 
+// ── Byte-range / file-per-chunk concatenation merge (Phase 2) ──
+
+func executeConcatMerge(ctx context.Context, mergePayload *MergePayload, backend storage.StorageBackend) error {
+	datasetSlug := mergePayload.DatasetSlug
+	useS3 := backend != nil
+
+	if useS3 {
+		mergedKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, 0, "merged")
+
+		resultReaders := make([]io.Reader, 0, len(mergePayload.Chunks))
+		for _, chunk := range mergePayload.Chunks {
+			chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, "result")
+			objReader, err := backend.ReadObject(ctx, chunkKey)
+			if err != nil {
+				return fmt.Errorf("failed to read chunk %s for concat merge: %w", chunk.ChunkID, err)
+			}
+			defer objReader.Close()
+			resultReaders = append(resultReaders, objReader)
+		}
+
+		mergedReader := io.MultiReader(resultReaders...)
+		if err := backend.WriteObject(ctx, mergedKey, mergedReader); err != nil {
+			return fmt.Errorf("failed to write concatenated result: %w", err)
+		}
+
+		// Clean up chunks
+		for _, chunk := range mergePayload.Chunks {
+			for _, pathType := range []string{"result", "chunk"} {
+				chunkKey := storage.GetRemotePathWithSlug(mergePayload.DatasetID, datasetSlug, chunk.ChunkIndex, pathType)
+				if err := backend.DeleteObject(ctx, chunkKey); err != nil {
+					obs.Warn("failed to delete chunk after concat merge", obs.Field{
+						"chunk_key": chunkKey,
+						"error":     err.Error(),
+					})
+				}
+			}
+		}
+
+		return nil
+	}
+
+	// Local concat merge
+	mountPath := deriveMountBasePath(string(mergePayload.Strategy))
+	mergedPath := filepath.Join(mountPath, "datasets", mergePayload.DatasetID, "merged")
+
+	if err := os.MkdirAll(filepath.Dir(mergedPath), 0755); err != nil {
+		return fmt.Errorf("failed to create merged output dir: %w", err)
+	}
+
+	mergedFile, err := os.Create(mergedPath)
+	if err != nil {
+		return fmt.Errorf("failed to create merged file: %w", err)
+	}
+	defer mergedFile.Close()
+
+	for _, chunk := range mergePayload.Chunks {
+		chunkPath := filepath.Join(mountPath, "datasets", mergePayload.DatasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunk.ChunkIndex))
+		chunkFile, err := os.Open(chunkPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				obs.Warn("chunk file not found during concat merge, skipping", obs.Field{
+					"chunk_path": chunkPath,
+					"chunk_id":   chunk.ChunkID,
+				})
+				continue
+			}
+			return fmt.Errorf("failed to open chunk %s for concat merge: %w", chunk.ChunkID, err)
+		}
+		if _, err := io.Copy(mergedFile, chunkFile); err != nil {
+			chunkFile.Close()
+			return fmt.Errorf("failed to append chunk %s: %w", chunk.ChunkID, err)
+		}
+		chunkFile.Close()
+
+		// Clean up chunk result
+		os.Remove(chunkPath)
+	}
+
+	return nil
+}
+
 type ProcessPayload struct {
 	ChunkID     string          `json:"chunk_id"`
 	InputPath   string          `json:"input_path,omitempty"`
@@ -607,6 +790,7 @@ type ProcessPayload struct {
 	Rows        int             `json:"rows,omitempty"`
 	Checksum    string          `json:"checksum,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
+	MockMode    bool            `json:"mock_mode,omitempty"`
 
 	// Chunking metadata
 	TotalChunks int    `json:"total_chunks,omitempty"`
@@ -617,6 +801,13 @@ type ProcessPayload struct {
 	Steps            []CompoundStep  `json:"steps,omitempty"`
 	TotalSteps       int             `json:"total_steps,omitempty"`
 	CurrentStepIndex int             `json:"current_step_index,omitempty"`
+
+	// File/Byte-Range chunking strategy (Phase 2)
+	ChunkStrategy   string   `json:"chunk_strategy,omitempty"`
+	ByteRangeStart  int64    `json:"byte_range_start,omitempty"`
+	ByteRangeEnd    int64    `json:"byte_range_end,omitempty"`
+	FileList        []string `json:"file_list,omitempty"`
+	SourceFilePath  string   `json:"source_file_path,omitempty"`
 }
 
 type CompoundStep struct {
@@ -671,6 +862,22 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		processPayload.Config = nestedPayload.Config
 	}
 
+	if processPayload.ChunkStrategy == "" {
+		processPayload.ChunkStrategy = nestedPayload.ChunkStrategy
+	}
+	if processPayload.ByteRangeStart == 0 && nestedPayload.ByteRangeStart != 0 {
+		processPayload.ByteRangeStart = nestedPayload.ByteRangeStart
+	}
+	if processPayload.ByteRangeEnd == 0 && nestedPayload.ByteRangeEnd != 0 {
+		processPayload.ByteRangeEnd = nestedPayload.ByteRangeEnd
+	}
+	if len(processPayload.FileList) == 0 && len(nestedPayload.FileList) > 0 {
+		processPayload.FileList = nestedPayload.FileList
+	}
+	if processPayload.SourceFilePath == "" {
+		processPayload.SourceFilePath = nestedPayload.SourceFilePath
+	}
+
 	if processPayload.ChunkID == "" && processPayload.DatasetID == "" {
 		return errors.New("missing chunk_id or dataset_id")
 	}
@@ -684,13 +891,52 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	}
 	storageMode = normalizeStorageModeForJob(storageMode)
 
-	backend := GetStorageBackend()
+	var backend storage.StorageBackend
+
+	// Per-job storage config override: if job has a storage_config_id with a remote
+	// storage mode (S3/GCS/Azure), fetch the config and create a dedicated backend.
+	if job.StorageConfigID != "" && (storageMode == "s3" || storageMode == "aws_s3" || storageMode == "object_storage" || storageMode == "gcs" || storageMode == "google_cloud_storage" || storageMode == "azure_blob") {
+		cfg, err := storage.GetConfigByID(job.StorageConfigID)
+		if err != nil {
+			return fmt.Errorf("failed to get storage config %s: %w", job.StorageConfigID, err)
+		}
+		obs.Info("executeProcessChunk: got storage config", obs.Field{
+			"storage_mode":      cfg.StorageMode,
+			"provider":          cfg.Provider,
+			"bucket_name":       cfg.BucketName,
+			"endpoint":          cfg.Endpoint,
+			"storage_config_id": job.StorageConfigID,
+		})
+		cfgCopy := &storage.StorageConfig{
+			StorageMode:   storageMode,
+			Provider:      cfg.Provider,
+			BucketName:    cfg.BucketName,
+			Region:        cfg.Region,
+			Endpoint:      cfg.Endpoint,
+			MountBasePath: cfg.MountBasePath,
+			Credentials:   cfg.Credentials,
+		}
+		newBackend, err := storage.NewBackend(cfgCopy)
+		if err != nil {
+			return fmt.Errorf("failed to initialize storage backend for %s: %w", job.StorageConfigID, err)
+		}
+		backend = newBackend
+		obs.Info("executeProcessChunk: created backend from storage_config_id", obs.Field{
+			"backend_type":      fmt.Sprintf("%T", backend),
+			"storage_config_id": job.StorageConfigID,
+		})
+	}
+
 	if backend == nil {
-		return errors.New("storage backend not initialized")
+		backend = GetStorageBackend()
+		if backend == nil {
+			return errors.New("storage backend not initialized")
+		}
 	}
 
 	// Reconcile storage mode with actual backend:
-	// if the global backend reads/writes locally, force local paths.
+	// if we fell back to the global backend and it reads/writes locally,
+	// force local paths (only relevant for global backend fallback).
 	if storageMode != "shared_mount" {
 		if _, isSharedMount := backend.(*storage.SharedMountBackend); isSharedMount {
 			storageMode = "shared_mount"
@@ -706,6 +952,14 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	// ── Compound job branch ──
 	if processPayload.IsCompound && len(processPayload.Steps) > 0 {
 		return executeCompoundProcessChunk(ctx, &job, &processPayload, &processPayload, datasetID, datasetSlug, chunkIndex, resultKey, backend, storageMode)
+	}
+
+	// ── File/Byte-Range strategy dispatch (Phase 2) ──
+	switch processPayload.ChunkStrategy {
+	case "byte_range":
+		return executeProcessChunkByteRange(ctx, &job, &processPayload, backend, storageMode)
+	case "file_per_chunk":
+		return executeProcessChunkFileList(ctx, &job, &processPayload, backend, storageMode)
 	}
 
 	workDirID := job.ID
@@ -733,8 +987,42 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 				// Chain from previous step's output
 				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
 			} else {
-				// First step: read from chunks
-				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+				// First step: read from chunks, fall back to S3 source if local file missing
+				sharedPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+				if fileExists(sharedPath) {
+					inputPath = sharedPath
+				} else {
+					sourcePath := processPayload.SourcePath
+					if sourcePath == "" {
+						sourcePath = job.SourcePath
+					}
+					if sourcePath != "" && backend != nil {
+						obs.Info("shared_mount chunk not found, falling back to S3 source", obs.Field{
+							"shared_path": sharedPath,
+							"source_path": sourcePath,
+						})
+						objReader, readErr := backend.ReadObject(ctx, sourcePath)
+						if readErr != nil {
+							return fmt.Errorf("step 0: read source from S3 fallback %s: %w", sourcePath, readErr)
+						}
+						ext := filepath.Ext(sourcePath)
+						outPath := filepath.Join(workDir, "source"+ext)
+						outFile, createErr := os.Create(outPath)
+						if createErr != nil {
+							objReader.Close()
+							return fmt.Errorf("step 0: create source file from S3 fallback: %w", createErr)
+						}
+						_, copyErr := io.Copy(outFile, objReader)
+						objReader.Close()
+						outFile.Close()
+						if copyErr != nil {
+							return fmt.Errorf("step 0: copy source from S3 fallback: %w", copyErr)
+						}
+						inputPath = outPath
+					} else {
+						return fmt.Errorf("shared_mount chunk not found at %s and no source_path for S3 fallback", sharedPath)
+					}
+				}
 			}
 		}
 		if outputPath == "" && datasetID != "" {
@@ -764,25 +1052,81 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 		} else {
 			// Step 0: read source files
 			if processPayload.SourcePath != "" {
-				// Single root-level CSV from source_path
-				objReader, err := backend.ReadObject(ctx, processPayload.SourcePath)
-				if err != nil {
-					return fmt.Errorf("failed to read source %s: %w", processPayload.SourcePath, err)
-				}
-				ext := filepath.Ext(processPayload.SourcePath)
-				outPath := filepath.Join(workDir, "source"+ext)
-				outFile, createErr := os.Create(outPath)
-				if createErr != nil {
+				if strings.HasSuffix(processPayload.SourcePath, "/") {
+					// Directory listing mode: list objects and download all
+					obs.Info("compound: using dataset lookup for source path (production optimization)", obs.Field{
+						"source_path": processPayload.SourcePath,
+					})
+					objects, listErr := backend.ListObjects(ctx, processPayload.SourcePath)
+					if listErr != nil {
+						return fmt.Errorf("failed to list source directory %s: %w", processPayload.SourcePath, listErr)
+					}
+					if len(objects) == 0 {
+						return fmt.Errorf("no files found at %s", processPayload.SourcePath)
+					}
+					// Extract file_pattern from config
+					filePattern := ""
+					var configMap map[string]interface{}
+					if len(processPayload.Config) > 0 {
+						if err := json.Unmarshal(processPayload.Config, &configMap); err == nil {
+							if fp, ok := configMap["file_pattern"].(string); ok {
+								filePattern = fp
+							}
+						}
+					}
+					filesDir := filepath.Join(workDir, "files")
+					if err := os.MkdirAll(filesDir, 0755); err != nil {
+						return fmt.Errorf("create files dir: %w", err)
+					}
+					for _, obj := range objects {
+						if strings.HasSuffix(obj.Key, "/") {
+							continue
+						}
+						if filePattern != "" {
+							matched, matchErr := filepath.Match(filePattern, filepath.Base(obj.Key))
+							if matchErr != nil || !matched {
+								continue
+							}
+						}
+						objReader, readErr := backend.ReadObject(ctx, obj.Key)
+						if readErr != nil {
+							return fmt.Errorf("read source file %s: %w", obj.Key, readErr)
+						}
+						dst := filepath.Join(filesDir, filepath.Base(obj.Key))
+						dstFile, createErr := os.Create(dst)
+						if createErr != nil {
+							objReader.Close()
+							return fmt.Errorf("create file %s: %w", dst, createErr)
+						}
+						_, copyErr := io.Copy(dstFile, objReader)
+						objReader.Close()
+						dstFile.Close()
+						if copyErr != nil {
+							return fmt.Errorf("copy file %s: %w", dst, copyErr)
+						}
+					}
+					inputPath = filesDir
+				} else {
+					// Single root-level file from source_path
+					objReader, err := backend.ReadObject(ctx, processPayload.SourcePath)
+					if err != nil {
+						return fmt.Errorf("failed to read source %s: %w", processPayload.SourcePath, err)
+					}
+					ext := filepath.Ext(processPayload.SourcePath)
+					outPath := filepath.Join(workDir, "source"+ext)
+					outFile, createErr := os.Create(outPath)
+					if createErr != nil {
+						objReader.Close()
+						return fmt.Errorf("failed to create source file: %w", createErr)
+					}
+					_, copyErr := io.Copy(outFile, objReader)
 					objReader.Close()
-					return fmt.Errorf("failed to create source file: %w", createErr)
+					outFile.Close()
+					if copyErr != nil {
+						return fmt.Errorf("failed to write source file: %w", copyErr)
+					}
+					inputPath = outPath
 				}
-				_, copyErr := io.Copy(outFile, objReader)
-				objReader.Close()
-				outFile.Close()
-				if copyErr != nil {
-					return fmt.Errorf("failed to write source file: %w", copyErr)
-				}
-				inputPath = outPath
 			} else {
 				return fmt.Errorf("source_path is required for S3 process jobs (no /source/ prefix fallback)")
 			}
@@ -847,30 +1191,38 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	env := system.DetectExecutionEnv()
 	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
 	if err != nil {
-		// If Docker is unavailable or script plugin fails (likely missing deps), fall back to v2 runtime
-		errStr := err.Error()
-		isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
-		isScriptPlugin := isScriptLanguage(manifest.Language)
-		if isDockerErr || isScriptPlugin {
-			obs.Info("falling back to v2 runtime", obs.Field{
-				"plugin":        manifest.Name,
-				"language":      manifest.Language,
-				"docker_error":  isDockerErr,
-				"script_plugin": isScriptPlugin,
-				"error":         errStr,
-			})
-			execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, &processPayload, &job)
-			if err != nil {
-				return fmt.Errorf("process plugin failed (native+v2 fallback): %w", err)
-			}
+		// Check if the plugin still managed to write a real output file.
+		// NOTE: os.Stat on an empty directory returns Size()==4096 (inode
+		// size), so we must actually verify content with hasRealOutput().
+		if hasRealOutput(outputPath) {
+			obs.Info("native sandbox returned error but output file exists, treating as success",
+				obs.Field{"plugin": manifest.Name, "output_path": outputPath})
+			execResult = &plugin.ExecutionResult{Output: ""}
+			err = nil
 		} else {
-			return fmt.Errorf("process plugin failed: %w", err)
+			errStr := err.Error()
+			isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+			if isDockerErr {
+				obs.Info("falling back to v2 runtime", obs.Field{
+					"plugin":       manifest.Name,
+					"language":     manifest.Language,
+					"docker_error": isDockerErr,
+					"error":        errStr,
+				})
+				execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, &processPayload, &job)
+				if err != nil {
+					return fmt.Errorf("process plugin failed (native+v2 fallback): %w", err)
+				}
+			} else {
+				return fmt.Errorf("process plugin failed: %w", err)
+			}
 		}
 	}
 
 	var result map[string]any
 	if execResult != nil && execResult.Output != "" {
-		if err := json.Unmarshal([]byte(execResult.Output), &result); err != nil {
+		result, err = parsePluginOutputAsJSON(execResult.Output)
+		if err != nil {
 			return fmt.Errorf("failed to parse process plugin output: %w", err)
 		}
 	}
@@ -933,6 +1285,355 @@ func executeProcessChunk(ctx context.Context, payload json.RawMessage) error {
 	return nil
 }
 
+// ── Byte-range chunk handler (Phase 2) ──
+
+func executeProcessChunkByteRange(ctx context.Context, job *Job, payload *ProcessPayload, backend storage.StorageBackend, storageMode string) error {
+	workDir, cleanup, err := plugin.PrepareJobWorkDir(job.ID)
+	if err != nil {
+		return fmt.Errorf("failed to prepare work dir: %w", err)
+	}
+	defer cleanup()
+
+	datasetID := payload.DatasetID
+	datasetSlug := payload.DatasetSlug
+	chunkIndex := payload.ChunkIndex
+	sourceFilePath := payload.SourceFilePath
+	byteStart := payload.ByteRangeStart
+	byteEnd := payload.ByteRangeEnd
+
+	if sourceFilePath == "" {
+		return errors.New("byte_range chunk requires source_file_path")
+	}
+
+	resultKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
+
+	// Derive input file path
+	var inputPath string
+	if storageMode == "shared_mount" {
+		mountBasePath := deriveMountBasePath(storageMode)
+		fullSourcePath := sourceFilePath
+		if !filepath.IsAbs(fullSourcePath) {
+			fullSourcePath = filepath.Join(mountBasePath, fullSourcePath)
+		}
+		f, err := os.Open(fullSourcePath)
+		if err != nil {
+			return fmt.Errorf("failed to open source file for byte range: %w", err)
+		}
+		defer f.Close()
+
+		inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.bin", chunkIndex))
+		out, err := os.Create(inputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create input file: %w", err)
+		}
+		defer out.Close()
+
+		sr := io.NewSectionReader(f, byteStart, byteEnd-byteStart)
+		if _, err := io.Copy(out, sr); err != nil {
+			return fmt.Errorf("failed to copy byte range: %w", err)
+		}
+	} else {
+		// S3: download the source file and extract byte range
+		objReader, err := backend.ReadObject(ctx, sourceFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read source from backend: %w", err)
+		}
+		defer objReader.Close()
+
+		inputPath = filepath.Join(workDir, "source.bin")
+		f, err := os.Create(inputPath)
+		if err != nil {
+			return fmt.Errorf("failed to create input file: %w", err)
+		}
+		defer f.Close()
+
+		if byteStart > 0 {
+			if _, err := io.CopyN(io.Discard, objReader, byteStart); err != nil {
+				return fmt.Errorf("failed to skip to byte start: %w", err)
+			}
+		}
+
+		written, err := io.CopyN(f, objReader, byteEnd-byteStart)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read byte range from source: %w", err)
+		}
+		if written == 0 {
+			return fmt.Errorf("read 0 bytes from byte range %d-%d", byteStart, byteEnd)
+		}
+	}
+
+	outputPath := filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
+
+	pluginID := job.PluginID
+	if pluginID == "" {
+		pluginID = payload.PluginID
+	}
+	pluginName := ResolvePluginName(ctx, pluginID, job.PluginName)
+	if pluginName == "" {
+		return fmt.Errorf("no plugin_id in job payload")
+	}
+
+	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
+	if err != nil {
+		return err
+	}
+
+	effectiveConfig := job.StepConfig
+	if len(payload.Config) > 0 {
+		effectiveConfig = payload.Config
+	}
+
+	pluginCtx := PluginContext{
+		JobID:       job.ID,
+		OrgID:       job.OrgID,
+		DatasetID:   datasetID,
+		ExecutionID: job.ExecutionID,
+		StepIndex:   job.StepIndex,
+		ChunkID:     payload.ChunkID,
+		ChunkIndex:  chunkIndex,
+		InputPath:   inputPath,
+		OutputPath:  outputPath,
+		Config:      effectiveConfig,
+	}
+
+	inJSON, _ := json.Marshal(pluginCtx)
+	env := system.DetectExecutionEnv()
+	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
+	if err != nil {
+		// Check if the plugin still managed to write a real output file.
+		// NOTE: os.Stat on an empty directory returns Size()==4096 (inode
+		// size), so we must actually verify content with hasRealOutput().
+		if hasRealOutput(outputPath) {
+			obs.Info("native sandbox returned error but output file exists, treating as success",
+				obs.Field{"plugin": manifest.Name, "output_path": outputPath})
+			execResult = &plugin.ExecutionResult{Output: ""}
+			err = nil
+		} else {
+			errStr := err.Error()
+			isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+			if isDockerErr {
+				execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, payload, job)
+				if err != nil {
+					return fmt.Errorf("process plugin failed (native+v2 fallback): %w", err)
+				}
+			} else {
+				return fmt.Errorf("process plugin failed: %w", err)
+			}
+		}
+	}
+
+	var result map[string]any
+	if execResult != nil && execResult.Output != "" {
+		result, _ = parsePluginOutputAsJSON(execResult.Output)
+	}
+
+	if _, statErr := os.Stat(outputPath); os.IsNotExist(statErr) {
+		var actualPath string
+		if data, ok := result["data"].(map[string]any); ok {
+			if p, ok := data["output_path"].(string); ok && p != "" {
+				actualPath = p
+			}
+		}
+		if actualPath != "" {
+			if info, err := os.Stat(actualPath); err == nil && !info.IsDir() {
+				os.MkdirAll(filepath.Dir(outputPath), 0755)
+				if err := os.Rename(actualPath, outputPath); err != nil {
+					if copyErr := copyFile(actualPath, outputPath); copyErr != nil {
+						return fmt.Errorf("failed to copy output to expected path: %w", copyErr)
+					}
+				}
+			}
+		}
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			os.MkdirAll(filepath.Dir(outputPath), 0755)
+			os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+		}
+	}
+
+	if storageMode != "shared_mount" {
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			os.MkdirAll(filepath.Dir(outputPath), 0755)
+			os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+		}
+		outFile, err := os.Open(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to open output file for upload: %w", err)
+		}
+		defer outFile.Close()
+		if err := backend.WriteObject(ctx, resultKey, outFile); err != nil {
+			return fmt.Errorf("failed to write result to backend: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ── File-per-chunk handler (Phase 2) ──
+
+func executeProcessChunkFileList(ctx context.Context, job *Job, payload *ProcessPayload, backend storage.StorageBackend, storageMode string) error {
+	workDir, cleanup, err := plugin.PrepareJobWorkDir(job.ID)
+	if err != nil {
+		return fmt.Errorf("failed to prepare work dir: %w", err)
+	}
+	defer cleanup()
+
+	datasetID := payload.DatasetID
+	datasetSlug := payload.DatasetSlug
+	chunkIndex := payload.ChunkIndex
+	fileList := payload.FileList
+
+	if len(fileList) == 0 {
+		return errors.New("file_list chunk requires at least one file")
+	}
+
+	resultKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
+
+	// Copy each file to a subdirectory in the workdir
+	chunkDir := filepath.Join(workDir, "files")
+	if err := os.MkdirAll(chunkDir, 0755); err != nil {
+		return fmt.Errorf("failed to create chunk file dir: %w", err)
+	}
+
+	if storageMode == "shared_mount" {
+		mountBasePath := deriveMountBasePath(storageMode)
+		for _, f := range fileList {
+			src := f
+			if !filepath.IsAbs(src) {
+				src = filepath.Join(mountBasePath, src)
+			}
+			dst := filepath.Join(chunkDir, filepath.Base(src))
+			if err := copyFile(src, dst); err != nil {
+				return fmt.Errorf("failed to copy file %s: %w", f, err)
+			}
+		}
+	} else {
+		for _, f := range fileList {
+			objReader, err := backend.ReadObject(ctx, f)
+			if err != nil {
+				return fmt.Errorf("failed to read file %s from backend: %w", f, err)
+			}
+			dst := filepath.Join(chunkDir, filepath.Base(f))
+			out, createErr := os.Create(dst)
+			if createErr != nil {
+				objReader.Close()
+				return fmt.Errorf("failed to create file %s: %w", dst, createErr)
+			}
+			_, copyErr := io.Copy(out, objReader)
+			objReader.Close()
+			out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to write file %s: %w", dst, copyErr)
+			}
+		}
+	}
+
+	inputPath := chunkDir
+	outputPath := filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
+
+	pluginID := job.PluginID
+	if pluginID == "" {
+		pluginID = payload.PluginID
+	}
+	pluginName := ResolvePluginName(ctx, pluginID, job.PluginName)
+	if pluginName == "" {
+		return fmt.Errorf("no plugin_id in job payload")
+	}
+
+	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
+	if err != nil {
+		return err
+	}
+
+	effectiveConfig := job.StepConfig
+	if len(payload.Config) > 0 {
+		effectiveConfig = payload.Config
+	}
+
+	pluginCtx := PluginContext{
+		JobID:       job.ID,
+		OrgID:       job.OrgID,
+		DatasetID:   datasetID,
+		ExecutionID: job.ExecutionID,
+		StepIndex:   job.StepIndex,
+		ChunkID:     payload.ChunkID,
+		ChunkIndex:  chunkIndex,
+		InputPath:   inputPath,
+		OutputPath:  outputPath,
+		Config:      effectiveConfig,
+	}
+
+	inJSON, _ := json.Marshal(pluginCtx)
+	env := system.DetectExecutionEnv()
+	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
+	if err != nil {
+		// Check if the plugin still managed to write a real output file.
+		// NOTE: os.Stat on an empty directory returns Size()==4096 (inode
+		// size), so we must actually verify content with hasRealOutput().
+		if hasRealOutput(outputPath) {
+			obs.Info("native sandbox returned error but output file exists, treating as success",
+				obs.Field{"plugin": manifest.Name, "output_path": outputPath})
+			execResult = &plugin.ExecutionResult{Output: ""}
+			err = nil
+		} else {
+			errStr := err.Error()
+			isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+			if isDockerErr {
+				execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, payload, job)
+				if err != nil {
+					return fmt.Errorf("process plugin failed (native+v2 fallback): %w", err)
+				}
+			} else {
+				return fmt.Errorf("process plugin failed: %w", err)
+			}
+		}
+	}
+
+	var result map[string]any
+	if execResult != nil && execResult.Output != "" {
+		result, _ = parsePluginOutputAsJSON(execResult.Output)
+	}
+
+	if _, statErr := os.Stat(outputPath); os.IsNotExist(statErr) {
+		var actualPath string
+		if data, ok := result["data"].(map[string]any); ok {
+			if p, ok := data["output_path"].(string); ok && p != "" {
+				actualPath = p
+			}
+		}
+		if actualPath != "" {
+			if info, err := os.Stat(actualPath); err == nil && !info.IsDir() {
+				os.MkdirAll(filepath.Dir(outputPath), 0755)
+				if err := os.Rename(actualPath, outputPath); err != nil {
+					if copyErr := copyFile(actualPath, outputPath); copyErr != nil {
+						return fmt.Errorf("failed to copy output to expected path: %w", copyErr)
+					}
+				}
+			}
+		}
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			os.MkdirAll(filepath.Dir(outputPath), 0755)
+			os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+		}
+	}
+
+	if storageMode != "shared_mount" {
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
+			os.MkdirAll(filepath.Dir(outputPath), 0755)
+			os.WriteFile(outputPath, []byte(execResult.Output), 0644)
+		}
+		outFile, err := os.Open(outputPath)
+		if err != nil {
+			return fmt.Errorf("failed to open output file for upload: %w", err)
+		}
+		defer outFile.Close()
+		if err := backend.WriteObject(ctx, resultKey, outFile); err != nil {
+			return fmt.Errorf("failed to write result to backend: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // ── Compound job helpers ──
 
 func getCompoundCacheDir(executionID, chunkID string) string {
@@ -946,6 +1647,31 @@ func getCompoundCacheDir(executionID, chunkID string) string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// hasRealOutput checks that path contains actual output data:
+//   - If a regular file, it must have content (size > 0).
+//   - If a directory (compound step output), it must contain at least one file.
+//     This avoids the trap where os.Stat on an empty directory returns
+//     fi.Size()==4096 (dir inode size), falsely implying success.
+func hasRealOutput(outputPath string) bool {
+	fi, statErr := os.Stat(outputPath)
+	if statErr != nil {
+		return false
+	}
+	if !fi.IsDir() {
+		return fi.Size() > 0
+	}
+	entries, rdErr := os.ReadDir(outputPath)
+	if rdErr != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func reportStepProgress(ctx context.Context, jobID, executionID, chunkID string, stepIndex int, status, errorMsg string) {
@@ -981,52 +1707,103 @@ func reportStepProgress(ctx context.Context, jobID, executionID, chunkID string,
 	resp.Body.Close()
 }
 
-func executePluginStep(ctx context.Context, job *Job, processPayload *ProcessPayload, pluginID string, config json.RawMessage, stepIndex int, inputPath, outputPath string) error {
+func executePluginStep(ctx context.Context, job *Job, processPayload *ProcessPayload, pluginID string, config json.RawMessage, stepIndex int, inputPath, outputPath string, previousData map[string]interface{}) (map[string]interface{}, error) {
+	// Deprecated: use executePluginStepEx which accepts a separate outputDir for
+	// compound mode. This wrapper preserves backward compat for any hypothetical
+	// caller that passes a file path as outputPath.
+	return executePluginStepEx(ctx, job, processPayload, pluginID, config, stepIndex, inputPath, outputPath, outputPath, previousData)
+}
+
+// executePluginStepEx executes a plugin step with separate output path (for
+// stdout fallback / final result file) and output dir (for file-based plugins
+// that write multiple files to a directory, e.g. image processing in compound
+// mode). In per-step non-compound mode both point to the same file path.
+func executePluginStepEx(ctx context.Context, job *Job, processPayload *ProcessPayload, pluginID string, config json.RawMessage, stepIndex int, inputPath, outputPath, outputDir string, previousData map[string]interface{}) (map[string]interface{}, error) {
 	pluginName := ResolvePluginName(ctx, pluginID, "")
 	if pluginName == "" {
-		return fmt.Errorf("no plugin name for ID %s", pluginID)
+		return nil, fmt.Errorf("no plugin name for ID %s", pluginID)
 	}
 
 	pluginPath, manifest, err := plugin.LoadAndUpdatePlugin(ctx, pluginName)
 	if err != nil {
-		return fmt.Errorf("load plugin %s: %w", pluginName, err)
+		return nil, fmt.Errorf("load plugin %s: %w", pluginName, err)
 	}
 
-	pluginCtx := PluginContext{
-		JobID:       job.ID,
-		OrgID:       job.OrgID,
-		DatasetID:   processPayload.DatasetID,
-		ExecutionID: job.ExecutionID,
-		StepIndex:   stepIndex,
-		ChunkID:     processPayload.ChunkID,
-		ChunkIndex:  processPayload.ChunkIndex,
-		InputPath:   inputPath,
-		OutputPath:  outputPath,
-		Config:      config,
+	// Build the plugin input in PluginContext canonical format:
+	// all fields at top level matching PluginContext JSON tags exactly,
+	// so that existing plugins see "input_path", "output_path", "config"
+	// in the same positions as in per-step (non-compound) mode.
+	// output_dir and previous_data are extra top-level fields that
+	// file-based plugins can optionally consume.
+	pluginInput := map[string]interface{}{
+		"job_id":        job.ID,
+		"org_id":        job.OrgID,
+		"dataset_id":    processPayload.DatasetID,
+		"execution_id":  job.ExecutionID,
+		"step_index":    stepIndex,
+		"chunk_id":      processPayload.ChunkID,
+		"chunk_index":   processPayload.ChunkIndex,
+		"input_path":    inputPath,
+		"output_path":   outputPath,
+		"output_dir":    outputDir,
+		"previous_data": previousData,
 	}
-
-	inJSON, _ := json.Marshal(pluginCtx)
+	if len(config) > 0 {
+		var cfg map[string]interface{}
+		if json.Unmarshal(config, &cfg) == nil {
+			pluginInput["config"] = cfg
+		}
+	} else {
+		pluginInput["config"] = nil
+	}
+	inJSON, _ := json.Marshal(pluginInput)
 	env := system.DetectExecutionEnv()
 	execResult, err := plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
 	if err != nil {
-		errStr := err.Error()
-		isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
-		isScriptPlugin := isScriptLanguage(manifest.Language)
-		if isDockerErr || isScriptPlugin {
-			processPayload.InputPath = inputPath
-			processPayload.OutputPath = outputPath
-			execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, processPayload, job)
-			if err != nil {
-				return fmt.Errorf("step %d plugin failed (native+v2): %w", stepIndex, err)
-			}
+		// Check if the plugin still managed to write a real output file.
+		// NOTE: os.Stat on an empty directory returns fi.Size()==4096 (inode
+		// size), so we must actually verify content with hasRealOutput().
+		if hasRealOutput(outputPath) {
+			obs.Info("native sandbox returned error but output file exists, treating as success",
+				obs.Field{"plugin": manifest.Name, "output_path": outputPath})
+			execResult = &plugin.ExecutionResult{Output: ""}
+			err = nil
 		} else {
-			return fmt.Errorf("step %d plugin failed: %w", stepIndex, err)
+			errStr := err.Error()
+			isCgroupErr := strings.Contains(errStr, "cgroup:")
+			isDockerErr := strings.Contains(errStr, "Docker") || strings.Contains(errStr, "docker")
+
+			if isCgroupErr {
+				obs.Warn("cgroup resource limits unavailable, retrying without limits",
+					obs.Field{"plugin": pluginName, "error": errStr})
+				execResult, err = plugin.Execute(ctx, pluginPath, manifest, string(inJSON), env, NativeRunnerFunc())
+				if err != nil {
+					// Check output file again after retry
+					if hasRealOutput(outputPath) {
+						obs.Info("cgroup retry returned error but output file exists, treating as success",
+							obs.Field{"plugin": pluginName, "output_path": outputPath})
+						execResult = &plugin.ExecutionResult{Output: ""}
+						err = nil
+					} else {
+						return nil, fmt.Errorf("step %d plugin failed: %w", stepIndex, err)
+					}
+				}
+			} else if isDockerErr {
+				processPayload.InputPath = inputPath
+				processPayload.OutputPath = outputPath
+				execResult, err = fallbackToV2Runtime(ctx, pluginPath, manifest, processPayload, job)
+				if err != nil {
+					return nil, fmt.Errorf("step %d plugin failed (native+v2): %w", stepIndex, err)
+				}
+			} else {
+				return nil, fmt.Errorf("step %d plugin failed: %w", stepIndex, err)
+			}
 		}
 	}
 
+	var result map[string]any
 	if execResult != nil && execResult.Output != "" {
-		var result map[string]any
-		json.Unmarshal([]byte(execResult.Output), &result)
+		result, _ = parsePluginOutputAsJSON(execResult.Output)
 	}
 
 	if _, err := os.Stat(outputPath); os.IsNotExist(err) && execResult != nil && execResult.Output != "" {
@@ -1034,7 +1811,7 @@ func executePluginStep(ctx context.Context, job *Job, processPayload *ProcessPay
 		os.WriteFile(outputPath, []byte(execResult.Output), 0644)
 	}
 
-	return nil
+	return result, nil
 }
 
 func executeCompoundProcessChunk(
@@ -1075,20 +1852,183 @@ func executeCompoundProcessChunk(
 
 	var pluginErr error
 	var lastOutputPath string
+	var previousData map[string]interface{}
 
 	mountBasePath := deriveMountBasePath(storageMode)
+
+	// If file_list is present, download source files once and reuse for all steps
+	var filesDir string
+	if len(processPayload.FileList) > 0 {
+		filesDir = filepath.Join(workDir, "files")
+		if err := os.MkdirAll(filesDir, 0755); err != nil {
+			return fmt.Errorf("create files dir: %w", err)
+		}
+		for _, f := range processPayload.FileList {
+			objReader, readErr := backend.ReadObject(ctx, f)
+			if readErr != nil {
+				return fmt.Errorf("read file %s: %w", f, readErr)
+			}
+			dst := filepath.Join(filesDir, filepath.Base(f))
+			out, createErr := os.Create(dst)
+			if createErr != nil {
+				objReader.Close()
+				return fmt.Errorf("create file %s: %w", dst, createErr)
+			}
+			_, copyErr := io.Copy(out, objReader)
+			objReader.Close()
+			out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("copy file %s: %w", dst, copyErr)
+			}
+		}
+	}
 
 	for si := startStep; si <= lastStep; si++ {
 		step := steps[si]
 		var inputPath string
 
+		// ── Clean current step's output dir (preserve prior steps' cache on retry) ──
+		stepOutDir := filepath.Join(cacheDir, fmt.Sprintf("step_%d_output", si))
+		if fileExists(stepOutDir) {
+			if err := os.RemoveAll(stepOutDir); err != nil {
+				pluginErr = fmt.Errorf("step %d: clean partial output: %w", si, err)
+				break
+			}
+		}
+		if err := os.MkdirAll(stepOutDir, 0755); err != nil {
+			pluginErr = fmt.Errorf("step %d: create output dir: %w", si, err)
+			break
+		}
+
+		// ── Resolve input path ──
+		// For steps after step 0, prefer previous_data.output_dir (compound chaining)
 		if si == 0 {
 			if storageMode == "shared_mount" {
-				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
-			} else {
-				// Step 0: read source files
-				if processPayload.SourcePath != "" {
-					// Single root-level CSV from source_path
+				sharedPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.bin", chunkIndex))
+				if fileExists(sharedPath) {
+					inputPath = sharedPath
+				} else if processPayload.SourcePath != "" {
+					// Fallback: download source from S3 when local chunk file doesn't exist
+					obs.Info("shared_mount chunk not found, falling back to S3 source", obs.Field{
+						"shared_path": sharedPath,
+						"source_path": processPayload.SourcePath,
+					})
+					objReader, readErr := backend.ReadObject(ctx, processPayload.SourcePath)
+					if readErr != nil {
+						pluginErr = fmt.Errorf("step %d: read source from S3 fallback %s: %w", si, processPayload.SourcePath, readErr)
+						break
+					}
+					ext := filepath.Ext(processPayload.SourcePath)
+					outPath := filepath.Join(workDir, "source"+ext)
+					outFile, createErr := os.Create(outPath)
+					if createErr != nil {
+						objReader.Close()
+						pluginErr = fmt.Errorf("step %d: create source file from S3 fallback: %w", si, createErr)
+						break
+					}
+					_, copyErr := io.Copy(outFile, objReader)
+					objReader.Close()
+					outFile.Close()
+					if copyErr != nil {
+						pluginErr = fmt.Errorf("step %d: copy source from S3 fallback: %w", si, copyErr)
+						break
+					}
+					inputPath = outPath
+				} else {
+					pluginErr = fmt.Errorf("step %d: shared_mount chunk not found at %s and no source_path for S3 fallback", si, sharedPath)
+					break
+				}
+			} else if filesDir != "" {
+				// If filesDir has exactly one entry, pass the file path directly
+				// (supports single-file pipelines like CSV scraping). Multiple
+				// files → pass the directory (image pipelines, batch processing).
+				if entries, readErr := os.ReadDir(filesDir); readErr == nil && len(entries) == 1 {
+					inputPath = filepath.Join(filesDir, entries[0].Name())
+					obs.Info("compound: single file in filesDir, using file path", obs.Field{
+						"input_path": inputPath,
+					})
+				} else {
+					inputPath = filesDir
+				}
+			} else if processPayload.SourcePath != "" {
+				// Directory listing mode: if source_path ends with '/', list objects
+				// and download them (supports file_per_chunk strategy from S3 backends)
+				if strings.HasSuffix(processPayload.SourcePath, "/") {
+					obs.Info("compound: listing source directory", obs.Field{
+						"source_path": processPayload.SourcePath,
+					})
+					objects, listErr := backend.ListObjects(ctx, processPayload.SourcePath)
+					if listErr != nil {
+						pluginErr = fmt.Errorf("step %d: list source directory %s: %w", si, processPayload.SourcePath, listErr)
+						break
+					}
+					if len(objects) == 0 {
+						pluginErr = fmt.Errorf("step %d: no files found at %s", si, processPayload.SourcePath)
+						break
+					}
+					// Create download directory
+					filesDir = filepath.Join(workDir, "files")
+					if err := os.MkdirAll(filesDir, 0755); err != nil {
+						pluginErr = fmt.Errorf("step %d: create files dir: %w", si, err)
+						break
+					}
+					// Extract file_pattern from config
+					filePattern := ""
+					var configMap map[string]interface{}
+					if len(processPayload.Config) > 0 {
+						if err := json.Unmarshal(processPayload.Config, &configMap); err == nil {
+							if fp, ok := configMap["file_pattern"].(string); ok {
+								filePattern = fp
+							}
+						}
+					}
+					// Download each file
+					for _, obj := range objects {
+						// Skip directory entries
+						if strings.HasSuffix(obj.Key, "/") {
+							continue
+						}
+						if filePattern != "" {
+							matched, matchErr := filepath.Match(filePattern, filepath.Base(obj.Key))
+							if matchErr != nil || !matched {
+								continue
+							}
+						}
+						objReader, readErr := backend.ReadObject(ctx, obj.Key)
+						if readErr != nil {
+							pluginErr = fmt.Errorf("step %d: read source file %s: %w", si, obj.Key, readErr)
+							break
+						}
+						dst := filepath.Join(filesDir, filepath.Base(obj.Key))
+						outFile, createErr := os.Create(dst)
+						if createErr != nil {
+							objReader.Close()
+							pluginErr = fmt.Errorf("step %d: create file %s: %w", si, dst, createErr)
+							break
+						}
+						_, copyErr := io.Copy(outFile, objReader)
+						objReader.Close()
+						outFile.Close()
+						if copyErr != nil {
+							pluginErr = fmt.Errorf("step %d: copy file %s: %w", si, dst, copyErr)
+							break
+						}
+						obs.Info("compound: downloaded source file", obs.Field{
+							"key":  obj.Key,
+							"dst":  dst,
+							"size": obj.Size,
+						})
+					}
+					if pluginErr != nil {
+						break
+					}
+					inputPath = filesDir
+					obs.Info("compound: downloaded all source files to", obs.Field{
+						"dir":   filesDir,
+						"count": len(objects),
+					})
+				} else {
+					// Single file from source_path
 					objReader, readErr := backend.ReadObject(ctx, processPayload.SourcePath)
 					if readErr != nil {
 						pluginErr = fmt.Errorf("step %d: read source %s: %w", si, processPayload.SourcePath, readErr)
@@ -1110,63 +2050,106 @@ func executeCompoundProcessChunk(
 						break
 					}
 					inputPath = outPath
-				} else {
-					pluginErr = fmt.Errorf("step %d: source_path is required for S3 process jobs (no /source/ prefix fallback)", si)
-					break
-				}
-			}
-		} else {
-			cachedPath := filepath.Join(cacheDir, fmt.Sprintf("step_%d.out", si-1))
-			if fileExists(cachedPath) {
-				inputPath = cachedPath
-			} else if storageMode == "shared_mount" {
-				inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
-				if !fileExists(inputPath) {
-					pluginErr = fmt.Errorf("step %d: prev output not found at %s", si, inputPath)
-					break
 				}
 			} else {
-				obs.Warn("compound: cached step output not found, downloading from S3", obs.Field{
-					"step": si - 1,
-					"path": cachedPath,
-				})
-				inputKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
-				objReader, err := backend.ReadObject(ctx, inputKey)
-				if err != nil {
-					pluginErr = fmt.Errorf("step %d: download prev output: %w", si, err)
-					break
+				pluginErr = fmt.Errorf("step %d: source_path or file_list required for S3 process jobs", si)
+				break
+			}
+		} else {
+			// For steps after step 0, prefer previous_data.output_dir from compound chaining
+			if previousData != nil {
+				if od, ok := previousData["output_dir"].(string); ok && od != "" {
+					inputPath = od
 				}
-				inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
-				inputFile, createErr := os.Create(inputPath)
-				if createErr != nil {
+			}
+			// If no output_dir but previousData has output_path (e.g. scrape.py
+			// writes a single CSV file), use that file path directly.
+			if inputPath == "" && previousData != nil {
+				if op, ok := previousData["output_path"].(string); ok && op != "" {
+					if fileExists(op) {
+						inputPath = op
+					}
+				}
+			}
+			// Fallback: reuse filesDir if set (original source files)
+			if inputPath == "" && filesDir != "" {
+				inputPath = filesDir
+			}
+			// Fallback: existing cache/S3 logic
+			if inputPath == "" {
+				prevStepOutDir := filepath.Join(cacheDir, fmt.Sprintf("step_%d_output", si-1))
+				if fileExists(prevStepOutDir) {
+					inputPath = prevStepOutDir
+				} else if storageMode == "shared_mount" {
+					inputPath = filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
+					if !fileExists(inputPath) {
+						pluginErr = fmt.Errorf("step %d: prev output not found at %s", si, inputPath)
+						break
+					}
+				} else {
+					obs.Warn("compound: cached step output not found, downloading from S3", obs.Field{
+						"step": si - 1,
+						"path": prevStepOutDir,
+					})
+					inputKey := storage.GetRemotePathWithSlug(datasetID, datasetSlug, chunkIndex, "result")
+					objReader, err := backend.ReadObject(ctx, inputKey)
+					if err != nil {
+						pluginErr = fmt.Errorf("step %d: download prev output: %w", si, err)
+						break
+					}
+					inputPath = filepath.Join(workDir, fmt.Sprintf("chunk_%d.out", chunkIndex))
+					inputFile, createErr := os.Create(inputPath)
+					if createErr != nil {
+						objReader.Close()
+						pluginErr = fmt.Errorf("step %d: create prev file: %w", si, createErr)
+						break
+					}
+					_, copyErr := io.Copy(inputFile, objReader)
 					objReader.Close()
-					pluginErr = fmt.Errorf("step %d: create prev file: %w", si, createErr)
-					break
-				}
-				_, copyErr := io.Copy(inputFile, objReader)
-				objReader.Close()
-				inputFile.Close()
-				if copyErr != nil {
-					pluginErr = fmt.Errorf("step %d: copy prev: %w", si, copyErr)
-					break
+					inputFile.Close()
+					if copyErr != nil {
+						pluginErr = fmt.Errorf("step %d: copy prev: %w", si, copyErr)
+						break
+					}
 				}
 			}
 		}
 
-		outputPath := filepath.Join(cacheDir, fmt.Sprintf("step_%d.out", si))
+		// outputPath = file path for stdout-to-file fallback (per-step mode pattern)
+		// outputDir  = directory for file-based plugins that produce multiple files
+		outputPath := filepath.Join(stepOutDir, fmt.Sprintf("step_%d_output.json", si))
+		outputDir := stepOutDir
 
-		if err := executePluginStep(ctx, job, processPayload, step.PluginID, step.Config, si, inputPath, outputPath); err != nil {
-			pluginErr = fmt.Errorf("step %d: %w", si, err)
+		result, execErr := executePluginStepEx(ctx, job, processPayload, step.PluginID, step.Config, si, inputPath, outputPath, outputDir, previousData)
+		if execErr != nil {
+			pluginErr = fmt.Errorf("step %d: %w", si, execErr)
 			reportStepProgress(ctx, job.ID, executionID, chunkID, si, "failed", pluginErr.Error())
 			break
 		}
 
 		reportStepProgress(ctx, job.ID, executionID, chunkID, si, "completed", "")
 		lastOutputPath = outputPath
+
+		// Extract file_list and output_dir from step output for next step's previous_data.
+		// Some plugins wrap output in a "data" key; others put fields at top level.
+		if result != nil {
+			if data, ok := result["data"].(map[string]interface{}); ok {
+				previousData = data
+			} else {
+				// Fields at top level — check for known chaining keys
+				if _, hasOP := result["output_path"]; hasOP {
+					previousData = result
+				} else if _, hasOD := result["output_dir"]; hasOD {
+					previousData = result
+				} else if _, hasFL := result["file_list"]; hasFL {
+					previousData = result
+				}
+			}
+		}
 	}
 
 	if pluginErr != nil {
-		// Preserve cache for retry — don't clean up
+		// Preserve cache for retry — don't clean up prior steps
 		obs.Warn("compound job failed, cache preserved for retry", obs.Field{
 			"cache_dir": cacheDir,
 			"error":     pluginErr.Error(),
@@ -1174,41 +2157,99 @@ func executeCompoundProcessChunk(
 		return pluginErr
 	}
 
-	// Upload final output to S3 or copy to shared mount
-	if storageMode != "shared_mount" {
-		if _, err := os.Stat(lastOutputPath); os.IsNotExist(err) {
-			return fmt.Errorf("final output not found at %s", lastOutputPath)
-		}
-		outputFile, err := os.Open(lastOutputPath)
-		if err != nil {
-			return fmt.Errorf("open final output: %w", err)
-		}
-		defer outputFile.Close()
+	// Determine which file to upload as the final result.
+	// 1. Prefer the outputPath file (stdout fallback or plugin-created file).
+	// 2. If that doesn't exist, scan the step output directory for the newest file.
+	// 3. If nothing found, upload a minimal metadata JSON (should not happen).
+	var uploadFilePath string
+	lastOutputDir := filepath.Join(cacheDir, fmt.Sprintf("step_%d_output", lastStep))
 
-		if err := backend.WriteObject(ctx, resultKey, outputFile); err != nil {
-			return fmt.Errorf("write final result: %w", err)
+	if _, statErr := os.Stat(lastOutputPath); statErr == nil {
+		uploadFilePath = lastOutputPath
+	} else {
+		// Scan the step output directory for the newest file
+		var newestMod time.Time
+		entries, readErr := os.ReadDir(lastOutputDir)
+		if readErr == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				info, fiErr := entry.Info()
+				if fiErr != nil {
+					continue
+				}
+				if info.ModTime().After(newestMod) {
+					newestMod = info.ModTime()
+					uploadFilePath = filepath.Join(lastOutputDir, entry.Name())
+				}
+			}
+		}
+	}
+
+	if uploadFilePath != "" {
+		// Upload the chunk result (actual output file)
+		if storageMode != "shared_mount" {
+			f, fErr := os.Open(uploadFilePath)
+			if fErr != nil {
+				return fmt.Errorf("open output file: %w", fErr)
+			}
+			if wErr := backend.WriteObject(ctx, resultKey, f); wErr != nil {
+				f.Close()
+				return fmt.Errorf("write result: %w", wErr)
+			}
+			f.Close()
+		} else {
+			mountBasePath := deriveMountBasePath(storageMode)
+			chunkOutPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
+			if err := os.MkdirAll(filepath.Dir(chunkOutPath), 0755); err != nil {
+				return fmt.Errorf("create output dir: %w", err)
+			}
+			if err := copyFile(uploadFilePath, chunkOutPath); err != nil {
+				return fmt.Errorf("copy final output: %w", err)
+			}
 		}
 
-		obs.Info("compound job completed, final result uploaded", obs.Field{
-			"execution_id": executionID,
-			"chunk_id":     chunkID,
-			"steps":        len(steps),
-			"result_key":   resultKey,
+		obs.Info("compound job completed, uploaded output file", obs.Field{
+			"execution_id":  executionID,
+			"chunk_id":      chunkID,
+			"steps":         len(steps),
+			"output_file":   uploadFilePath,
 		})
 	} else {
-		mountBasePath := deriveMountBasePath(storageMode)
-		finalOutputPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.out", chunkIndex))
-		if err := os.MkdirAll(filepath.Dir(finalOutputPath), 0755); err != nil {
-			return fmt.Errorf("create output dir: %w", err)
+		// Nothing to upload — write minimal metadata JSON as last resort
+		meta := map[string]interface{}{
+			"output_dir": lastOutputDir,
+			"file_list":  nil,
+			"steps":      len(steps),
 		}
-		if err := copyFile(lastOutputPath, finalOutputPath); err != nil {
-			return fmt.Errorf("copy final output to shared mount: %w", err)
+		if previousData != nil {
+			if fl, ok := previousData["file_list"]; ok {
+				meta["file_list"] = fl
+			}
 		}
-		obs.Info("compound job completed, final result copied to shared mount", obs.Field{
-			"execution_id": executionID,
-			"chunk_id":     chunkID,
-			"steps":        len(steps),
-			"output_path":  finalOutputPath,
+		metaJSON, _ := json.Marshal(meta)
+
+		if storageMode != "shared_mount" {
+			if err := backend.WriteObject(ctx, resultKey, bytes.NewReader(metaJSON)); err != nil {
+				return fmt.Errorf("write final result meta: %w", err)
+			}
+		} else {
+			mountBasePath := deriveMountBasePath(storageMode)
+			metaPath := filepath.Join(mountBasePath, "datasets", datasetID, "chunks", fmt.Sprintf("chunk_%d.json", chunkIndex))
+			if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
+				return fmt.Errorf("create meta dir: %w", err)
+			}
+			if err := os.WriteFile(metaPath, metaJSON, 0644); err != nil {
+				return fmt.Errorf("write final result meta: %w", err)
+			}
+		}
+
+		obs.Info("compound job completed, no output file found", obs.Field{
+			"execution_id":  executionID,
+			"chunk_id":      chunkID,
+			"steps":         len(steps),
+			"output_dir":    lastOutputDir,
 		})
 	}
 
@@ -1281,8 +2322,7 @@ func deriveMountBasePath(storageMode string) string {
 		return mountPath
 	}
 
-	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, "sentra", "data")
+	return "/data/sentra"
 }
 
 func normalizeStorageModeForJob(mode string) string {
@@ -1323,6 +2363,9 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 	mountBasePath := deriveMountBasePath(storageMode)
 
 	backend := GetStorageBackend()
+	if backend == nil {
+		return errors.New("storage backend not initialized")
+	}
 
 	sourcePath, chunksPath, resultsPath, mergedPath := deriveDatasetPaths(
 		ingestPayload.DatasetID,
@@ -1417,7 +2460,8 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	var result IngestResult
-	if err := json.Unmarshal([]byte(execResult.Output), &result); err != nil {
+	outputToParse := extractLastJSONString(execResult.Output)
+	if err := json.Unmarshal([]byte(outputToParse), &result); err != nil {
 		return fmt.Errorf("failed to parse ingest plugin output: %w", err)
 	}
 
@@ -1549,8 +2593,19 @@ func extractFileMetadata(ctx context.Context, filePath string) (map[string]any, 
 		return extractParquetMetadata(ctx, filePath)
 	case ".ndjson":
 		return extractJSONLMetadata(ctx, filePath)
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".svg":
+		return extractImageMetadata(ctx, filePath)
+	case ".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".flv", ".m4v":
+		return extractVideoMetadata(ctx, filePath)
+	case ".pdf":
+		return extractPDFMetadata(ctx, filePath)
+	case ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a":
+		return extractAudioMetadata(ctx, filePath)
+	case ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar":
+		return extractArchiveMetadata(ctx, filePath)
+	case ".so", ".dll", ".dylib", ".exe", ".elf", ".o", ".obj":
+		return extractBinaryMetadata(ctx, filePath)
 	default:
-		// Try to detect format by reading first bytes
 		return detectAndExtractMetadata(ctx, filePath)
 	}
 }
@@ -1810,8 +2865,12 @@ func extractParquetMetadata(ctx context.Context, filePath string) (map[string]an
 
 func detectAndExtractMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":       "unknown",
-		"sample_file": filepath.Base(filePath),
+		"format":          "unknown",
+		"sample_file":     filepath.Base(filePath),
+	}
+
+	if info, err := os.Stat(filePath); err == nil {
+		metadata["file_size_bytes"] = info.Size()
 	}
 
 	// Read first 4KB to detect format
@@ -1836,6 +2895,34 @@ func detectAndExtractMetadata(ctx context.Context, filePath string) (map[string]
 		// gzip
 		if header[0] == 0x1f && header[1] == 0x8b {
 			metadata["format"] = "gzip"
+			return metadata, nil
+		}
+		// PNG
+		if n >= 8 && string(header[:8]) == "\x89PNG\r\n\x1a\n" {
+			return extractImageMetadata(ctx, filePath)
+		}
+		// JPEG
+		if n >= 3 && header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff {
+			return extractImageMetadata(ctx, filePath)
+		}
+		// PDF
+		if n >= 5 && string(header[:5]) == "%PDF-" {
+			return extractPDFMetadata(ctx, filePath)
+		}
+		// ELF
+		if string(header[:4]) == "\x7fELF" {
+			return extractBinaryMetadata(ctx, filePath)
+		}
+		// ZIP (PK\x03\x04)
+		if header[0] == 0x50 && header[1] == 0x4b && (header[2] == 0x03 || header[2] == 0x05 || header[2] == 0x07) {
+			return extractArchiveMetadata(ctx, filePath)
+		}
+		// RIFF (WAV/AVI)
+		if string(header[:4]) == "RIFF" {
+			if n >= 12 && string(header[8:12]) == "WAVE" {
+				return extractAudioMetadata(ctx, filePath)
+			}
+			return metadata, nil
 		}
 	}
 
@@ -1855,6 +2942,288 @@ func detectAndExtractMetadata(ctx context.Context, filePath string) (map[string]
 	}
 
 	return metadata, nil
+}
+
+func extractImageMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	meta := map[string]any{
+		"format": "image",
+	}
+
+	buf := make([]byte, 512)
+	f.Read(buf)
+	f.Seek(0, 0)
+	mimeType := http.DetectContentType(buf)
+	meta["image_mime"] = mimeType
+
+	cfg, _, err := image.DecodeConfig(f)
+	if err == nil {
+		meta["image_width"] = cfg.Width
+		meta["image_height"] = cfg.Height
+		meta["image_color_model"] = fmt.Sprintf("%T", cfg.ColorModel)
+	}
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	return meta, nil
+}
+
+func extractVideoMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	meta := map[string]any{
+		"format": "video",
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	buf := make([]byte, 4096)
+	f.Read(buf)
+	f.Seek(0, 0)
+
+	switch {
+	case bytes.Contains(buf, []byte("ftyp")):
+		meta["video_container"] = "mp4"
+		ftypIdx := bytes.Index(buf, []byte("ftyp"))
+		if ftypIdx >= 0 && ftypIdx+12 < len(buf) {
+			meta["video_codec"] = string(bytes.TrimRight(buf[ftypIdx+8:ftypIdx+12], "\x00"))
+		}
+	case bytes.HasPrefix(buf, []byte{0x1a, 0x45, 0xdf, 0xa3}):
+		meta["video_container"] = "matroska"
+	case bytes.HasPrefix(buf, []byte("RIFF")) && bytes.Contains(buf[:12], []byte("AVI ")):
+		meta["video_container"] = "avi"
+	case bytes.HasPrefix(buf, []byte{0x00, 0x00, 0x00, 0x1c, 0x66, 0x74, 0x79, 0x70}):
+		meta["video_container"] = "quicktime"
+	default:
+		meta["video_container"] = "unknown"
+	}
+
+	meta["estimated_duration_seconds"] = float64(fi.Size()) / 500000
+
+	if fi.Size() > 500*1024*1024 {
+		meta["quality_estimate"] = "high"
+	} else if fi.Size() > 50*1024*1024 {
+		meta["quality_estimate"] = "medium"
+	} else {
+		meta["quality_estimate"] = "low"
+	}
+
+	return meta, nil
+}
+
+func extractPDFMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	meta := map[string]any{
+		"format": "pdf",
+	}
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	conf := model.NewDefaultConfiguration()
+
+	f, err := os.Open(filePath)
+	if err == nil {
+		defer f.Close()
+		pdfInfo, err := pdfcpuapi.PDFInfo(f, filePath, nil, conf)
+		if err == nil {
+			meta["pdf_page_count"] = pdfInfo.PageCount
+			meta["pdf_version"] = pdfInfo.Version
+			meta["pdf_encrypted"] = pdfInfo.Encrypted
+			meta["pdf_linearized"] = pdfInfo.Linearized
+		}
+	}
+
+	return meta, nil
+}
+
+func extractAudioMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	meta := map[string]any{
+		"format": "audio",
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	buf := make([]byte, 4096)
+	f.Read(buf)
+	f.Seek(0, 0)
+
+	switch {
+	case bytes.HasPrefix(buf, []byte("ID3")):
+		meta["audio_codec"] = "mp3"
+		if len(buf) > 10 {
+			id3Size := int(buf[6])<<21 | int(buf[7])<<14 | int(buf[8])<<7 | int(buf[9])
+			meta["id3_tag_present"] = true
+			meta["id3_tag_size"] = id3Size
+		}
+	case bytes.HasPrefix(buf, []byte("RIFF")) && bytes.Contains(buf[:12], []byte("WAVE")):
+		meta["audio_codec"] = "pcm"
+		if len(buf) > 28 {
+			sampleRate := binary.LittleEndian.Uint32(buf[24:28])
+			meta["audio_sample_rate"] = sampleRate
+		}
+	case bytes.HasPrefix(buf, []byte("fLaC")):
+		meta["audio_codec"] = "flac"
+	case buf[0] == 0xFF && (buf[1]&0xE0) == 0xE0:
+		meta["audio_codec"] = "mp3"
+	default:
+		meta["audio_codec"] = "unknown"
+	}
+
+	return meta, nil
+}
+
+func extractArchiveMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	meta := map[string]any{
+		"format": "archive",
+	}
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	if zr, err := zip.OpenReader(filePath); err == nil {
+		meta["archive_format"] = "zip"
+		meta["archive_file_count"] = len(zr.File)
+		var totalSize int64
+		for _, f := range zr.File {
+			totalSize += int64(f.UncompressedSize64)
+		}
+		meta["archive_uncompressed_bytes"] = totalSize
+		if fi.Size() > 0 {
+			meta["archive_compression_ratio"] = float64(totalSize) / float64(fi.Size())
+		}
+		zr.Close()
+		return meta, nil
+	}
+
+	f, _ := os.Open(filePath)
+	defer f.Close()
+
+	var tr io.Reader = f
+	gzBuf := make([]byte, 2)
+	f.Read(gzBuf)
+	f.Seek(0, 0)
+
+	if gzBuf[0] == 0x1F && gzBuf[1] == 0x8B {
+		meta["archive_format"] = "tar.gz"
+		if gr, err := gzip.NewReader(f); err == nil {
+			tr = gr
+			defer gr.Close()
+		}
+	} else {
+		meta["archive_format"] = "tar"
+	}
+
+	tarReader := tar.NewReader(tr)
+	var fileCount int
+	var totalSize int64
+	for {
+		hdr, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			fileCount++
+			totalSize += hdr.Size
+		}
+	}
+	meta["archive_file_count"] = fileCount
+	meta["archive_uncompressed_bytes"] = totalSize
+	if fi.Size() > 0 {
+		meta["archive_compression_ratio"] = float64(totalSize) / float64(fi.Size())
+	}
+
+	return meta, nil
+}
+
+func extractBinaryMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	meta := map[string]any{
+		"format": "binary",
+	}
+
+	fi, _ := os.Stat(filePath)
+	meta["file_size_bytes"] = fi.Size()
+
+	if ef, err := elf.Open(filePath); err == nil {
+		meta["binary_format"] = "elf"
+		meta["binary_arch"] = ef.Machine.String()
+		if ef.FileHeader.Type == elf.ET_EXEC {
+			meta["binary_type"] = "executable"
+		} else if ef.FileHeader.Type == elf.ET_DYN {
+			meta["binary_type"] = "shared_library"
+		} else if ef.FileHeader.Type == elf.ET_REL {
+			meta["binary_type"] = "relocatable"
+		}
+		ef.Close()
+		return meta, nil
+	}
+
+	if pef, err := pe.Open(filePath); err == nil {
+		meta["binary_format"] = "pe"
+		switch pef.Machine {
+		case pe.IMAGE_FILE_MACHINE_I386:
+			meta["binary_arch"] = "i386"
+		case pe.IMAGE_FILE_MACHINE_AMD64:
+			meta["binary_arch"] = "x86_64"
+		case pe.IMAGE_FILE_MACHINE_ARM64:
+			meta["binary_arch"] = "arm64"
+		default:
+			meta["binary_arch"] = fmt.Sprintf("0x%x", pef.Machine)
+		}
+		pef.Close()
+		return meta, nil
+	}
+
+	if mf, err := macho.Open(filePath); err == nil {
+		meta["binary_format"] = "macho"
+		meta["binary_arch"] = mf.Cpu.String()
+		switch mf.Type {
+		case macho.TypeExec:
+			meta["binary_type"] = "executable"
+		case macho.TypeDylib:
+			meta["binary_type"] = "dynamic_library"
+		case macho.TypeBundle:
+			meta["binary_type"] = "bundle"
+		}
+		mf.Close()
+		return meta, nil
+	}
+
+	if ff, err := macho.OpenFat(filePath); err == nil {
+		meta["binary_format"] = "macho"
+		var archs []string
+		for _, arch := range ff.Arches {
+			archs = append(archs, arch.Cpu.String())
+		}
+		meta["binary_arch"] = strings.Join(archs, ",")
+		meta["binary_type"] = "executable"
+		meta["binary_fat"] = true
+		ff.Close()
+		return meta, nil
+	}
+
+	meta["binary_format"] = "unknown"
+	return meta, nil
 }
 
 func detectDelimiter(file *os.File) rune {
@@ -2012,6 +3381,15 @@ func fallbackToV2Runtime(
 		payloadMap["chunk_index"] = processPayload.ChunkIndex
 		payloadMap["input_path"] = processPayload.InputPath
 		payloadMap["output_path"] = processPayload.OutputPath
+		payloadMap["mock_mode"] = processPayload.MockMode
+		if len(processPayload.Config) > 0 {
+			var cfg map[string]interface{}
+			if json.Unmarshal(processPayload.Config, &cfg) == nil {
+				for k, v := range cfg {
+					payloadMap[k] = v
+				}
+			}
+		}
 	}
 
 	v2Job := executorv2.Job{
@@ -2076,6 +3454,91 @@ func mapDepsToV2(deps []plugin.RuntimeDependency) []runtimev2.Dependency {
 	return out
 }
 
+func tryParseJSONString(s string) interface{} {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 {
+		return nil
+	}
+	if (s[0] == '{' && s[len(s)-1] == '}') || (s[0] == '[' && s[len(s)-1] == ']') {
+		var parsed interface{}
+		if json.Unmarshal([]byte(s), &parsed) == nil {
+			return parsed
+		}
+	}
+	return nil
+}
+
+// parsePluginOutputAsJSON extracts the last valid JSON object from combined
+// stdout+stderr output. Plugins may emit log lines to stderr and JSON to stdout;
+// the sandbox separates the two, but for defense-in-depth we also handle the
+// case where they may be interleaved.
+func parsePluginOutputAsJSON(output string) (map[string]any, error) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return nil, nil
+	}
+
+	// Fast path: try the entire output as-is (clean stdout-only case)
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err == nil {
+		return result, nil
+	}
+
+	// Fallback: look for the last line that is a valid JSON object
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err == nil {
+				return m, nil
+			}
+		}
+	}
+
+	// Last resort: return the original error
+	return nil, fmt.Errorf("no valid JSON object found in plugin output: %s", truncateForLog(output, 200))
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// extractLastJSONString finds the last valid JSON object in a string that may
+// contain mixed stdout+stderr output. Returns the original string if no valid
+// JSON object is found (so callers can try parsing it directly).
+func extractLastJSONString(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	// Fast path: if the whole thing is valid JSON, use it
+	if json.Unmarshal([]byte(trimmed), &json.RawMessage{}) == nil {
+		return trimmed
+	}
+
+	// Fallback: find last line that is a valid JSON object or array
+	lines := strings.Split(trimmed, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if len(line) < 2 {
+			continue
+		}
+		if (line[0] == '{' && line[len(line)-1] == '}') || (line[0] == '[' && line[len(line)-1] == ']') {
+			if json.Unmarshal([]byte(line), &json.RawMessage{}) == nil {
+				return line
+			}
+		}
+	}
+
+	// Last resort: return original
+	return trimmed
+}
+
 func copyFile(src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
@@ -2091,11 +3554,4 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func isScriptLanguage(lang string) bool {
-	switch lang {
-	case "python", "python3", "python2", "node", "nodejs", "javascript", "typescript", "ruby", "bash", "shell":
-		return true
-	default:
-		return false
-	}
-}
+

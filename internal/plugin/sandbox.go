@@ -14,7 +14,95 @@ import (
 
 	"sentra-agent/internal/obs"
 	"sentra-agent/internal/sandbox"
+	"sentra-agent/internal/sysinfo"
 )
+
+func EnsurePluginDependencies(ctx context.Context, manifest Manifest) error {
+	if len(manifest.Dependencies) == 0 {
+		return nil
+	}
+	if manifest.Language != "python" && manifest.Language != "python3" {
+		return nil
+	}
+
+	runtimeDeps := make([]string, 0, len(manifest.Dependencies))
+	for _, dep := range manifest.Dependencies {
+		if dep.Source != "" && dep.Source != "python" {
+			continue
+		}
+		name := dep.Name
+		if name == "" {
+			continue
+		}
+
+		show := exec.CommandContext(ctx, "python3", "-m", "pip", "show", name)
+		if show.Run() == nil {
+			continue
+		}
+
+		if dep.Version != "" {
+			ver := strings.ReplaceAll(dep.Version, "≥", ">=")
+			ver = strings.ReplaceAll(ver, "≤", "<=")
+			ver = strings.ReplaceAll(ver, " ", "")
+			// "*" or "latest" means any version — just use the package name
+			if ver == "*" || ver == "latest" {
+				runtimeDeps = append(runtimeDeps, name)
+			} else if strings.HasPrefix(ver, ">=") || strings.HasPrefix(ver, "<=") ||
+				strings.HasPrefix(ver, "==") || strings.HasPrefix(ver, "!=") ||
+				strings.HasPrefix(ver, "~=") || strings.HasPrefix(ver, ">") ||
+				strings.HasPrefix(ver, "<") {
+				runtimeDeps = append(runtimeDeps, name+ver)
+			} else {
+				runtimeDeps = append(runtimeDeps, fmt.Sprintf("%s==%s", name, ver))
+			}
+		} else {
+			runtimeDeps = append(runtimeDeps, name)
+		}
+	}
+
+	if len(runtimeDeps) == 0 {
+		return nil
+	}
+
+	obs.Info("installing plugin dependencies", obs.Field{
+		"plugin": manifest.Name,
+		"deps":   strings.Join(runtimeDeps, ", "),
+	})
+
+	dctx, cancel := context.WithTimeout(ctx, 300*time.Second)
+	defer cancel()
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-dctx.Done():
+				return dctx.Err()
+			case <-time.After(time.Duration(attempt*2) * time.Second):
+			}
+		}
+
+		args := append([]string{"-m", "pip", "install", "--no-cache-dir"}, runtimeDeps...)
+		cmd := exec.CommandContext(dctx, "python3", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			obs.Warn("pip install attempt failed", obs.Field{
+				"plugin":  manifest.Name,
+				"attempt": attempt + 1,
+				"error":   err.Error(),
+			})
+			continue
+		}
+
+		obs.Info("plugin dependencies installed", obs.Field{
+			"plugin": manifest.Name,
+		})
+		return nil
+	}
+
+	return fmt.Errorf("failed to install dependencies for %s after 3 retries", manifest.Name)
+}
 
 func PrepareJobWorkDir(jobID string) (string, func(), error) {
 	workDir := filepath.Join(sandbox.LoadConfig().TempDir, fmt.Sprintf("sentra-%s", jobID))
@@ -68,6 +156,27 @@ func RunSandboxedPlugin(
 		},
 	)
 
+	if manifest.Resources.RequiresGPU {
+		specs := sysinfo.Detect()
+		if specs.GPUModel == "" {
+			return nil, fmt.Errorf("plugin %s requires GPU but device has none", manifest.Name)
+		}
+		if manifest.Resources.GPUMemoryMB > 0 &&
+			specs.GPUMemoryFreeGB*1024 < float64(manifest.Resources.GPUMemoryMB) {
+			return nil, fmt.Errorf(
+				"plugin %s requires %d MB GPU memory but only %.0f MB free",
+				manifest.Name, manifest.Resources.GPUMemoryMB, specs.GPUMemoryFreeGB*1024,
+			)
+		}
+	}
+
+	if err := EnsurePluginDependencies(ctx, manifest); err != nil {
+		obs.Warn("failed to ensure plugin dependencies", obs.Field{
+			"plugin": manifest.Name,
+			"error":  err.Error(),
+		})
+	}
+
 	cfg := sandbox.LoadConfig()
 	sb := sandbox.New(cfg)
 
@@ -80,6 +189,8 @@ func RunSandboxedPlugin(
 			CPUSeconds:     manifest.Resources.CPUSeconds,
 			CPULimit:       manifest.Resources.CPULimit,
 			TimeoutSeconds: manifest.Resources.TimeoutSeconds,
+			RequiresGPU:    manifest.Resources.RequiresGPU,
+			GPUMemoryMB:    manifest.Resources.GPUMemoryMB,
 		},
 	}
 
@@ -107,15 +218,15 @@ func RunSandboxedPlugin(
 	cmd.Dir = env.WorkDir
 	cmd.Stdin = bytes.NewReader(plb)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
 	var cmdErr error
 	sbErr := sb.Execute(dctx, env, cmd)
 	if sbErr != nil {
 		cmdErr = sbErr
-		log.Printf("[sandbox] execution failed: %v, output:\n%s", sbErr, out.String())
+		log.Printf("[sandbox] execution failed: %v, stdout:\n%s\nstderr:\n%s", sbErr, truncateOutput(stdoutBuf.String()), truncateOutput(stderrBuf.String()))
 	} else {
 		cmdErr = nil
 	}
@@ -123,8 +234,22 @@ func RunSandboxedPlugin(
 	exitCode := exitCodeFromError(cmdErr)
 	duration := time.Since(start)
 
+	output := stdoutBuf.String()
+	if output == "" {
+		// If stdout is empty, use stderr as fallback (plugin may have redirected)
+		output = stderrBuf.String()
+	}
+
+	// Truncate the output field for memory safety, but only if it's extremely large.
+	// Plugin JSON output (e.g., 200+ images with metadata) can exceed the old 4KB limit.
+	// Use a generous 10MB limit so large pipeline results are preserved.
+	maxOutputLen := 10 * 1024 * 1024
+	if len(output) > maxOutputLen {
+		output = output[:maxOutputLen] + "... [truncated at 10MB]"
+	}
+
 	return &SandboxResult{
-		Output:     truncateOutput(out.String()),
+		Output:     output,
 		ExitCode:   exitCode,
 		DurationMs: duration.Milliseconds(),
 		Method:     "native_sandbox",

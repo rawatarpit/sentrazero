@@ -133,13 +133,17 @@ func (pr *PythonRuntime) InstallDeps(ctx context.Context, deps []Dependency, env
 	pipDeps := make([]string, len(deps))
 	for i, dep := range deps {
 		if dep.Version != "" {
-			if strings.HasPrefix(dep.Version, ">=") || strings.HasPrefix(dep.Version, "<=") ||
-				strings.HasPrefix(dep.Version, "==") || strings.HasPrefix(dep.Version, "!=") ||
-				strings.HasPrefix(dep.Version, "~=") || strings.HasPrefix(dep.Version, ">") ||
-				strings.HasPrefix(dep.Version, "<") {
-				pipDeps[i] = fmt.Sprintf("%s%s", dep.Name, dep.Version)
+			ver := dep.Version
+			ver = strings.ReplaceAll(ver, "≥", ">=")
+			ver = strings.ReplaceAll(ver, "≤", "<=")
+			ver = strings.ReplaceAll(ver, " ", "")
+			if strings.HasPrefix(ver, ">=") || strings.HasPrefix(ver, "<=") ||
+				strings.HasPrefix(ver, "==") || strings.HasPrefix(ver, "!=") ||
+				strings.HasPrefix(ver, "~=") || strings.HasPrefix(ver, ">") ||
+				strings.HasPrefix(ver, "<") {
+				pipDeps[i] = dep.Name + ver
 			} else {
-				pipDeps[i] = fmt.Sprintf("%s==%s", dep.Name, dep.Version)
+				pipDeps[i] = fmt.Sprintf("%s==%s", dep.Name, ver)
 			}
 		} else {
 			pipDeps[i] = dep.Name
@@ -225,13 +229,21 @@ func (pr *PythonRuntime) Run(ctx context.Context, input ExecutionInput, envPath 
 		"metadata": input.Metadata,
 	}
 
+	// Extract chunk index for file naming (used throughout)
+	chunkIdx := 0
+	if ci, ok := input.Input["chunk_index"].(float64); ok {
+		chunkIdx = int(ci)
+	}
+
+	// Save original output_path before remapping (for copy-back later)
+	originalOutputPath := ""
+	if op, ok := input.Input["output_path"].(string); ok {
+		originalOutputPath = op
+	}
+
 	// Copy input data file to envPath so it's accessible to the plugin
 	if inputPath, ok := input.Input["input_path"].(string); ok && inputPath != "" {
-		chunkIdx := 0
-		if ci, ok := input.Input["chunk_index"].(float64); ok {
-			chunkIdx = int(ci)
-		}
-		localInputPath := filepath.Join(envPath, fmt.Sprintf("chunk_%d.bin", chunkIdx))
+		localInputPath := filepath.Join(envPath, fmt.Sprintf("chunk_%d%s", chunkIdx, filepath.Ext(inputPath)))
 		if _, err := os.Stat(inputPath); err == nil {
 			if copyErr := copyFile(inputPath, localInputPath); copyErr == nil {
 				input.Input["input_path"] = localInputPath
@@ -416,6 +428,25 @@ except Exception as e:
 	}
 	if output.DurationMs > 0 {
 		output.Data["duration_ms"] = output.DurationMs
+	}
+
+	// Copy output file back from sandbox path to original output_path
+	if originalOutputPath != "" {
+		localOutputPath := filepath.Join(envPath, fmt.Sprintf("chunk_%d.out", chunkIdx))
+		if _, statErr := os.Stat(localOutputPath); statErr == nil {
+			if copyErr := copyFile(localOutputPath, originalOutputPath); copyErr == nil {
+				obs.Info("v2 runtime: copied output file back", obs.Field{
+					"from": localOutputPath,
+					"to":   originalOutputPath,
+				})
+			} else {
+				obs.Warn("v2 runtime: failed to copy output file back", obs.Field{
+					"from":  localOutputPath,
+					"to":    originalOutputPath,
+					"error": copyErr.Error(),
+				})
+			}
+		}
 	}
 
 	return &output, metrics, nil

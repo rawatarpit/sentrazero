@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"sentra-agent/internal/obs"
 )
 
 type PluginManifest struct {
@@ -22,23 +24,26 @@ type PluginResources struct {
 	CPUSeconds     int64   `json:"cpu_seconds"`
 	CPULimit       float64 `json:"cpu_limit,omitempty"`
 	TimeoutSeconds int64   `json:"timeout_seconds"`
+	RequiresGPU    bool    `json:"requires_gpu,omitempty"`
+	GPUMemoryMB    int64   `json:"gpu_memory_mb,omitempty"`
 }
 
 type SandboxConfig struct {
-	Mode             string `json:"mode"`
-	DefaultMemoryMB  int64  `json:"default_memory_mb"`
-	DefaultTimeoutS  int64  `json:"default_timeout_s"`
-	MaxMemoryMB      int64  `json:"max_memory_mb"`
-	MaxTimeoutS      int64  `json:"max_timeout_s"`
-	TempDir          string `json:"temp_dir"`
-	NetworkDefault   bool   `json:"network_default"`
-	LinuxNamespaces  bool   `json:"linux_namespaces"`
-	MacOSSeatbelt    bool   `json:"macos_seatbelt"`
-	WindowsJobObject bool   `json:"windows_job_objects"`
-	Cgroupsv2Path    string `json:"cgroupsv2_path"`
-	SeccompProfile   string `json:"seccomp_profile"`
-	SandboxUID       string `json:"sandbox_uid"`
-	SandboxGID       string `json:"sandbox_gid"`
+	Mode             string              `json:"mode"`
+	DefaultMemoryMB  int64               `json:"default_memory_mb"`
+	DefaultTimeoutS  int64               `json:"default_timeout_s"`
+	MaxMemoryMB      int64               `json:"max_memory_mb"`
+	MaxTimeoutS      int64               `json:"max_timeout_s"`
+	TempDir          string              `json:"temp_dir"`
+	NetworkDefault   bool                `json:"network_default"`
+	LinuxNamespaces  bool                `json:"linux_namespaces"`
+	MacOSSeatbelt    bool                `json:"macos_seatbelt"`
+	WindowsJobObject bool                `json:"windows_job_objects"`
+	Cgroupsv2Path    string              `json:"cgroupsv2_path"`
+	SeccompProfile   string              `json:"seccomp_profile"`
+	SandboxUID       string              `json:"sandbox_uid"`
+	SandboxGID       string              `json:"sandbox_gid"`
+	Capabilities     PlatformCapabilities `json:"-"`
 }
 
 type SandboxEnv struct {
@@ -57,7 +62,11 @@ type Sandboxer interface {
 }
 
 func LoadConfig() SandboxConfig {
-	return SandboxConfig{
+	cgroupPath := getEnv("SANDBOX_CGROUPS_PATH", "")
+	if cgroupPath == "" {
+		cgroupPath = detectCgroupsPath()
+	}
+	cfg := SandboxConfig{
 		Mode:             getEnv("SANDBOX_MODE", detectBestMode()),
 		DefaultMemoryMB:  getEnvInt64("SANDBOX_DEFAULT_MEMORY_MB", detectSystemMemoryMB()/4),
 		DefaultTimeoutS:  getEnvInt64("SANDBOX_DEFAULT_TIMEOUT_S", 300),
@@ -68,11 +77,19 @@ func LoadConfig() SandboxConfig {
 		LinuxNamespaces:  getEnvBool("SANDBOX_LINUX_NAMESPACES", true),
 		MacOSSeatbelt:    getEnvBool("SANDBOX_MACOS_SEATBELT", true),
 		WindowsJobObject: getEnvBool("SANDBOX_WINDOWS_JOB_OBJECT", true),
-		Cgroupsv2Path:    getEnv("SANDBOX_CGROUPS_PATH", detectCgroupsPath()),
+		Cgroupsv2Path:    cgroupPath,
 		SeccompProfile:   getEnv("SANDBOX_SECCOMP_PROFILE", "default"),
 		SandboxUID:       getEnv("SANDBOX_UID", "65534"),
 		SandboxGID:       getEnv("SANDBOX_GID", "65534"),
 	}
+	cfg.Capabilities = DetectCapabilities(cfg)
+	obs.Info("sandbox config loaded", obs.Field{
+		"cgroup_path":      cfg.Cgroupsv2Path,
+		"detected_cgroup":  cfg.Capabilities.CgroupPath,
+		"has_cgroup_write": cfg.Capabilities.HasCgroupWrite,
+		"mode":             cfg.Mode,
+	})
+	return cfg
 }
 
 func New(cfg SandboxConfig) Sandboxer {

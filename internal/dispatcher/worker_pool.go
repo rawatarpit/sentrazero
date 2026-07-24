@@ -97,7 +97,8 @@ func SetStorageBackend(backend storage.StorageBackend) {
 
 func GetStorageBackend() storage.StorageBackend {
 	if storageBackend == nil {
-		panic("StorageBackend: accessed before initialization - call SetStorageBackend first")
+		log.Println("[dispatcher] ERROR: StorageBackend accessed before initialization - call SetStorageBackend first")
+		return nil
 	}
 	return storageBackend
 }
@@ -393,7 +394,7 @@ func executeJobSafe(id int, req jobRequest) {
 				})
 			}
 
-			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), nil, true, false)
+			result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "failed", duration.Milliseconds(), err.Error(), true, false)
 			// Removed duplicate ReportJobComplete - CompleteJob already reports completion
 			if result.IsStaleExecution() {
 				obs.Warn("job failure reported but completion rejected - stale execution", obs.Field{
@@ -496,8 +497,8 @@ func SubmitJobWithMeta(
 	}
 	
 	// execution_id is CRITICAL - required for completion
-	// scan_dataset jobs are background tasks that never have an execution_id
-	if executionID == "" && jobType != "scan_dataset" {
+	// scan_dataset and merge_dataset jobs are background tasks that never have an execution_id
+	if executionID == "" && jobType != "scan_dataset" && jobType != "merge_dataset" {
 		obs.Error("dispatcher: rejecting job with empty execution_id", obs.Field{
 			"job_id":   jobID,
 			"job_type": jobType,

@@ -44,7 +44,7 @@ func WithMaxRetries(maxRetries int) Option {
 
 func NewClient(baseURL, anonKey, agentToken string, opts ...Option) *Client {
 	if agentToken == "" {
-		log.Panic("[HTTPCLIENT] FATAL: agentToken cannot be empty - this indicates a configuration bug")
+		log.Println("[HTTPCLIENT] ERROR: agentToken cannot be empty - HTTP calls will fail auth. This indicates a configuration bug.")
 	}
 
 	c := &Client{

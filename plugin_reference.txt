@@ -1,0 +1,373 @@
+╔══════════════════════════════════════════════════════╗
+║         RISE OTB — Plugin Reference                  ║
+║  Dependencies, config, and everything that changed   ║
+╚══════════════════════════════════════════════════════╝
+
+
+────────────────────────────────────────────────────
+  1. FILE LOCATIONS
+────────────────────────────────────────────────────
+
+  plugins-main/
+  ├── pipeline.py                  Orchestrator (347 lines)
+  ├── plugins/
+  │   ├── dedup/dedup.py           Part III — Dedup (351 lines)
+  │   ├── scrape/scrape.py         Data collector (447 lines)
+  │   ├── coverage/coverage.py     Part II — Coverage (294 lines)
+  │   └── compare/compare.py       Part I — Comparison (386 lines)
+  └── docs/
+      ├── rise_otb_overview.txt    Business explainer
+      └── plugin_reference.txt     This file
+
+
+────────────────────────────────────────────────────
+  2. DEPENDENCIES (with versions)
+────────────────────────────────────────────────────
+
+  Tested with Python 3.11+. All pip packages are
+  installable via:  pip install <package>==<version>
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ dedup.py                                                      │
+  ├───────────────────────────────────────────────────────────────┤
+  │                                                               │
+  │  Required (pip):                                              │
+  │    pandas == 3.0.3  (or ≥2.0)                                 │
+  │                                                               │
+  │  Optional (pip, recommended for speed):                       │
+  │    rapidfuzz ≥ 2.0  (10x faster fuzzy matching)               │
+  │                                                               │
+  │  Fallback (stdlib, no install):                               │
+  │    difflib.SequenceMatcher  (slower, same results)            │
+  │                                                               │
+  │  Zero other deps — uses only stdlib:                          │
+  │    sys, json, logging, pathlib, typing                        │
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ scrape.py                                                     │
+  ├───────────────────────────────────────────────────────────────┤
+  │                                                               │
+  │  Required (pip):                                              │
+  │    pandas           == 3.0.3  (or ≥2.0)                       │
+  │    requests         == 2.34.2 (or ≥2.28)                      │
+  │    beautifulsoup4   ≥ 4.11                                    │
+  │                                                               │
+  │  Optional (pip):                                              │
+  │    lxml  == 6.1.1  (or ≥4.9) — faster HTML parser             │
+  │                          falls back to bs4's html.parser      │
+  │                                                               │
+  │  Zero other deps — uses only stdlib:                          │
+  │    sys, json, re, time, logging, urllib.parse, pathlib, typing│
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ coverage.py                                                   │
+  ├───────────────────────────────────────────────────────────────┤
+  │                                                               │
+  │  Required (pip):                                              │
+  │    pandas           == 3.0.3  (or ≥2.0)                       │
+  │    requests         == 2.34.2 (or ≥2.28)                      │
+  │    beautifulsoup4   ≥ 4.11                                    │
+  │                                                               │
+  │  Optional (pip):                                              │
+  │    rapidfuzz ≥ 2.0  (recommended for title matching)          │
+  │    lxml      ≥ 4.9  (faster HTML parser)                      │
+  │                                                               │
+  │  Fallback (stdlib, no install):                               │
+  │    difflib.SequenceMatcher  (when rapidfuzz missing)          │
+  │    html.parser from bs4      (when lxml missing)             │
+  │                                                               │
+  │  Zero other deps:                                             │
+  │    sys, json, time, logging, urllib.parse, pathlib, typing    │
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ compare.py                                                    │
+  ├───────────────────────────────────────────────────────────────┤
+  │                                                               │
+  │  Required (pip):                                              │
+  │    pandas == 3.0.3  (or ≥2.0)                                 │
+  │                                                               │
+  │  Optional (pip):                                              │
+  │    rapidfuzz ≥ 2.0  (recommended for title similarity)         │
+  │                                                               │
+  │  Fallback (stdlib, no install):                               │
+  │    difflib.SequenceMatcher                                    │
+  │                                                               │
+  │  Zero other deps:                                             │
+  │    sys, json, logging, re, pathlib, typing                    │
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ pipeline.py                                                   │
+  ├───────────────────────────────────────────────────────────────┤
+  │                                                               │
+  │  Zero pip deps. Only calls plugins via subprocess.            │
+  │                                                               │
+  │  Stdlib only:                                                 │
+  │    sys, json, logging, subprocess, shutil, pathlib, typing    │
+  │                                                               │
+  └───────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────
+  3. CONFIG — Every Payload Field
+────────────────────────────────────────────────────
+
+  3a. dedup.py — Part III (Duplicate Detection)
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ Field              Type     Default          Required         │
+  ├───────────────────────────────────────────────────────────────┤
+  │ input_path         string   —                 YES             │
+  │ output_path        string   {stem}_deduped.csv optional       │
+  │ match_fields       list     ["upc","gtin",     optional       │
+  │                             "brand","title",                  │
+  │                             "description"]                    │
+  │ field_weights      dict     auto from         optional        │
+  │                             FIELD_WEIGHTS    (overrides       │
+  │                                               defaults)      │
+  │ similarity_        float    0.80              optional        │
+  │   threshold                                            │
+  │ id_column          string   "product_id"       optional       │
+  │ field_mapping      dict     {}                 optional       │
+  └───────────────────────────────────────────────────────────────┘
+
+  Default weights (used when field_weights is omitted):
+    upc:   0.40   (exact match only)
+    gtin:  0.30   (exact match only)
+    brand: 0.15   (exact match only)
+    title: 0.10   (fuzzy token_sort_ratio)
+    desc:  0.05   (fuzzy token_sort_ratio)
+
+  field_weights: any subset of the keys above. Auto-normalized
+    to sum to 1.0. Example: {"upc": 0.7, "title": 0.3}
+
+  field_mapping: renames source columns before comparison.
+    Example: {"walmart_url_upc": "upc", "walmart_url_title": "title"}
+
+  Output columns added: duplicate_found, duplicate_group_id,
+    confidence, reason
+
+
+  3b. scrape.py — Data Collector
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ Field              Type     Default          Required         │
+  ├───────────────────────────────────────────────────────────────┤
+  │ input_path         string   —                 YES             │
+  │ output_path        string   {stem}_scraped.csv optional       │
+  │ url_columns        list     ["url"]           optional        │
+  │ platforms          dict     {}                optional        │
+  │ attributes         list     all ATTR_FIELDS   optional        │
+  │ delay_seconds      float    0.5               optional        │
+  │ request_timeout    int      30                optional        │
+  │ user_agent         string   "" (auto-rotate)  optional        │
+  └───────────────────────────────────────────────────────────────┘
+
+  url_columns: which CSV columns contain URLs to scrape.
+    Example: ["walmart_url", "amazon_url", "comparison_url"]
+
+  platforms: maps each url_column to a scraper name.
+    Example: {"walmart_url": "walmart", "amazon_url": "amazon"}
+    Supported scrapers: walmart, amazon
+
+  attributes: which fields to write as flat columns. Subset
+    to reduce CSV size. Valid values:
+    title, brand, upc, gtin, model, size, color, price,
+    pack_count, quantity, description
+    NOTE: "*_attributes_json" always contains ALL fields
+    regardless of this setting.
+
+  Output columns added per url_column:
+    {col}_success         — bool
+    {col}_attributes_json — full JSON of all extracted attributes
+    {col}_{attr}          — one flat column per requested attribute
+    {col}_images_json     — JSON array of image URLs
+
+
+  3c. coverage.py — Part II (Marketplace Coverage)
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ Field              Type     Default          Required         │
+  ├───────────────────────────────────────────────────────────────┤
+  │ input_path         string   —                 YES             │
+  │ output_path        string   {stem}_covered.csv optional       │
+  │ mode               string   "all"             optional        │
+  │ search_fields      list     ["upc",           optional        │
+  │                             "title",                          │
+  │                             "brand"]                          │
+  │ walmart_url_       string   "walmart_url"     optional        │
+  │   column                                                     │
+  │ walmart_attributes string   "walmart_url_     optional        │
+  │   _column                   attributes_json"                  │
+  │ id_column          string   "walmart_product_ optional       │
+  │                               id"                            │
+  │ delay_seconds      float    0.5               optional        │
+  │ request_timeout    int      30                optional        │
+  │ user_agent         string   Mozilla default   optional        │
+  └───────────────────────────────────────────────────────────────┘
+
+  mode: "amazon" = search Amazon only
+        "all"    = search all 8 marketplaces
+
+  8 marketplaces: amazon, ebay, flipkart, target, bestbuy,
+    homedepot, etsy, costco
+  3 have HTML parsers: amazon, ebay, flipkart
+  Rest are configured with URL templates only (logs skip message)
+
+  search_fields: controls which queries are built.
+    "upc"   → search by UPC barcode (exact, best results)
+    "title" → search by product title (fuzzy matched)
+    "brand" → search by brand + first word of title
+
+  Output columns: walmart_product_id, walmart_url,
+    matched_marketplace, matched_product_url, exact_match (Yes/No),
+    similarity_score
+
+
+  3d. compare.py — Part I (Validation & Comparison)
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ Field              Type     Default          Required         │
+  ├───────────────────────────────────────────────────────────────┤
+  │ input_path         string   —                 YES             │
+  │ output_path        string   {stem}_compared.csv optional      │
+  │ url_column1        string   "walmart_url"      optional       │
+  │ url_column2        string   "comparison_url"   optional       │
+  │ attributes_column1 string   ""                optional        │
+  │ attributes_column2 string   ""                optional        │
+  │ compare_fields     list     all 9 fields      optional        │
+  │ weights            dict     auto from         optional        │
+  │                             DEFAULT_WEIGHTS                   │
+  └───────────────────────────────────────────────────────────────┘
+
+  compare_fields: which attributes to include in comparison.
+    Valid values: upc, gtin, brand, title, size, color, price
+    Unknown values are ignored with a warning.
+
+  weights: custom importance per field. Auto-normalized to sum 1.0.
+    If omitted, uses DEFAULT_WEIGHTS filtered to compare_fields.
+
+  Default weights:
+    upc:   0.50
+    brand: 0.20
+    title: 0.15
+    size:  0.10
+    color: 0.05
+    price: 0.00
+
+  How each field is compared:
+
+    upc/gtin → normalize (lstrip "0"), set intersection across
+                UPC and GTIN. Returns 1.0 if any code matches.
+
+    brand    → exact match (case-insensitive). A mismatch
+               short-circuits the entire comparison unless
+               CODE_MATCH overrides it.
+
+    title    → fuzzy token_sort_ratio. If ≥80%, score
+               contributes linearly. Below 80% → 0.
+
+    size     → normalized (oz→oz, ml→L, ct→ct), then exact match.
+
+    color    → normalized (navy→blue, charcoal→gray), then exact.
+
+    price    → within 10% → full score. Otherwise 0.
+
+  Decision states (from compare_attributes):
+    EXACT_MATCH       → confidence ≥ 90%
+    VARIANT_MATCH     → size or color differs but overall match
+    BRAND_MISMATCH    → brands differ and no code match
+    SIZE_MISMATCH     → sizes differ with no strong code+title match
+    NOT_MATCH         → below all thresholds
+
+  Output columns added: exact_match, reason_code, reason, confidence
+
+
+────────────────────────────────────────────────────
+  4. WHAT CHANGED (full history)
+────────────────────────────────────────────────────
+
+  4a. dedup.py
+
+  Change                        Before              After
+  ───────────────────────────────────────────────────────────
+  Field weights                 Hardcoded           Optional field_weights
+                              FIELD_WEIGHTS        payload; auto-normalized
+  NaN handling                  Crash on float NaN  pd.isna() check in clean()
+  Clustering algorithm          Adjacency+DFS       Union-Find (O(α(n)))
+  Pairwise comparison           O(n²) all pairs     UPC/GTIN prefix blocking
+                                                    (first 4 digits)
+  Progress logging              None                10% step logging
+  Fuzzy fallback                Simple ratio        token_sort_ratio in _Fuzz
+
+
+  4b. scrape.py
+
+  Change                        Before              After
+  ───────────────────────────────────────────────────────────
+  Attribute columns             Always all flat     Optional attributes
+                              ATTR_FIELDS          payload filters columns
+  lxml detection                "lxml" in str(type) try/except import
+  HTTP requests                 Fresh per request   requests.Session() pool
+  Retry                         None                Exponential backoff
+                                                    (3 attempts, 1s/2s/4s)
+  Delay                         Hardcoded           Configurable delay_seconds
+  Price parsing                 Accepts ranges      Rejects range, logs
+  Unknown platform              Uses Walmart        Skips with warning
+  User-Agent                    1 hardcoded         5-entry rotation list
+  Mock mode                     Present             REMOVED
+
+
+  4c. coverage.py
+
+  Change                        Before              After
+  ───────────────────────────────────────────────────────────
+  Search fields                 Always UPC+title    Optional search_fields
+                              +brand               payload
+  lxml detection                string check        try/except import
+  HTTP session                  Fresh per request   requests.Session() pool
+  Retry                         None                Exponential backoff
+  Non-match rows                Silently dropped    Every row output
+  Mock results                  Hardcoded "Nike"    Was title-aware;
+                                                    then REMOVED
+  Unknown platform parser       Silent              Info log
+  Exception in search           Silent swallow      Logged as warning
+  Mock mode                     Present             REMOVED
+
+
+  4d. compare.py
+
+  Change                        Before              After
+  ───────────────────────────────────────────────────────────
+  Compare fields                Always all          Optional compare_fields
+                              DEFAULT_WEIGHTS      + weights payload
+  Weights                       Hardcoded           build_weights() auto-
+                                                    normalizes to sum 1.0
+  Brand short-circuit           Before UPC check    After UPC check
+  UPC normalization             Raw compare         lstrip("0")
+  GTIN↔UPC cross-compare        Not done            Set intersection
+  Price proximity               Exact only          Within 10% = full
+  compare_method param          Present             Removed (dead param)
+  Unknown fields                No handling         Ignored with warning
+
+
+  4e. pipeline.py
+
+  Change                        Before              After
+  ───────────────────────────────────────────────────────────
+  JSON stdout parsing            First-line match    Walk lines in reverse
+  Plugin output path             .get("output_path") .get("data",{})
+                                                    .get("output_path")
+  Stderr capture                 Ignored             Captured in errors
+  Retry logic                    None                1 retry
+  Final copy path compare        Raw string          os.path.normpath()
+  Input validation               None                Warning on missing cols
+  PIPELINES entries              7                   12
+  COMPOSITIONS                   7                   12

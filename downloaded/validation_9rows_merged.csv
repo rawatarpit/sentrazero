@@ -1,0 +1,6 @@
+prmry_sku_id,Walmart_Url,comp_item_id__1,Comp_Url,match_type,match_type_comments,notes
+194305312,http://www.walmart.com/ip/194305312?selected=true,B0012OG95S,https://www.amazon.com/dp/B0012OG95S?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size
+5755858147,http://www.walmart.com/ip/5755858147?selected=true,B0064DPM64,https://www.amazon.com/dp/B0064DPM64?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size; Product page not found (404)
+194524183,http://www.walmart.com/ip/194524183?selected=true,B006HJQ4BM,https://www.amazon.com/dp/B006HJQ4BM?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size; Product page not found (404)
+876637151,http://www.walmart.com/ip/876637151?selected=true,B00GNM0V44,https://www.amazon.com/dp/B00GNM0V44?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,"Brand, Size"
+365298585,http://www.walmart.com/ip/365298585?selected=true,B00GUEQ2KM,https://www.amazon.com/dp/B00GUEQ2KM?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Product page not found (404)

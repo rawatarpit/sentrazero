@@ -224,6 +224,9 @@ type DeviceHeartbeat struct {
 	MemoryFreeGB     float64 `json:"memory_free_gb"`
 	NetworkLatencyMs float64 `json:"network_latency_ms"`
 	GPUAvailable     bool    `json:"gpu_available"`
+	GPUModel         string  `json:"gpu_model,omitempty"`
+	GPUMemoryFreeGB  float64 `json:"gpu_memory_free_gb"`
+	GPUMemoryTotalGB float64 `json:"gpu_memory_total_gb"`
 	CPUUsagePercent  float64 `json:"cpu_usage_percent"`
 	IncomingWorkload int     `json:"incoming_workload_weight"`
 	ActiveWorkers    int     `json:"active_workers"`
@@ -622,7 +625,11 @@ func (c *ExecutionClient) CompleteJob(ctx context.Context, executionID string, j
 		reqBody["duration_ms"] = durationMs
 	}
 	if resultData != nil && status == "failed" {
-		reqBody["result"] = resultData
+		if errStr, ok := resultData.(string); ok {
+			reqBody["error"] = errStr
+		} else {
+			reqBody["result"] = resultData
+		}
 	}
 
 	body, _ := json.Marshal(reqBody)

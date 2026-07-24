@@ -13,7 +13,7 @@ import (
 	"sentra-agent/internal/system"
 )
 
-const defaultExecutionTimeout = 30 * time.Second
+const defaultExecutionTimeout = 300 * time.Second
 
 type ExecutionResult struct {
 	Output         string `json:"output"`
