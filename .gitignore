@@ -13,12 +13,20 @@
 # Binaries & Large Archives
 bin/
 main
+/sentra
 sentra-agent*
 agent
 server/
+dist/
+download/
 *.zip
 *.tar.gz
 *.dump
+
+# Dataset / client data (Walmart baselining etc.)
+Baselining.xlsx
+Validation.xlsx
+validation_input.csv
 
 # Supabase - exclude edge functions and CSV metadata
 supabase/
@@ -36,6 +44,7 @@ Supabase*.csv
 # Internal Docs
 01_RISEOTB*
 sentra-bug-audit.md
+anchored-summary.md
 
 # Optional Components
 launcher/
