@@ -90,6 +90,13 @@ type PollingClient struct {
 
 	currentInterval atomic.Int64 // nanoseconds, for adaptive backoff
 	redisWakeupCh  chan struct{} // signaled when Redis publishes a new job notification
+
+	// lastMetricsJSON is the canonical serialization of the last metrics payload
+	// sent to the control plane. Metrics are only re-sent (and re-inserted into
+	// agent_metrics) when the values actually change, which cuts telemetry
+	// storage and edge-function write volume dramatically while idle.
+	lastMetricsJSON string
+	metricsMu       sync.Mutex
 }
 
 var (
@@ -97,7 +104,7 @@ var (
 	pollingOnce      sync.Once
 	pollInterval     = 30 * time.Second
 	minPollInterval  = 5 * time.Second
-	maxPollInterval  = 60 * time.Second
+	maxPollInterval  = 300 * time.Second
 	backoffMultiplier = 2.0
 	intervalLoadOnce sync.Once
 )
@@ -274,6 +281,37 @@ func (p *PollingClient) listenForRedisJobs() {
 	}
 }
 
+// currentMetrics returns the live device metrics map, but only when the values
+// have changed since the last poll. Returns nil when nothing meaningful changed,
+// in which case the poll proceeds without a metrics payload. A 5-minute absolute
+// freshness cap forces a re-send even if values are unchanged, so the control
+// plane always sees current telemetry at least once per cap.
+func (p *PollingClient) currentMetrics() map[string]any {
+	sys := sysinfo.Detect()
+	m := map[string]any{
+		"active_workers":    dispatcher.CurrentWorkerCount(),
+		"total_cpu_cores":   runtime.NumCPU(),
+		"cpu_cores_free":    int(dispatcher.MaxWorkersCount()) - dispatcher.CurrentWorkerCount(),
+		"memory_free_gb":    sys.AvailableMemoryGB,
+		"total_memory_gb":   sys.TotalMemoryGB,
+		"cpu_usage_percent": sys.CPUUsagePercent,
+		"network_latency_ms": sys.NetworkLatency,
+		"gpu_available":     sys.GPUModel != "",
+		"io_bandwidth_mb_s": 0,
+	}
+	raw, _ := json.Marshal(m)
+	key := string(raw)
+
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	if p.lastMetricsJSON == key {
+		return nil
+	}
+	p.lastMetricsJSON = key
+	return m
+}
+
 func (p *PollingClient) fetchNewJobs() int {
 
 	if p.ctx.Err() != nil {
@@ -283,23 +321,21 @@ func (p *PollingClient) fetchNewJobs() int {
 	// Consolidated poll_state endpoint replaces claim_jobs_for_device + agent_health_policy
 	url := fmt.Sprintf("%s/functions/v1/poll_state", p.baseURL)
 
-	body, _ := json.Marshal(map[string]any{
+	// Build metrics and only include them when they actually changed. This still
+	// polls (for job claiming + heartbeat), but avoids inserting a fresh
+	// agent_metrics row on every poll — the primary driver of telemetry storage.
+	body := map[string]any{
 		"limit":             10,
 		"lease_ttl_seconds": 1800,
-		"metrics": map[string]any{
-			"active_workers": dispatcher.CurrentWorkerCount(),
-			"total_cpu_cores": runtime.NumCPU(),
-			"cpu_cores_free":  int(dispatcher.MaxWorkersCount()) - dispatcher.CurrentWorkerCount(),
-			"memory_free_gb":  sysinfo.Detect().AvailableMemoryGB,
-			"total_memory_gb": sysinfo.Detect().TotalMemoryGB,
-			"cpu_usage_percent": sysinfo.Detect().CPUUsagePercent,
-			"network_latency_ms": sysinfo.Detect().NetworkLatency,
-			"gpu_available":      sysinfo.Detect().GPUModel != "",
-			"io_bandwidth_mb_s":  0,
-		},
-	})
+		"heartbeat":         true,
+	}
+	if m := p.currentMetrics(); m != nil {
+		body["metrics"] = m
+	}
 
-	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, url, bytes.NewReader(body))
+	bodyBytes, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(p.ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		log.Printf("[realtime] failed to create request: %v", err)
 		return 0
