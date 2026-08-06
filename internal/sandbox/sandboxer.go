@@ -131,13 +131,11 @@ func (s *noopSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
 
 func detectBestMode() string {
 	switch runtime.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
+		// Job Objects are implemented in sandboxer_windows.go; sandboxing is
+		// on by default on every supported platform. Operators can still opt
+		// out explicitly via SANDBOX_MODE=off.
 		return "native"
-	case "windows":
-		if v := os.Getenv("SANDBOX_WINDOWS_JOB_OBJECT"); v == "true" {
-			return "native"
-		}
-		return "off"
 	}
 	return "off"
 }
