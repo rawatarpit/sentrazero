@@ -1,67 +1,52 @@
 # ============================================
 # SENTRA AGENT MAKEFILE
-# Author: Arpit Singh Rawat
-# Project: Sentra Agent / Kickin Compute System
+# Project: SentraZero (Sentra Agent)
+#
+# Canonical build entrypoint: scripts/build.sh
+# Always builds from ./cmd/ (the REAL agent), NOT ./cmd/sentra/ (CLI).
 # ============================================
 
 GO_BINARY := bin/sentra-agent
 
 # --- Default Targets ---
-.PHONY: all build run clean verify info
+.PHONY: all build release verify clean info
 
-# --- Build Everything ---
+# --- Build Everything (native platform only, fast) ---
 all: build
 
-# --- Build Go Agent (stripped) ---
+# --- Build native Go Agent (stripped, from ./cmd/) ---
 build:
-	@echo "🧠 Building Go Sentra Agent..."
+	@echo "Building native Sentra Agent from ./cmd/ ..."
 	@mkdir -p bin
-	go clean -cache -modcache -testcache
-	go build -ldflags="-w -s" -o $(GO_BINARY) ./cmd/main.go
-	@echo "✅ Build complete: $(GO_BINARY)"
-	@echo "🔍 Binary size: $$(ls -lh $(GO_BINARY) | awk '{print $$5}')"
+	go build -ldflags="-w -s" -o $(GO_BINARY) ./cmd/
+	@echo "Build complete: $(GO_BINARY)"
+	@echo "Verifying entrypoint (must be sentra-agent/cmd, never cmd/sentra):"
+	@go version -m $(GO_BINARY) | grep -E '^\s+path' || (echo "FAILED: not a Go binary" && exit 1)
+	@go version -m $(GO_BINARY) | grep -E '^\s+path' | grep -q "cmd/sentra" && (echo "FAILED: wrong entrypoint (CLI, not agent)" && exit 1) || echo "OK: real agent"
 
-# --- Run the Agent ---
+# --- Build ALL 5 platforms into dist/ + download/ + SHA256SUMS (canonical) ---
+release:
+	@scripts/build.sh
+
+# --- Run the Agent (native) ---
 run: build
-	@echo "🚀 Starting Sentra Agent..."
+	@echo "Starting Sentra Agent..."
 	./$(GO_BINARY)
 
-# --- Verify Binary ---
+# --- Verify an existing binary is the real agent ---
 verify:
-	@echo "🔍 Verifying binary linkage..."
-	@ls -lh $(GO_BINARY)
-	@otool -L $(GO_BINARY) 2>/dev/null || ldd $(GO_BINARY) || true
+	@echo "Verifying $(GO_BINARY) ..."
+	@go version -m $(GO_BINARY) | grep -E '^\s+path' || (echo "FAILED: not a Go binary" && exit 1)
+	@go version -m $(GO_BINARY) | grep -E '^\s+path' | grep -q "cmd/sentra" && (echo "FAILED: wrong entrypoint (CLI, not agent)" && exit 1) || echo "OK: real agent"
 
-# --- Clean Build Artifacts ---
+# --- Clean Build Artifacts (keeps go module cache!) ---
 clean:
-	@echo "🧹 Cleaning build artifacts..."
-	go clean -cache -modcache -testcache
-	rm -rf bin
-	@echo "✅ Clean complete."
+	@echo "Cleaning build artifacts..."
+	rm -rf bin dist download
+	@echo "Clean complete."
 
 # --- Environment info ---
 info:
-	@echo "🧩 Environment info"
-	@echo "Go:    $$(go version)"
-	@echo "OS:    $$(uname -a)"
-
-# ---------------------------------------------------------
-# 🧩 FUTURE PLUGIN COMPILATION (COMMENTED FOR NOW)
-# ---------------------------------------------------------
-# RUST_ROOT := ./rust_core
-# PLUGIN_DIR := /opt/sentra/plugins
-#
-# build-rust:
-# 	@echo "🔧 Building native Rust plugins..."
-# 	cargo build --release --manifest-path=$(RUST_ROOT)/Cargo.toml
-#
-# install-plugins:
-# 	@echo "📦 Installing locally compiled plugins..."
-# 	sudo mkdir -p $(PLUGIN_DIR)
-# 	sudo cp $(RUST_ROOT)/plugin_*/*.so $(PLUGIN_DIR)/ || true
-# 	@echo "✅ Plugins installed to $(PLUGIN_DIR)"
-#
-# test-ffi:
-# 	@echo "🧪 Testing Go↔Rust FFI bridge..."
-# 	go run tests/ffi_check.go
-# 	@echo "✅ FFI bridge validated."
+	@echo "Go: $$(go version)"
+	@echo "OS: $$(uname -a)"
+	@echo "Entrypoint: ./cmd/ (real agent) — never ./cmd/sentra/ (CLI)"
