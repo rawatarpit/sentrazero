@@ -112,8 +112,15 @@ var (
 	pollingOnce      sync.Once
 	pollInterval     = 30 * time.Second
 	minPollInterval  = 5 * time.Second
-	maxPollInterval  = 300 * time.Second
+	maxPollInterval  = 90 * time.Second
 	backoffMultiplier = 2.0
+	// postClaimInterval is the floor applied after a poll that returned jobs.
+	// It replaces the old behavior of collapsing straight to minPollInterval,
+	// which let a single agent (the first whose timer fired) drain the whole
+	// queue while idle peers were backed off to maxPollInterval. A moderate
+	// floor keeps per-agent throughput while giving other agents in the fleet a
+	// window to poll and claim their fair share of a burst.
+	postClaimInterval = 20 * time.Second
 	intervalLoadOnce sync.Once
 )
 
@@ -132,6 +139,11 @@ func loadIntervalsFromEnv() {
 		if v := os.Getenv("SENTRA_MAX_POLL_INTERVAL"); v != "" {
 			if d, err := time.ParseDuration(v); err == nil && d > 0 {
 				maxPollInterval = d
+			}
+		}
+		if v := os.Getenv("SENTRA_POST_CLAIM_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				postClaimInterval = d
 			}
 		}
 		if v := os.Getenv("SENTRA_POLL_BACKOFF_MULTIPLIER"); v != "" {
@@ -213,7 +225,7 @@ func (p *PollingClient) pollLoopAdaptive() {
 	jobCount := p.fetchNewJobs()
 	current := time.Duration(p.currentInterval.Load())
 	if jobCount > 0 {
-		current = minPollInterval
+		current = postClaimInterval
 	} else {
 		next := time.Duration(float64(current) * backoffMultiplier)
 		if next > maxPollInterval {
@@ -240,7 +252,7 @@ func (p *PollingClient) pollLoopAdaptive() {
 			jobCount := p.fetchNewJobs()
 			current := time.Duration(p.currentInterval.Load())
 			if jobCount > 0 {
-				current = minPollInterval
+				current = postClaimInterval
 			} else {
 				next := time.Duration(float64(current) * backoffMultiplier)
 				if next > maxPollInterval {
