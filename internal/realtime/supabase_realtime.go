@@ -97,6 +97,14 @@ type PollingClient struct {
 	// storage and edge-function write volume dramatically while idle.
 	lastMetricsJSON string
 	metricsMu       sync.Mutex
+
+	// lastClaimedJobs is the number of jobs returned by the most recent
+	// successful poll (i.e. chunks claimed in the last claim cycle). It is
+	// reported in the next poll's metrics so we can measure the claim-burst vs
+	// worker-slot occupancy gap (claims/poll vs MaxConcurrency). Because it
+	// changes whenever a batch is claimed, it also force-re-sends telemetry at
+	// claim time, which is exactly when we want an observation point.
+	lastClaimedJobs atomic.Int32
 }
 
 var (
@@ -298,6 +306,11 @@ func (p *PollingClient) currentMetrics() map[string]any {
 		"network_latency_ms": sys.NetworkLatency,
 		"gpu_available":     sys.GPUModel != "",
 		"io_bandwidth_mb_s": 0,
+		// Chunks claimed in the last poll (0 when idle). This is the direct
+		// signal for claim-burst vs slot occupancy — if it is consistently >1
+		// while active_workers == MaxConcurrency, chunks are queued ahead of
+		// the worker pool (granularity mismatch).
+		"claims_returned": p.lastClaimedJobs.Load(),
 	}
 	raw, _ := json.Marshal(m)
 	key := string(raw)
@@ -528,6 +541,7 @@ func (p *PollingClient) fetchNewJobs() int {
 			log.Printf("[realtime] dispatch failed for job %s: %v", jobID, err)
 		}
 	}
+	p.lastClaimedJobs.Store(int32(len(result.Jobs)))
 	return len(result.Jobs)
 }
 
