@@ -88,13 +88,7 @@ func performHeartbeat(
 		availableCPU = totalCPU
 	}
 	activeWorkers := dispatcher.CurrentWorkerCount()
-	maxWorkersVal := dispatcher.MaxWorkersCount()
 	queueLen := dispatcher.QueueLength()
-
-	cpuFree := int(maxWorkersVal) - activeWorkers
-	if cpuFree < 0 {
-		cpuFree = 0
-	}
 
 	// -----------------------------------------------------------------
 	// Memory (OS-level, not Go heap)
@@ -109,24 +103,19 @@ func performHeartbeat(
 	}
 
 	// -----------------------------------------------------------------
-	// Adaptive concurrency (LOCAL ONLY)
+	// Adaptive concurrency — DEFERRED TO BACKEND POLICY (TICKET-001)
 	// -----------------------------------------------------------------
-
-	recommended := cpuFree
-	if recommended < 1 {
-		recommended = 1
-	}
-
-	maxAllowed := availableCPU * 2
-	if recommended > maxAllowed {
-		recommended = maxAllowed
-	}
-
+	// The old LOCAL-ONLY governor was removed. It computed
+	// cpuFree = maxWorkers - activeWorkers, but dispatcher.CurrentWorkerCount()
+	// counts SPAWNED worker goroutines (persistent: they spawn once at
+	// InitWorkerPool and wait on the job queue), so cpuFree was 0 even when
+	// the pool was fully idle. `recommended` therefore clamped to 1 and the
+	// pool was collapsed to a single worker on EVERY heartbeat — regardless
+	// of MAX_CONCURRENCY, load, or the backend agent_health_policy response.
+	// Concurrency is now owned solely by the backend policy via the override
+	// below; the pool keeps the startup MAX_CONCURRENCY until the backend
+	// responds on the first heartbeat.
 	current := int(cfg.MaxConcurrencyAtomic.Load())
-	if recommended != current {
-		dispatcher.SetMaxWorkers(recommended)
-		cfg.MaxConcurrencyAtomic.Store(int32(recommended))
-	}
 
 	// -----------------------------------------------------------------
 	// Conditional heartbeat — skip if metrics unchanged <10%
@@ -164,7 +153,7 @@ func performHeartbeat(
 			backend.DeviceHeartbeat{
 				DeviceID:         device.ID,
 				TotalCPUCores:    totalCPU,
-				CPUCoresFree:     cpuFree,
+				CPUCoresFree:     availableCPU,
 				TotalMemoryGB:    sys.TotalMemoryGB,
 				MemoryFreeGB:     memFreeGB,
 				NetworkLatencyMs: sys.NetworkLatency,
@@ -183,12 +172,12 @@ func performHeartbeat(
 		)
 		if err != nil {
 			log.Printf("⚠️ heartbeat send failed: %v", err)
-		} else if policyResult.Concurrency > 0 && policyResult.Concurrency != recommended {
+		} else if policyResult.Concurrency > 0 && policyResult.Concurrency != current {
 			backendConcurrency := policyResult.Concurrency
-			if backendConcurrency != recommended && backendConcurrency != current {
+			if backendConcurrency != current {
 				dispatcher.SetMaxWorkers(backendConcurrency)
 				cfg.MaxConcurrencyAtomic.Store(int32(backendConcurrency))
-				log.Printf("🔄 concurrency updated from backend: %d (recommended: %d)", backendConcurrency, recommended)
+				log.Printf("🔄 concurrency updated from backend: %d", backendConcurrency)
 			}
 		}
 	}
@@ -202,7 +191,7 @@ func performHeartbeat(
 			"💓 heartbeat | workers=%d queue=%d cpu_free=%d/%d mem_free=%.1fGB gpu=%t",
 			activeWorkers,
 			queueLen,
-			cpuFree,
+			availableCPU,
 			totalCPU,
 			memFreeGB,
 			gpuAvailable,
