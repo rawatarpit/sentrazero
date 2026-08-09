@@ -3,10 +3,8 @@ package heartbeat
 import (
 	"context"
 	"log"
-	"math"
 	"os"
 	"runtime"
-	"sync"
 	"time"
 
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
@@ -26,18 +24,6 @@ func init() {
 		}
 	}
 }
-
-var (
-	lastHeartbeat struct {
-		mu          sync.Mutex
-		activeWorkers int
-		cpuUsage     float64
-		memFreeGB    float64
-		gpuAvailable bool
-		derivedStatus string
-		hasValue     bool
-	}
-)
 
 // -----------------------------------------------------------------------------
 // Public entrypoint
@@ -118,36 +104,26 @@ func performHeartbeat(
 	current := int(cfg.MaxConcurrencyAtomic.Load())
 
 	// -----------------------------------------------------------------
-	// Conditional heartbeat — skip if metrics unchanged <10%
+	// Heartbeat send policy — ALWAYS SEND.
 	// -----------------------------------------------------------------
+	// The old conditional-send skipped the backend call when metrics looked
+	// unchanged. That permanently disabled the control plane:
+	//   - cpuUsagePercent() is intentionally disabled in sysinfo.go and always
+	//     returns 0, so the CPU delta check always saw "unchanged".
+	//   - dispatcher.CurrentWorkerCount() counts persistent spawned worker
+	//     goroutines, which are constant at steady state.
+	//   - memFreeGB / gpuAvailable rarely move enough to trip their deltas.
+	// Net effect: after the FIRST heartbeat at startup, agent_health_policy was
+	// never called again, so the backend could never raise or lower
+	// concurrency mid-run (the entire point of TICKET-001 — backend policy is
+	// the sole authority). The 600s ticker makes the extra call cost trivial
+	// (3 agents * 6 calls/hr), and the edge function has a 5s cooldown plus
+	// only fires SetMaxWorkers when the value actually changes.
 
 	gpuAvailable := sys.GPUModel != ""
-	needsSend := true
-
-	lastHeartbeat.mu.Lock()
-	if lastHeartbeat.hasValue {
-		if activeWorkers == lastHeartbeat.activeWorkers &&
-			math.Abs(sys.CPUUsagePercent-lastHeartbeat.cpuUsage) < 10.0 &&
-			math.Abs(memFreeGB-lastHeartbeat.memFreeGB) < 0.5 &&
-			gpuAvailable == lastHeartbeat.gpuAvailable {
-			needsSend = false
-		}
-	}
-	if needsSend {
-		lastHeartbeat.activeWorkers = activeWorkers
-		lastHeartbeat.cpuUsage = sys.CPUUsagePercent
-		lastHeartbeat.memFreeGB = memFreeGB
-		lastHeartbeat.gpuAvailable = gpuAvailable
-		lastHeartbeat.hasValue = true
-	}
-	lastHeartbeat.mu.Unlock()
-
-	// -----------------------------------------------------------------
-	// Send heartbeat to backend (BEST EFFORT, only if needed)
-	// -----------------------------------------------------------------
 
 	platform := runtimev2.GetCurrentPlatform()
-	if execClient != nil && needsSend {
+	if execClient != nil {
 		policyResult, err := execClient.SendDeviceHeartbeat(
 			ctx,
 			backend.DeviceHeartbeat{
@@ -186,15 +162,13 @@ func performHeartbeat(
 	// Local visibility
 	// -----------------------------------------------------------------
 
-	if needsSend {
-		log.Printf(
-			"💓 heartbeat | workers=%d queue=%d cpu_free=%d/%d mem_free=%.1fGB gpu=%t",
-			activeWorkers,
-			queueLen,
-			availableCPU,
-			totalCPU,
-			memFreeGB,
-			gpuAvailable,
-		)
-	}
+	log.Printf(
+		"💓 heartbeat | workers=%d queue=%d cpu_free=%d/%d mem_free=%.1fGB gpu=%t",
+		activeWorkers,
+		queueLen,
+		availableCPU,
+		totalCPU,
+		memFreeGB,
+		gpuAvailable,
+	)
 }
