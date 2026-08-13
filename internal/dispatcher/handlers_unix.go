@@ -33,6 +33,7 @@ import (
 
 	executorv2 "sentra-agent/cmd/agent/executor/v2"
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
+	backendclient "sentra-agent/internal/backend"
 	"sentra-agent/internal/auth"
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
@@ -1675,11 +1676,6 @@ func hasRealOutput(outputPath string) bool {
 }
 
 func reportStepProgress(ctx context.Context, jobID, executionID, chunkID string, stepIndex int, status, errorMsg string) {
-	deviceToken, err := auth.GetToken()
-	if err != nil {
-		obs.Warn("reportStepProgress skipped: no token", obs.Field{"error": err.Error()})
-		return
-	}
 	data := map[string]any{
 		"type":         "step_progress",
 		"job_id":       jobID,
@@ -1691,8 +1687,33 @@ func reportStepProgress(ctx context.Context, jobID, executionID, chunkID string,
 	if errorMsg != "" {
 		data["error"] = errorMsg
 	}
+
+	// L3: route through the ExecutionClient's batched relay path when
+	// available, preserving the exact legacy payload shape. The channel must
+	// be agent-<deviceUUID>; getAgentID() falls back to the hostname when
+	// AGENT_ID is unset, which fails relay channel validation.
+	if execClient != nil {
+		if err := execClient.BufferRelayEvent(backendclient.RelayJobEvent{
+			Channel: "agent-" + execClient.GetDeviceID(),
+			Data:    data,
+		}); err != nil {
+			obs.Warn("reportStepProgress buffered relay failed", obs.Field{"error": err.Error()})
+		}
+		return
+	}
+
+	// Fallback: direct HTTP call (execution client not configured, e.g. tests).
+	deviceToken, err := auth.GetToken()
+	if err != nil {
+		obs.Warn("reportStepProgress skipped: no token", obs.Field{"error": err.Error()})
+		return
+	}
+	deviceID := getAgentID()
+	if execClient != nil {
+		deviceID = execClient.GetDeviceID()
+	}
 	body, _ := json.Marshal(map[string]any{
-		"channel": "agent-" + getAgentID(),
+		"channel": "agent-" + deviceID,
 		"data":    data,
 	})
 	httpc := httpclient.NewClient(supabaseBaseURL, supabaseAnonKey, deviceToken)

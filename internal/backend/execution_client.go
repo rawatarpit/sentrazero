@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"sentra-agent/internal/httpclient"
@@ -27,7 +28,26 @@ type ExecutionClient struct {
 	orgID       string
 	http        *http.Client
 	httpc       *httpclient.Client
+
+	// L3 relay batching: job lifecycle telemetry (relay_job_event) is buffered
+	// and flushed as a single array payload instead of one edge-function
+	// invocation per event. Chunk-heavy pipelines emit many events per job
+	// (chunk_running/done/failed + job start/heartbeat/complete), so this cuts
+	// invocation volume during active runs by an order of magnitude. Events
+	// are telemetry only — job state is persisted via start_job/complete_job —
+	// so a lost batch is non-fatal.
+	relayMu      sync.Mutex
+	relayPending []RelayJobEvent
+	relayCh      chan struct{}
+	relayDone    chan struct{}
+	relayOnce    sync.Once
 }
+
+// L3 batching knobs. A flush happens when either is reached.
+const (
+	relayBatchSize  = 5
+	relayFlushEvery = 2 * time.Second
+)
 
 func (c *ExecutionClient) GetDeviceID() string {
 	return c.deviceID
@@ -79,6 +99,94 @@ func (c *ExecutionClient) post(ctx context.Context, path string, payload any) er
 	}
 
 	return nil
+}
+
+// bufferRelayEvent queues an event for batched delivery (L3). Returns nil; the
+// flush happens on the background relayFlusher goroutine.
+func (c *ExecutionClient) bufferRelayEvent(ev RelayJobEvent) error {
+	c.relayOnce.Do(func() {
+		c.relayCh = make(chan struct{}, 1)
+		c.relayDone = make(chan struct{})
+		go c.relayFlusher()
+	})
+
+	c.relayMu.Lock()
+	c.relayPending = append(c.relayPending, ev)
+	n := len(c.relayPending)
+	c.relayMu.Unlock()
+
+	if n >= relayBatchSize {
+		select {
+		case c.relayCh <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+// BufferRelayEvent queues an arbitrary relay event onto the batched delivery
+// path (L3) while preserving the exact payload shape of a legacy direct
+// relay_job_event call. Used by code outside the ExecutionClient methods (e.g.
+// dispatcher.step_progress) so every relay event benefits from batching.
+func (c *ExecutionClient) BufferRelayEvent(ev RelayJobEvent) error {
+	return c.bufferRelayEvent(ev)
+}
+
+// relayFlusher periodically drains the pending event buffer in a single
+// relay_job_event call.
+func (c *ExecutionClient) relayFlusher() {
+	ticker := time.NewTicker(relayFlushEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.flushRelayEvents()
+		case <-c.relayCh:
+			c.flushRelayEvents()
+		case <-c.relayDone:
+			c.flushRelayEvents()
+			return
+		}
+	}
+}
+
+// flushRelayEvents sends all buffered events in one invocation. On failure the
+// batch is dropped (relay events are telemetry; job state is persisted through
+// start_job/complete_job).
+func (c *ExecutionClient) flushRelayEvents() {
+	c.relayMu.Lock()
+	if len(c.relayPending) == 0 {
+		c.relayMu.Unlock()
+		return
+	}
+	batch := c.relayPending
+	c.relayPending = nil
+	c.relayMu.Unlock()
+
+	body, err := json.Marshal(map[string]any{"events": batch})
+	if err != nil {
+		log.Printf("[EXEC-CLIENT] relay batch marshal failed: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := c.httpc.PostWithHeaders(ctx, "/functions/v1/relay_job_event", body, func(r *http.Request) {
+		r.Header.Set("x-device-id", c.deviceID)
+	})
+	if err != nil {
+		log.Printf("[EXEC-CLIENT] relay batch flush failed (dropping %d events): %v", len(batch), err)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		log.Printf("[EXEC-CLIENT] relay batch flush → HTTP %d (dropping %d events) | body: %s", resp.StatusCode, len(batch), string(respBody))
+		return
+	}
+	log.Printf("[EXEC-CLIENT] relay batch flush → HTTP %d (%d events)", resp.StatusCode, len(batch))
 }
 
 type AssignedJob struct {
@@ -321,7 +429,7 @@ type JobFail struct {
 }
 
 func (c *ExecutionClient) ReportJobStart(ctx context.Context, jobID string) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: JobStart{
 			Type:      "job_started",
@@ -369,7 +477,7 @@ func (c *ExecutionClient) StartJob(ctx context.Context, jobID string) (*StartJob
 }
 
 func (c *ExecutionClient) SendJobExecutionHeartbeat(ctx context.Context, jobID string) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: JobHeartbeat{
 			Type:      "job_heartbeat",
@@ -380,7 +488,7 @@ func (c *ExecutionClient) SendJobExecutionHeartbeat(ctx context.Context, jobID s
 }
 
 func (c *ExecutionClient) ReportJobComplete(ctx context.Context, jobID string, durationMs int64, result any, isLocal bool, isLastStep bool) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: JobComplete{
 			Type:       "job_completed",
@@ -396,7 +504,7 @@ func (c *ExecutionClient) ReportJobComplete(ctx context.Context, jobID string, d
 
 func (c *ExecutionClient) ReportJobFailure(ctx context.Context, jobID string, err error) error {
 	sanitizedError := sanitize.ErrorMessage(err.Error())
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: JobFail{
 			Type:         "job_failed",
@@ -408,7 +516,7 @@ func (c *ExecutionClient) ReportJobFailure(ctx context.Context, jobID string, er
 }
 
 func (c *ExecutionClient) MarkChunkRunning(ctx context.Context, chunkID string) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: map[string]any{
 			"type":     "chunk_running",
@@ -418,7 +526,7 @@ func (c *ExecutionClient) MarkChunkRunning(ctx context.Context, chunkID string) 
 }
 
 func (c *ExecutionClient) MarkChunkDone(ctx context.Context, chunkID string) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: map[string]any{
 			"type":     "chunk_done",
@@ -428,7 +536,7 @@ func (c *ExecutionClient) MarkChunkDone(ctx context.Context, chunkID string) err
 }
 
 func (c *ExecutionClient) MarkChunkFailed(ctx context.Context, chunkID string, err error) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: map[string]any{
 			"type":     "chunk_failed",
@@ -439,7 +547,7 @@ func (c *ExecutionClient) MarkChunkFailed(ctx context.Context, chunkID string, e
 }
 
 func (c *ExecutionClient) EmitEvent(ctx context.Context, eventType string, data any) error {
-	return c.post(ctx, "/functions/v1/relay_job_event", RelayJobEvent{
+	return c.bufferRelayEvent(RelayJobEvent{
 		Channel: "agent-" + c.deviceID,
 		Data: map[string]any{
 			"type": eventType,

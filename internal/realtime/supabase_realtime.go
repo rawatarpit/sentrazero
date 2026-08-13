@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"runtime"
@@ -112,7 +113,6 @@ var (
 	pollingOnce      sync.Once
 	pollInterval     = 30 * time.Second
 	minPollInterval  = 5 * time.Second
-	maxPollInterval  = 90 * time.Second
 	backoffMultiplier = 2.0
 	// postClaimInterval is the floor applied after a poll that returned jobs.
 	// It replaces the old behavior of collapsing straight to minPollInterval,
@@ -121,7 +121,23 @@ var (
 	// floor keeps per-agent throughput while giving other agents in the fleet a
 	// window to poll and claim their fair share of a burst.
 	postClaimInterval = 20 * time.Second
-	intervalLoadOnce sync.Once
+
+	// L1 cost-efficiency knobs (adaptive polling):
+	//   maxIdlePollInterval — ceiling for the exponential backoff while idle.
+	//     Raised from 90s to 300s so an idle fleet polls at most ~5/min/agent
+	//     (100 agents ≈ 0.43M polls/mo) instead of ~16/min/agent. The ceiling
+	//     must stay within the server-side online windows (claim_jobs_for_device
+	//     steal window + advance_pipeline.last_heartbeat filter + chunk_planner
+	//     onlineWindowMs, all raised to 5 min in lockstep).
+	//   pollJitter — ±random fraction applied to backoff intervals so a fleet
+	//     does not poll in lockstep (thundering herd against claim_jobs_for_device).
+	//   activeGrace — after the last poll that returned work, keep polling at
+	//     postClaimInterval for this long (job bursts usually arrive in bursts),
+	//     then let the exponential backoff resume.
+	maxIdlePollInterval = 300 * time.Second
+	pollJitter          = 0.2
+	activeGrace         = 2 * time.Minute
+	intervalLoadOnce    sync.Once
 )
 
 func loadIntervalsFromEnv() {
@@ -136,9 +152,15 @@ func loadIntervalsFromEnv() {
 				minPollInterval = d
 			}
 		}
-		if v := os.Getenv("SENTRA_MAX_POLL_INTERVAL"); v != "" {
+		// SENTRA_MAX_IDLE_POLL_INTERVAL is the adaptive idle ceiling (L1).
+		// SENTRA_MAX_POLL_INTERVAL remains as a backward-compatible alias.
+		if v := os.Getenv("SENTRA_MAX_IDLE_POLL_INTERVAL"); v != "" {
 			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				maxPollInterval = d
+				maxIdlePollInterval = d
+			}
+		} else if v := os.Getenv("SENTRA_MAX_POLL_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				maxIdlePollInterval = d
 			}
 		}
 		if v := os.Getenv("SENTRA_POST_CLAIM_INTERVAL"); v != "" {
@@ -151,7 +173,27 @@ func loadIntervalsFromEnv() {
 				backoffMultiplier = m
 			}
 		}
+		if v := os.Getenv("SENTRA_POLL_JITTER"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 0.5 {
+				pollJitter = f
+			}
+		}
+		if v := os.Getenv("SENTRA_ACTIVE_GRACE"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				activeGrace = d
+			}
+		}
 	})
+}
+
+// jittered returns d randomized by ±pollJitter so a fleet of agents does not
+// poll in lockstep (which would otherwise herd against the claim RPC).
+func jittered(d time.Duration) time.Duration {
+	if pollJitter <= 0 || d <= 0 {
+		return d
+	}
+	factor := 1.0 + (rand.Float64()*2-1)*pollJitter
+	return time.Duration(float64(d) * factor)
 }
 
 func RunPollingClient(
@@ -187,11 +229,18 @@ func (p *PollingClient) start(ctx context.Context) {
 	p.running.Store(true)
 	p.currentInterval.Store(int64(minPollInterval))
 
-	log.Printf("[realtime] starting adaptive polling for device %s (min=%s max=%s)", p.device.ID, minPollInterval, maxPollInterval)
-
 	if p.redisClient != nil && p.cfg.OrgID != "" {
+		// L5: Redis is available — drive polling from job notifications with a
+		// long safety ticker as a backstop. Idle agents effectively stop polling.
+		log.Printf("[realtime] starting event-driven polling for device %s (safety ticker=%s)", p.device.ID, maxIdlePollInterval)
 		go p.listenForRedisJobs()
+		go p.pollLoopEventDriven()
+		return
 	}
+
+	// L1: no Redis — adaptive backoff keeps idle polling cheap while staying
+	// responsive for active agents.
+	log.Printf("[realtime] starting adaptive polling for device %s (min=%s idle-ceiling=%s jitter=±%.0f%%)", p.device.ID, minPollInterval, maxIdlePollInterval, pollJitter*100)
 
 	go p.pollLoopAdaptive()
 }
@@ -199,7 +248,7 @@ func (p *PollingClient) start(ctx context.Context) {
 func (p *PollingClient) pollLoop() {
 
 	// immediate first poll
-	p.fetchNewJobs()
+	p.fetchNewJobs(true)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -213,7 +262,7 @@ func (p *PollingClient) pollLoop() {
 			return
 
 		case <-ticker.C:
-			p.fetchNewJobs()
+			p.fetchNewJobs(true)
 
 		}
 	}
@@ -221,18 +270,16 @@ func (p *PollingClient) pollLoop() {
 
 func (p *PollingClient) pollLoopAdaptive() {
 
-	// immediate first poll
-	jobCount := p.fetchNewJobs()
-	current := time.Duration(p.currentInterval.Load())
+	// immediate first poll; lastJobTime zeroed so an idle agent backs off from
+	// the start instead of idling at postClaimInterval during activeGrace.
+	var lastJobTime time.Time
+	ceilingPolls := 0 // consecutive polls at the idle ceiling (claim-skip cadence)
+	jobCount := p.fetchNewJobs(true)
 	if jobCount > 0 {
-		current = postClaimInterval
-	} else {
-		next := time.Duration(float64(current) * backoffMultiplier)
-		if next > maxPollInterval {
-			next = maxPollInterval
-		}
-		current = next
+		lastJobTime = time.Now()
 	}
+	p.refreshActivity(&lastJobTime)
+	current := p.nextPollInterval(jobCount, lastJobTime)
 	p.currentInterval.Store(int64(current))
 
 	ticker := time.NewTicker(current)
@@ -249,30 +296,108 @@ func (p *PollingClient) pollLoopAdaptive() {
 		case <-ticker.C:
 			ticker.Stop()
 
-			jobCount := p.fetchNewJobs()
-			current := time.Duration(p.currentInterval.Load())
-			if jobCount > 0 {
-				current = postClaimInterval
+			// claimJobs: while backing off normally we claim on every poll. At
+			// the idle ceiling we skip the claim RPC (L4 claim-skip) — a pure
+			// liveness ping — except every 3rd ceiling poll, so new work is
+			// still discovered with bounded latency (~15 min worst case idle).
+			claimJobs := true
+			if time.Duration(p.currentInterval.Load()) >= maxIdlePollInterval {
+				ceilingPolls++
+				claimJobs = (ceilingPolls%3 == 0)
 			} else {
-				next := time.Duration(float64(current) * backoffMultiplier)
-				if next > maxPollInterval {
-					next = maxPollInterval
-				}
-				current = next
+				ceilingPolls = 0
 			}
+
+			jobCount := p.fetchNewJobs(claimJobs)
+			if jobCount > 0 {
+				lastJobTime = time.Now()
+			}
+			// "Back to normal when in use": while this agent still has workers
+			// busy or queued work, keep the aggressive schedule (also keeps
+			// last_heartbeat fresh so claim_jobs_for_device never steals our
+			// in-flight chunks).
+			p.refreshActivity(&lastJobTime)
+			current := p.nextPollInterval(jobCount, lastJobTime)
 			p.currentInterval.Store(int64(current))
 
 			ticker = time.NewTicker(current)
-			log.Printf("[realtime] adaptive poll: got %d jobs, next interval=%s", jobCount, current)
-
-		case <-p.redisWakeupCh:
-			ticker.Stop()
-			p.fetchNewJobs()
-			p.currentInterval.Store(int64(minPollInterval))
-			ticker = time.NewTicker(minPollInterval)
-			log.Printf("[realtime] redis wakeup: immediate poll, next interval=%s", minPollInterval)
+			log.Printf("[realtime] adaptive poll: got %d jobs (claim=%t), next interval=%s", jobCount, claimJobs, current)
 		}
 	}
+}
+
+// refreshActivity keeps an agent that is still executing work on the aggressive
+// schedule: running jobs / queued work mean more chunks are likely coming.
+// NOTE: we deliberately use ActiveJobsCount + QueueLength, NOT
+// CurrentWorkerCount — the latter counts persistent spawned worker goroutines
+// (≥1 even when fully idle), which would keep every agent "active" forever.
+func (p *PollingClient) refreshActivity(lastJobTime *time.Time) {
+	if dispatcher.ActiveJobsCount() > 0 || dispatcher.QueueLength() > 0 {
+		*lastJobTime = time.Now()
+	}
+}
+
+// pollLoopEventDriven (L5) polls when Redis signals a new job, with a safety
+// ticker as a backstop in case a notification is missed or Redis is flaky.
+// The backstop is self-adaptive: while wakeups are observed (publisher alive,
+// e.g. plan_dataset_chunks/advance_pipeline publishing) it stretches to 10 min
+// so idle polling collapses to near-zero; when no wakeup arrives for a while
+// (publisher absent/dead) it drops to 5 min to keep pickup latency bounded.
+// Backstop ticks always claim so missed notifications never strand work.
+func (p *PollingClient) pollLoopEventDriven() {
+	// Immediate first poll: claim any backlog and register liveness.
+	p.fetchNewJobs(true)
+
+	var lastWakeup time.Time
+	safety := time.NewTicker(jittered(p.eventDrivenSafety(&lastWakeup)))
+	defer safety.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			p.running.Store(false)
+			log.Printf("[realtime] event-driven polling stopped for device %s", p.device.ID)
+			return
+
+		case <-p.redisWakeupCh:
+			lastWakeup = time.Now()
+			safety.Reset(jittered(p.eventDrivenSafety(&lastWakeup)))
+			p.fetchNewJobs(true)
+
+		case <-safety.C:
+			safety.Reset(jittered(p.eventDrivenSafety(&lastWakeup)))
+			p.fetchNewJobs(true)
+		}
+	}
+}
+
+// eventDrivenSafety picks the backstop cadence from observed wakeups: a recent
+// wakeup proves the Redis publisher is alive, so the backstop can stretch;
+// otherwise keep the bounded cadence where the backstop is the primary path.
+func (p *PollingClient) eventDrivenSafety(lastWakeup *time.Time) time.Duration {
+	if !lastWakeup.IsZero() && time.Since(*lastWakeup) < 2*maxIdlePollInterval {
+		return 2 * maxIdlePollInterval // publisher alive — wakeups are primary
+	}
+	return maxIdlePollInterval // publisher absent/dead — backstop is primary
+}
+
+// nextPollInterval implements the L1 adaptive schedule:
+//   - a poll that returned jobs → postClaimInterval (stay aggressive)
+//   - within activeGrace of the last work → postClaimInterval
+//   - otherwise exponential backoff capped at maxIdlePollInterval with jitter
+func (p *PollingClient) nextPollInterval(jobCount int, lastJobTime time.Time) time.Duration {
+	if jobCount > 0 {
+		return postClaimInterval
+	}
+	if activeGrace > 0 && !lastJobTime.IsZero() && time.Since(lastJobTime) < activeGrace {
+		return postClaimInterval
+	}
+	cur := time.Duration(p.currentInterval.Load())
+	next := time.Duration(float64(cur) * backoffMultiplier)
+	if next > maxIdlePollInterval {
+		next = maxIdlePollInterval
+	}
+	return jittered(next)
 }
 
 // listenForRedisJobs subscribes to the sentra:newjob:{org_id} Redis Pub/Sub channel.
@@ -337,7 +462,11 @@ func (p *PollingClient) currentMetrics() map[string]any {
 	return m
 }
 
-func (p *PollingClient) fetchNewJobs() int {
+// fetchNewJobs polls the consolidated poll_state endpoint. When claimJobs is
+// true the server runs claim_jobs_for_device for this device; when false the
+// poll is a liveness-only ping (deep-idle backstop) that skips the expensive
+// claim RPC entirely (L4 server-side gating).
+func (p *PollingClient) fetchNewJobs(claimJobs bool) int {
 
 	if p.ctx.Err() != nil {
 		return 0
@@ -353,6 +482,7 @@ func (p *PollingClient) fetchNewJobs() int {
 		"limit":             10,
 		"lease_ttl_seconds": 1800,
 		"heartbeat":         true,
+		"claim_jobs":        claimJobs,
 	}
 	if m := p.currentMetrics(); m != nil {
 		body["metrics"] = m

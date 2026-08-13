@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
@@ -15,14 +16,50 @@ import (
 	"sentra-agent/internal/sysinfo"
 )
 
-var heartbeatInterval = 600 * time.Second // 10min — metrics are already sent during poll_state calls
+// Per-agent adaptive heartbeat intervals (L2):
+//   - idleInterval: used while the agent has NO running workers and NO queued
+//     work. Liveness is already maintained by poll_state (heartbeat:true on
+//     every poll, ≤ idle poll ceiling), so the dedicated heartbeat only needs
+//     to carry metrics/policy updates at a low cadence.
+//   - activeInterval: used while the agent IS working. The backend policy
+//     (agent_health_policy, TICKET-001) needs fresh signals to tune
+//     concurrency mid-run, so we heartbeat aggressively the moment the agent
+//     goes back in use, and snap back to idle cadence once work drains.
+//
+// Env: SENTRA_HEARTBEAT_INTERVAL (legacy alias for the idle interval),
+// SENTRA_HEARTBEAT_ACTIVE_INTERVAL.
+var (
+	heartbeatIdleInterval   = 15 * time.Minute
+	heartbeatActiveInterval = 2 * time.Minute
+	heartbeatLoadOnce       sync.Once
+)
 
-func init() {
-	if v := os.Getenv("SENTRA_HEARTBEAT_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			heartbeatInterval = d
+func loadHeartbeatIntervals() {
+	heartbeatLoadOnce.Do(func() {
+		if v := os.Getenv("SENTRA_HEARTBEAT_ACTIVE_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				heartbeatActiveInterval = d
+			}
 		}
+		if v := os.Getenv("SENTRA_HEARTBEAT_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				heartbeatIdleInterval = d
+			}
+		}
+	})
+}
+
+// currentHeartbeatInterval picks the per-agent adaptive interval from live
+// activity: in use (jobs running or queued) → active interval, else idle.
+//
+// NOTE: deliberately uses ActiveJobsCount + QueueLength, NOT
+// CurrentWorkerCount — that counts persistent spawned worker goroutines (≥1
+// even when fully idle), which would keep every agent "active" forever.
+func currentHeartbeatInterval() time.Duration {
+	if dispatcher.ActiveJobsCount() > 0 || dispatcher.QueueLength() > 0 {
+		return heartbeatActiveInterval
 	}
+	return heartbeatIdleInterval
 }
 
 // -----------------------------------------------------------------------------
@@ -35,10 +72,13 @@ func Run(
 	cfg *config.Config,
 	execClient *backend.ExecutionClient,
 ) {
-	ticker := time.NewTicker(heartbeatInterval)
+	loadHeartbeatIntervals()
+
+	interval := currentHeartbeatInterval()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	log.Printf("💓 heartbeat started (interval=%s)", heartbeatInterval)
+	log.Printf("💓 heartbeat started (idle=%s active=%s)", heartbeatIdleInterval, heartbeatActiveInterval)
 
 	for {
 		select {
@@ -48,6 +88,14 @@ func Run(
 
 		case <-ticker.C:
 			performHeartbeat(ctx, device, cfg, execClient)
+			// Recompute the interval every cycle so the cadence tracks the
+			// agent's own activity: busy → fast, idle → slow, busy again → fast.
+			next := currentHeartbeatInterval()
+			if next != interval {
+				interval = next
+				ticker.Reset(interval)
+				log.Printf("💓 heartbeat interval → %s (adaptive)", interval)
+			}
 		}
 	}
 }

@@ -18,6 +18,45 @@ Build safely, understand consequences, protect production data.
 
 ---
 
+# Business Model & Client Classes
+
+SentraZero is a platform product with two distinct client classes. Every task
+should identify which class it serves, because the delivery model differs.
+
+## Managed / Agency Clients (e.g., RISE OTB)
+
+- Clients with **no developers** on their side.
+- SentraZero acts as **their development team**: we build, version, and
+  maintain their plugins (per-client plugin builds).
+- The client subscribes to the data sources themselves (ScraperAPI, Bright
+  Data, proxies — anything their pipeline needs). Credentials are
+  **client-owned**.
+- Keys are **baked into the per-client plugin build**. This is intentional
+  delivery, NOT a defect. Do not "fix" it by moving client keys into shared
+  config or platform vaults without explicit instruction.
+- **Key rotation lifecycle**: client renews/upgrades their subscription →
+  SentraZero ships an updated plugin build → redeploy. Renewal is client-side;
+  redeploy is platform-side.
+- All client costs are billed **cost-plus-margin inside the SaaS product**
+  (usage metering → billing pass-through), not via manual invoices.
+
+## Self-Serve Platform Clients
+
+- Organizations with their own developers (e.g., research labs).
+- They pay for the platform, write and run their own plugins.
+- Procurement, keys, and maintenance are entirely their responsibility.
+
+## Client Work Discipline
+
+- Before any client run, verify the search/API path is healthy (quota, keys).
+- After a run, compare against the client's reference output and root-cause
+  every diff.
+- **Never-silent-failure rule**: a search-path failure must alert and surface
+  warnings; never emit a confident-looking wrong answer (e.g., "No duplicate
+  found") when the search actually returned nothing.
+
+---
+
 # Technology Stack
 
 Core Agent:
@@ -159,6 +198,33 @@ Signature verification happens twice:
 - Server-side before sending plugin to agent
 - Agent-side before executing
 
+## Search-Source Stack & Key Policy
+
+Search/API providers used by client pipelines:
+
+- **ScraperAPI** — primary. Quota-capped (hard 403 at exhaustion). Already
+  wired into `search_walmart()` / `search_via_scraperapi()`.
+- **Bright Data** — fallback. Pay-per-success (no quota-exhaustion death
+  mode); wired as a coded auto-failover, not a manual switch.
+- **DataImpulse** — deprioritized (residential proxy scraping, ToS risk).
+- **Walmart Affiliate API** — future long-term path (official, needs program
+  approval).
+
+The billing model is the real differentiator: quota-capped providers can die
+silently mid-month; pay-per-success cannot exhaust, only cost more.
+
+Key policy:
+- Client-owned keys stay baked into per-client plugin builds (see Business
+  Model).
+- Never place client keys in shared code or shared config.
+- Rotation = client renewal + platform redeploy of the plugin build.
+
+Operational guards:
+- Zero-candidate warning + proactive alert on any search-path failure.
+- Per-execution credit budget/cap — one job must not burn a client's monthly
+  quota mid-run.
+- Check search API health/quota before client runs.
+
 ## Dataset Scanning
 
 Rich media auto-detection:
@@ -169,6 +235,23 @@ Rich media auto-detection:
 - Audio → ID3 tags
 - Archives (zip/tar) → listing
 - Binary → magic byte detection
+
+## Client Data Pipelines
+
+Managed-client workstreams run client plugins against client reference
+outputs (e.g., RISE OTB Walmart validation/baselining vs. client xlsx).
+
+- Pipelines: `validation` (Walmart Scrape & Compare) and `baselining`
+  (Walmart Duplicate Detection) re-runs, compared to the client's reference
+  `Validation.xlsx` / `Baselining.xlsx`.
+- Re-run discipline: verify search path before the run → run → compare vs
+  reference → classify every diff (search-source failure / transient block /
+  logic nuance) → re-run until acceptance criteria are met.
+- Known root-cause classes:
+  - Search-source quota exhaustion (403) → zero candidates → wrong
+    "No duplicate found."
+  - Transient anti-bot soft-blocks during bursts → retry with jitter.
+  - Comparator version nuance (e.g., size+color vs client's color-only).
 
 ## Smart Scheduling (pgvector)
 
@@ -183,6 +266,26 @@ Rich media auto-detection:
 - GPU-requiring plugins routed to GPU-capable agents
 - Sandbox GPU device access for GPU plugins
 - GPU metrics reported with each heartbeat
+
+## Chunk Planning (TICKET-006)
+
+`supabase/functions/_shared/chunk_planner.ts` decides chunk count at plan
+time from **current state** (not history):
+
+- Inputs: `fileCount`, `totalSizeGb`, `effectiveSlots` (live sum of free
+  slots over devices with heartbeat < 120s), `minMemoryFreeGb`.
+- Cost model: `T(C) = ceil(C/S) * ((N/C)*p + f)`.
+- Constants: `perFileComputeSec = 0.19`, `chunkOverheadSec = 34` — inferred
+  from a single measurement (exec `45ed03ac`), never auto-updated.
+
+Instrumentation: migration `20260810000002` created view
+`v_planner_prediction_accuracy` (joins planner predictions with actual job
+durations). The view is LIVE but has **no consumer** — data is collecting,
+the planner is NOT self-tuning.
+
+Honest framing: today the planner is "capacity-aware adaptive chunking,
+validated live." "Self-correcting from history" is future intent, only once a
+feedback loop consumes the view.
 
 ---
 

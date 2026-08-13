@@ -40,6 +40,22 @@ Include:
 - ux-designer
 
 
+For client pipeline / delivery changes:
+
+Include:
+- solutions-engineer
+- qa-engineer
+- backend-engineer
+
+
+For search-source / API provider decisions:
+
+Include:
+- solutions-engineer
+- security-engineer
+- impact-analyzer
+
+
 For backend changes:
 
 Include:

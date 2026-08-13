@@ -187,6 +187,12 @@ Check:
 - Rollout percentage and gradual deployment
 - Error classification and propagation
 
+For managed-client (agency) plugins also check:
+
+- Per-client build (client-owned keys baked in — do not move them)
+- Search-source wiring (ScraperAPI primary, Bright Data fallback)
+- Never-silent-failure: provider errors alert + surface, never silent wrong output
+
 ---
 
 # Database Work
@@ -258,6 +264,58 @@ Check:
 - Pre-chunking strategies
 - Storage backend (S3, GCS, Azure, local)
 - Chunk resize at pipeline time
+
+---
+
+# Client Data Pipeline Work
+
+Use:
+
+Workflow:
+
+.opencode/workflows/client-pipeline-comparison.md
+
+Agents:
+
+- solutions-engineer
+- qa-engineer
+- backend-engineer
+
+Process:
+
+1. Verify search path health (quota, keys) before the run
+2. Run the client pipeline
+3. Compare output against client reference output
+4. Root-cause every diff (search-source failure / transient block / logic nuance)
+5. Re-run until acceptance criteria met
+
+Never accept a confident-looking wrong answer when the search path failed.
+
+---
+
+# Search-Source / API Provider Decisions
+
+Examples:
+
+- Switch or add a search/API provider
+- Key rotation or client subscription renewal
+- Quota / billing model concerns
+
+Use:
+
+Agents:
+
+- solutions-engineer
+- security-engineer
+- impact-analyzer
+
+Check:
+
+- Billing model (quota-capped vs pay-per-success)
+- Key policy (client-owned, baked into per-client builds)
+- Fallback wiring (coded auto-failover)
+- Per-execution credit caps and alerting
+- Billing pass-through (cost-plus-margin inside the product)
 
 ---
 
