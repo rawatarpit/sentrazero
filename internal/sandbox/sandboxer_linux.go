@@ -123,9 +123,24 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 		}
 	}
 
-	if !useCgroup && (memoryMB > 0 || env.Manifest.Resources.CPUSeconds > 0) {
+	cpuSeconds := env.Manifest.Resources.CPUSeconds
+	switch {
+	case useCgroup:
+		// The cgroup enforces the memory cap (memory.max) and the CPU
+		// bandwidth cap (cpu.max). The per-process CPU TIME limit
+		// (RLIMIT_CPU) is complementary to a bandwidth throttle and must be
+		// applied too: without it a CPU-hogging plugin can burn CPU forever
+		// inside its bandwidth quota instead of being killed after
+		// CPUSeconds of CPU time. RLIMIT_AS (ulimit -v) is intentionally NOT
+		// stacked on top of memory.max — script runtimes (Node/V8, Go)
+		// reserve large virtual address regions on Linux and a tight
+		// address-space cap would break them at startup.
+		if cpuSeconds > 0 {
+			applyCPULimit(cmd, env)
+		}
+	case memoryMB > 0 || cpuSeconds > 0:
 		applyRLimits(cmd, env)
-	} else if memoryMB <= 0 && env.Manifest.Resources.CPUSeconds <= 0 {
+	default:
 		obs.Info("no resource limits configured for plugin", obs.Field{
 			"plugin": env.Manifest.Name,
 		})

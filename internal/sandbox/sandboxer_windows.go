@@ -53,6 +53,7 @@ const (
 	createSuspended        = 0x00000004
 	createNewConsole       = 0x00000010
 	threadSuspendResume    = 0x0002
+	processSetQuota        = 0x0100
 	jobObjLimitKillOnClose = 0x2000
 	jobObjLimitProcMemory  = 0x100
 	jobObjLimitActiveProc  = 0x0008
@@ -148,7 +149,19 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	ret, _, callErr := procAssignProcJob.Call(jobHandle, uintptr(cmd.Process.Pid))
+	// AssignProcessToJobObject takes a PROCESS HANDLE, not a PID. Go's
+	// os.Process does not export its handle, so open one with the access
+	// rights MSDN requires for job assignment (PROCESS_SET_QUOTA |
+	// PROCESS_TERMINATE). The child is still suspended (CREATE_SUSPENDED),
+	// so it cannot run any code before it is inside the job object.
+	procHandle, err := syscall.OpenProcess(processSetQuota|syscall.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		cmd.Process.Kill()
+		return fmt.Errorf("OpenProcess(pid=%d) for job assignment: %w", cmd.Process.Pid, err)
+	}
+	defer syscall.CloseHandle(procHandle)
+
+	ret, _, callErr := procAssignProcJob.Call(jobHandle, uintptr(procHandle))
 	if ret == 0 {
 		// ERROR_ACCESS_DENIED here means the child is already a member of a
 		// non-nesting job object owned by the host (e.g. a CI runner service).
