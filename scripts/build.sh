@@ -53,6 +53,11 @@ declare -a TARGETS=(
   "darwin/amd64/"
   "darwin/arm64/"
   "windows/amd64/.exe"
+  "linux/386/"
+  "linux/riscv64/"
+  "linux/ppc64le/"
+  "linux/s390x/"
+  "windows/arm64/.exe"
 )
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
@@ -118,13 +123,18 @@ echo ""
 echo ">>> generating SHA256SUMS"
 (
   cd "$DIST_DIR"
-  shasum -a 256 \
-    sentra-agent-linux-amd64 \
-    sentra-agent-linux-arm64 \
-    sentra-agent-darwin-amd64 \
-    sentra-agent-darwin-arm64 \
-    sentra-agent-windows-amd64.exe \
-    > SHA256SUMS
+  # Derive artifact names from TARGETS so the checksum list never
+  # hardcodes a fixed count ("os/arch/ext" -> sentra-agent-<os>-<arch>[ext]).
+  artifacts=()
+  for t in "${TARGETS[@]}"; do
+    _os="${t%%/*}"
+    _rest="${t#*/}"
+    _arch="${_rest%%/*}"
+    _ext="${_rest#*/}"
+    [[ "$_ext" == "$_rest" ]] && _ext=""
+    artifacts+=("sentra-agent-$_os-$_arch$_ext")
+  done
+  shasum -a 256 "${artifacts[@]}" > SHA256SUMS
 )
 
 if [[ "$SYNC_DOWNLOAD" == "1" ]]; then
