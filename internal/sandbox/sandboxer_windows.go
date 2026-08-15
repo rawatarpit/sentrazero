@@ -59,6 +59,16 @@ const (
 	jobObjLimitActiveProc  = 0x0008
 	jobObjExtLimitInfo     = 9
 	th32csSnapThread       = 0x00000004
+	// jobActiveProcessLimit bounds how many processes may be active in the
+	// sandbox Job Object at once. It must be > 1: plugins are allowed to
+	// spawn subprocesses (bash pipelines / $(...), python workers, node
+	// child processes), and a child created by a job member is automatically
+	// placed in the job — if the limit would be exceeded, Windows denies the
+	// child's creation outright (e.g. MSYS2/Git Bash fork() fails with
+	// "CreateProcessW failed ... errno 5"). A limit of 1 broke every plugin
+	// that forks. 256 is generous for real plugin workloads and still bounds
+	// a runaway fork bomb (it is also Cygwin's own hardcoded fork ceiling).
+	jobActiveProcessLimit = 256
 )
 
 func newPlatformSandbox(cfg SandboxConfig) Sandboxer {
@@ -126,7 +136,7 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 			LimitFlags: jobObjLimitKillOnClose |
 				jobObjLimitProcMemory |
 				jobObjLimitActiveProc,
-			ActiveProcessLimit: 1,
+			ActiveProcessLimit: jobActiveProcessLimit,
 		},
 		ProcessMemoryLimit: uintptr(memoryMB * 1024 * 1024),
 	}
