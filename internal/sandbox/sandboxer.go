@@ -29,21 +29,23 @@ type PluginResources struct {
 }
 
 type SandboxConfig struct {
-	Mode             string              `json:"mode"`
-	DefaultMemoryMB  int64               `json:"default_memory_mb"`
-	DefaultTimeoutS  int64               `json:"default_timeout_s"`
-	MaxMemoryMB      int64               `json:"max_memory_mb"`
-	MaxTimeoutS      int64               `json:"max_timeout_s"`
-	TempDir          string              `json:"temp_dir"`
-	NetworkDefault   bool                `json:"network_default"`
-	LinuxNamespaces  bool                `json:"linux_namespaces"`
-	MacOSSeatbelt    bool                `json:"macos_seatbelt"`
-	WindowsJobObject bool                `json:"windows_job_objects"`
-	Cgroupsv2Path    string              `json:"cgroupsv2_path"`
-	SeccompProfile   string              `json:"seccomp_profile"`
-	SandboxUID       string              `json:"sandbox_uid"`
-	SandboxGID       string              `json:"sandbox_gid"`
-	Capabilities     PlatformCapabilities `json:"-"`
+	Mode              string               `json:"mode"`
+	DefaultMemoryMB   int64                `json:"default_memory_mb"`
+	DefaultTimeoutS   int64                `json:"default_timeout_s"`
+	MaxMemoryMB       int64                `json:"max_memory_mb"`
+	MaxTimeoutS       int64                `json:"max_timeout_s"`
+	TempDir           string               `json:"temp_dir"`
+	NetworkDefault    bool                 `json:"network_default"`
+	LinuxNamespaces   bool                 `json:"linux_namespaces"`
+	MacOSSeatbelt     bool                 `json:"macos_seatbelt"`
+	WindowsJobObject  bool                 `json:"windows_job_objects"`
+	Cgroupsv2Path     string               `json:"cgroupsv2_path"`
+	DefaultCPUPercent int                  `json:"default_cpu_percent"`
+	SandboxNoNewPrivs bool                 `json:"sandbox_no_new_privs"`
+	SeccompProfile    string               `json:"seccomp_profile"`
+	SandboxUID        string               `json:"sandbox_uid"`
+	SandboxGID        string               `json:"sandbox_gid"`
+	Capabilities      PlatformCapabilities `json:"-"`
 }
 
 type SandboxEnv struct {
@@ -67,20 +69,22 @@ func LoadConfig() SandboxConfig {
 		cgroupPath = detectCgroupsPath()
 	}
 	cfg := SandboxConfig{
-		Mode:             getEnv("SANDBOX_MODE", detectBestMode()),
-		DefaultMemoryMB:  getEnvInt64("SANDBOX_DEFAULT_MEMORY_MB", detectSystemMemoryMB()/4),
-		DefaultTimeoutS:  getEnvInt64("SANDBOX_DEFAULT_TIMEOUT_S", 300),
-		MaxMemoryMB:      getEnvInt64("SANDBOX_MAX_MEMORY_MB", detectSystemMemoryMB()/2),
-		MaxTimeoutS:      getEnvInt64("SANDBOX_MAX_TIMEOUT_S", 3600),
-		TempDir:          getEnv("SANDBOX_TEMP_DIR", detectTempDir()),
-		NetworkDefault:   getEnvBool("SANDBOX_NETWORK_DEFAULT", false),
-		LinuxNamespaces:  getEnvBool("SANDBOX_LINUX_NAMESPACES", true),
-		MacOSSeatbelt:    getEnvBool("SANDBOX_MACOS_SEATBELT", true),
-		WindowsJobObject: getEnvBool("SANDBOX_WINDOWS_JOB_OBJECT", true),
-		Cgroupsv2Path:    cgroupPath,
-		SeccompProfile:   getEnv("SANDBOX_SECCOMP_PROFILE", "default"),
-		SandboxUID:       getEnv("SANDBOX_UID", "65534"),
-		SandboxGID:       getEnv("SANDBOX_GID", "65534"),
+		Mode:              getEnv("SANDBOX_MODE", detectBestMode()),
+		DefaultMemoryMB:   getEnvInt64("SANDBOX_DEFAULT_MEMORY_MB", detectSystemMemoryMB()/4),
+		DefaultTimeoutS:   getEnvInt64("SANDBOX_DEFAULT_TIMEOUT_S", 300),
+		MaxMemoryMB:       getEnvInt64("SANDBOX_MAX_MEMORY_MB", detectSystemMemoryMB()/2),
+		MaxTimeoutS:       getEnvInt64("SANDBOX_MAX_TIMEOUT_S", 3600),
+		TempDir:           getEnv("SANDBOX_TEMP_DIR", detectTempDir()),
+		NetworkDefault:    getEnvBool("SANDBOX_NETWORK_DEFAULT", false),
+		LinuxNamespaces:   getEnvBool("SANDBOX_LINUX_NAMESPACES", true),
+		MacOSSeatbelt:     getEnvBool("SANDBOX_MACOS_SEATBELT", true),
+		WindowsJobObject:  getEnvBool("SANDBOX_WINDOWS_JOB_OBJECT", true),
+		Cgroupsv2Path:     cgroupPath,
+		DefaultCPUPercent: getEnvInt("SANDBOX_DEFAULT_CPU_PERCENT", 80),
+		SandboxNoNewPrivs: getEnvBool("SANDBOX_NO_NEW_PRIVS", true),
+		SeccompProfile:    getEnv("SANDBOX_SECCOMP_PROFILE", "default"),
+		SandboxUID:        getEnv("SANDBOX_UID", "65534"),
+		SandboxGID:        getEnv("SANDBOX_GID", "65534"),
 	}
 	cfg.Capabilities = DetectCapabilities(cfg)
 	obs.Info("sandbox config loaded", obs.Field{
@@ -192,6 +196,15 @@ func getEnv(key, def string) string {
 func getEnvInt64(key string, def int64) int64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func getEnvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
 	}

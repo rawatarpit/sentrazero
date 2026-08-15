@@ -31,7 +31,6 @@ const (
 )
 
 // newJobDeduplicationStore creates a new deduplication store.
-// Loads existing job IDs from disk if available.
 func newJobDeduplicationStore(dataDir string, ttl time.Duration) (*JobDeduplicationStore, error) {
 	if ttl <= 0 {
 		ttl = defaultDedupTTL
@@ -66,6 +65,26 @@ func newJobDeduplicationStore(dataDir string, ttl time.Duration) (*JobDeduplicat
 	go store.snapshotWorker()
 
 	return store, nil
+}
+
+// NewJobDeduplicationStore is the exported constructor for the persistent
+// file-backed dedup store. ttl <= 0 selects the default (60 minutes).
+func NewJobDeduplicationStore(dataDir string, ttl time.Duration) (*JobDeduplicationStore, error) {
+	return newJobDeduplicationStore(dataDir, ttl)
+}
+
+// globalDedupStore is the package-level file-backed dedup store, installed by
+// SetDedupStore from the agent entrypoint. It is consulted in addition to the
+// in-memory runningJobs/activeJobs maps so duplicates survive restarts.
+var globalDedupStore *JobDeduplicationStore
+
+// SetDedupStore installs the persistent dedup store used by SubmitJobWithMeta.
+func SetDedupStore(store *JobDeduplicationStore) {
+	globalDedupStore = store
+	if store != nil {
+		fmt.Printf("[dedup] file-backed dedup store enabled: %s (ttl=%v, max=%d)\n",
+			store.filePath, store.ttl, store.maxJobs)
+	}
 }
 
 // load loads job IDs from the persistent storage file.

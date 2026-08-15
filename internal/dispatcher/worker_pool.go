@@ -276,7 +276,7 @@ func executeJobSafe(id int, req jobRequest) {
 	if execClient != nil && req.orgID != "" && req.jobID != "" {
 		// Extract plugin_id from job payload (Bug #25 fix)
 		var payload struct {
-			PluginID string `json:"plugin_id,omitempty"`
+			PluginID   string `json:"plugin_id,omitempty"`
 			PluginName string `json:"plugin_name,omitempty"`
 		}
 		pluginID := req.jobID // fallback
@@ -289,7 +289,7 @@ func executeJobSafe(id int, req jobRequest) {
 				}
 			}
 		}
-		
+
 		pluginExecID, pluginExecErr = execClient.RecordPluginExecutionStart(
 			ctx, req.orgID, pluginID, req.jobID, req.jobID,
 		)
@@ -341,7 +341,7 @@ func executeJobSafe(id int, req jobRequest) {
 	// DEBUG: Log exact values passed to handler
 	log.Printf("[DEBUG] BEFORE ExecuteJob → job_id=%s execution_id=%s job_type=%s payload_len=%d",
 		req.jobID, req.executionID, req.jobType, len(req.payload))
-	
+
 	err := ExecuteJob(
 		ctx,
 		req.jobType,
@@ -429,11 +429,11 @@ func executeJobSafe(id int, req jobRequest) {
 			"job_id":       req.jobID,
 			"execution_id": req.executionID,
 		})
-		
+
 		// DEBUG: Log exact values before complete_job
 		log.Printf("[DEBUG] BEFORE complete_job → job_id=%s execution_id=%s",
 			req.jobID, req.executionID)
-		
+
 		result := execClient.CompleteJob(ctx, req.executionID, req.jobID, "completed", duration.Milliseconds(), nil, true, false)
 
 		if result.IsStaleExecution() {
@@ -487,7 +487,7 @@ func SubmitJobWithMeta(
 	// ============================================================
 	// MANDATORY VALIDATION: Drop malformed jobs at enqueue
 	// ============================================================
-	
+
 	// job_id is required
 	if jobID == "" {
 		obs.Error("dispatcher: rejecting job with empty job_id", obs.Field{
@@ -495,7 +495,7 @@ func SubmitJobWithMeta(
 		})
 		return errors.New("dispatcher: job_id is required")
 	}
-	
+
 	// execution_id is CRITICAL - required for completion
 	// scan_dataset and merge_dataset jobs are background tasks that never have an execution_id
 	if executionID == "" && jobType != "scan_dataset" && jobType != "merge_dataset" {
@@ -505,7 +505,7 @@ func SubmitJobWithMeta(
 		})
 		return errors.New("dispatcher: execution_id is required for completion")
 	}
-	
+
 	// job_type is required
 	if jobType == "" {
 		obs.Error("dispatcher: rejecting job with empty job_type", obs.Field{
@@ -515,14 +515,24 @@ func SubmitJobWithMeta(
 	}
 
 	obs.Info("dispatcher: enqueueing job", obs.Field{
-		"job_id":        jobID,
-		"job_type":      jobType,
-		"execution_id":  executionID,
-		"payload_len":   len(payload),
+		"job_id":       jobID,
+		"job_type":     jobType,
+		"execution_id": executionID,
+		"payload_len":  len(payload),
 	})
 
 	// DEBUG: Log enqueue point
 	log.Printf("[DEBUG] ENQUEUE → job_id=%s execution_id=%s job_type=%s", jobID, executionID, jobType)
+
+	// Persistent dedup: reject job IDs already seen within the file-store TTL
+	// (survives agent restarts). This complements the in-memory checks below.
+	if jobID != "" && globalDedupStore != nil && globalDedupStore.Contains(jobID) {
+		obs.Warn("dispatcher: job rejected by file dedup store", obs.Field{
+			"job_id":   jobID,
+			"job_type": jobType,
+		})
+		return errors.New("dispatcher: duplicate job rejected - seen within dedup TTL")
+	}
 
 	if jobID != "" {
 		activeJobsMutex.Lock()
@@ -589,12 +599,14 @@ func SubmitJobWithMeta(
 
 	select {
 	case jobQueue <- req:
+		if jobID != "" && globalDedupStore != nil {
+			globalDedupStore.Add(jobID)
+		}
 		if queueUtil > HighWaterMarkPercent {
 			obs.Warn("queue utilization high after enqueue", obs.Field{
 				"job_id":      jobID,
 				"job_type":    jobType,
 				"queue_len":   queueLen,
-				"queue_cap":   queueCap,
 				"utilization": queueUtil,
 			})
 		}

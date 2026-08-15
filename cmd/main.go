@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -23,16 +24,50 @@ import (
 	"sentra-agent/internal/plugin"
 	"sentra-agent/internal/realtime"
 	agentredis "sentra-agent/internal/redis"
+	"sentra-agent/internal/sandbox"
 	"sentra-agent/internal/startup"
 	"sentra-agent/internal/storage"
 )
 
 var (
 	claimCodeFlag = flag.String("claim-code", "", "Claim code for non-interactive device registration")
-	healthServer  *healthcheck.Server
+
+	healthServer *healthcheck.Server
 )
 
+// reexecTarget detects the internal re-exec modes used by the Linux sandbox.
+// The sandboxer re-execs through the agent binary so NO_NEW_PRIVS / seccomp
+// are applied in this process before exec'ing the plugin.
+//
+// This must run BEFORE flag.Parse(): the target's own arguments may begin
+// with "-" (e.g. `/bin/sh -c "..."`, `python -m ...`), which the flag package
+// would reject as undefined flags and exit(2). We scan os.Args manually and
+// hand everything after the target through verbatim.
+func reexecTarget() (mode, target string, args []string) {
+	for i := 1; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--seccomp-exec", "--no-new-privs-exec":
+			if i+1 < len(os.Args) {
+				return os.Args[i], os.Args[i+1], os.Args[i+2:]
+			}
+			return "", "", nil
+		}
+	}
+	return "", "", nil
+}
+
 func main() {
+	// Internal re-exec modes: run as early as possible, before any identity
+	// or claim flow. Neither function returns on success.
+	if mode, target, args := reexecTarget(); target != "" {
+		if mode == "--seccomp-exec" {
+			sandbox.SeccompExec(target, args)
+		} else {
+			sandbox.NoNewPrivsExec(target, args)
+		}
+		return
+	}
+
 	flag.Parse()
 
 	log.Println("🚀 Sentra Agent starting")
@@ -397,6 +432,20 @@ func main() {
 	}
 
 	dispatcher.InitWorkerPool(int(workers))
+
+	// Persistent file-backed dedup store (~/.sentra/job_dedup.json, 60-min
+	// TTL). Rejects duplicate job IDs even across agent restarts, in addition
+	// to the in-memory and Redis dedup layers.
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		home = os.Getenv("HOME")
+	}
+	dedupDataDir := filepath.Join(home, ".sentra")
+	if dedupStore, dedupErr := dispatcher.NewJobDeduplicationStore(dedupDataDir, 0); dedupErr != nil {
+		log.Printf("⚠️ Failed to init file dedup store: %v", dedupErr)
+	} else {
+		dispatcher.SetDedupStore(dedupStore)
+	}
 
 	// Fetch and dispatch any jobs already assigned to this device
 	// (reconcile may have assigned jobs that polling won't return)

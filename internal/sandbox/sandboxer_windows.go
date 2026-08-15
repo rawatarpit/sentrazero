@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"sentra-agent/internal/obs"
 )
 
 type windowsSandbox struct {
@@ -16,22 +20,26 @@ type windowsSandbox struct {
 }
 
 var (
-	modkernel32        = syscall.NewLazyDLL("kernel32.dll")
-	procCreateJobObj   = modkernel32.NewProc("CreateJobObjectW")
-	procSetInfoJobObj  = modkernel32.NewProc("SetInformationJobObject")
-	procAssignProcJob  = modkernel32.NewProc("AssignProcessToJobObject")
-	procResumeThread   = modkernel32.NewProc("ResumeThread")
-	procOpenThread     = modkernel32.NewProc("OpenThread")
+	modkernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	procCreateJobObj             = modkernel32.NewProc("CreateJobObjectW")
+	procSetInfoJobObj            = modkernel32.NewProc("SetInformationJobObject")
+	procAssignProcJob            = modkernel32.NewProc("AssignProcessToJobObject")
+	procResumeThread             = modkernel32.NewProc("ResumeThread")
+	procOpenThread               = modkernel32.NewProc("OpenThread")
+	procCreateToolhelp32Snapshot = modkernel32.NewProc("CreateToolhelp32Snapshot")
+	procThread32First            = modkernel32.NewProc("Thread32First")
+	procThread32Next             = modkernel32.NewProc("Thread32Next")
 )
 
 const (
-	createSuspended       = 0x00000004
-	createNewConsole      = 0x00000010
-	threadSuspendResume   = 0x0002
+	createSuspended        = 0x00000004
+	createNewConsole       = 0x00000010
+	threadSuspendResume    = 0x0002
 	jobObjLimitKillOnClose = 0x2000
 	jobObjLimitProcMemory  = 0x100
 	jobObjLimitActiveProc  = 0x0008
 	jobObjExtLimitInfo     = 9
+	th32csSnapThread       = 0x00000004
 )
 
 func newPlatformSandbox(cfg SandboxConfig) Sandboxer {
@@ -55,6 +63,21 @@ func (s *windowsSandbox) Prepare(ctx context.Context, jobID string, manifest Plu
 }
 
 func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd) error {
+	// Network isolation: when the plugin has NOT requested network access,
+	// add an outbound firewall block for the plugin executable (best-effort —
+	// requires admin rights to modify the Windows Firewall). The rule is
+	// removed when the plugin process exits.
+	if !env.Network {
+		if cleanup, fwErr := s.blockOutbound(cmd, env); fwErr != nil {
+			obs.Warn("windows firewall block failed (best-effort)", obs.Field{
+				"plugin": env.Manifest.Name,
+				"error":  fwErr.Error(),
+			})
+		} else if cleanup != nil {
+			defer cleanup()
+		}
+	}
+
 	if !s.cfg.WindowsJobObject {
 		return cmd.Run()
 	}
@@ -110,10 +133,14 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 		return fmt.Errorf("AssignProcessToJobObject failed")
 	}
 
-	hThread, _, _ := procOpenThread.Call(threadSuspendResume, 0, uintptr(cmd.Process.Pid))
-	if hThread != 0 {
-		procResumeThread.Call(hThread)
-		syscall.CloseHandle(syscall.Handle(hThread))
+	// The process was created with CREATE_SUSPENDED so it cannot execute any
+	// code before it is inside the job object. Resume its primary thread now.
+	// OpenThread expects a *thread* ID — the process PID is NOT a valid thread
+	// ID — so we enumerate threads to find one owned by this process. A freshly
+	// created suspended process has exactly one thread.
+	if err := resumePrimaryThread(uint32(cmd.Process.Pid)); err != nil {
+		cmd.Process.Kill()
+		return fmt.Errorf("resume primary thread: %w", err)
 	}
 
 	return cmd.Wait()
@@ -124,6 +151,100 @@ func (s *windowsSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
 		env.Cleanup()
 	}
 	return nil
+}
+
+// blockOutbound creates a Windows Firewall outbound-block rule for the plugin
+// executable and returns a cleanup func that removes it. The rule name is
+// derived from the plugin name (sanitized) plus a timestamp so concurrent
+// plugins never collide. Best-effort: returns an error when netsh fails
+// (typically due to missing admin rights).
+func (s *windowsSandbox) blockOutbound(cmd *exec.Cmd, env *SandboxEnv) (func(), error) {
+	if cmd.Path == "" {
+		return nil, fmt.Errorf("cannot block network: empty executable path")
+	}
+	ruleName := "SentraZeroBlock_" + sanitizeRuleName(env.Manifest.Name) + "_" + fmt.Sprintf("%d", time.Now().UnixNano())
+
+	add := exec.Command("netsh", "advfirewall", "firewall", "add", "rule",
+		"name="+ruleName,
+		"dir=out",
+		"action=block",
+		"enable=yes",
+		"program="+cmd.Path,
+	)
+	if out, err := add.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("netsh add rule: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	obs.Info("windows firewall outbound block applied", obs.Field{
+		"plugin":  env.Manifest.Name,
+		"rule":    ruleName,
+		"program": cmd.Path,
+	})
+
+	return func() {
+		del := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule", "name="+ruleName)
+		if out, err := del.CombinedOutput(); err != nil {
+			obs.Warn("netsh delete rule failed", obs.Field{
+				"rule":  ruleName,
+				"error": err.Error(),
+				"out":   strings.TrimSpace(string(out)),
+			})
+		}
+	}, nil
+}
+
+// resumePrimaryThread resumes the primary thread of a process that was created
+// with CREATE_SUSPENDED. OpenThread requires a thread ID (not a process ID),
+// so we enumerate the process's threads via CreateToolhelp32Snapshot and
+// resume the first one owned by pid. A freshly created suspended process has
+// exactly one thread, so this unblocks the process.
+func resumePrimaryThread(pid uint32) error {
+	snapshot, _, _ := procCreateToolhelp32Snapshot.Call(uintptr(th32csSnapThread), 0)
+	if snapshot == 0 || snapshot == uintptr(syscall.InvalidHandle) {
+		return fmt.Errorf("CreateToolhelp32Snapshot failed")
+	}
+	defer syscall.CloseHandle(syscall.Handle(snapshot))
+
+	entry := threadEntry32{Size: uint32(unsafe.Sizeof(threadEntry32{}))}
+	ret, _, _ := procThread32First.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	for ret != 0 {
+		if entry.OwnerProcessID == pid {
+			hThread, _, _ := procOpenThread.Call(threadSuspendResume, 0, uintptr(entry.ThreadID))
+			if hThread != 0 {
+				procResumeThread.Call(hThread)
+				syscall.CloseHandle(syscall.Handle(hThread))
+				return nil
+			}
+		}
+		ret, _, _ = procThread32Next.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	}
+	return fmt.Errorf("no thread found for pid %d", pid)
+}
+
+type threadEntry32 struct {
+	Size           uint32
+	Usage          uint32
+	ThreadID       uint32
+	OwnerProcessID uint32
+	BasePriority   int32
+	DeltaPriority  int32
+	Flags          uint32
+}
+
+func sanitizeRuleName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "plugin"
+	}
+	return b.String()
 }
 
 type jobObjectBasicLimitInformation struct {

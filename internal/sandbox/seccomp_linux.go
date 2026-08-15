@@ -65,8 +65,30 @@ func bpfJump(code uint16, k uint32, jt, jf uint8) sockFilter {
 
 // x86_64 syscall numbers that are always allowed.
 // This is a generous allowlist covering file I/O, networking, signals,
-// memory management, threads, and common runtime operations.
+// memory management, threads, timers, scheduling, and the syscalls the
+// Python / Node / Go / Rust runtimes and common JITs actually use.
+//
+// NOTE: the numbers below were audited against the x86_64 syscall table
+// (see include/uapi/asm-generic/unistd.h — x86_64 uses the 64-bit set).
+// The original list had wrong numbers for many entries (e.g. 97 != geteuid,
+// 202 = futex not getcpu, 273 = set_robust_list not fcntl, 332 = statx not
+// memfd_create), which would have SIGSYS-killed every real runtime.
+//
+// Deliberately EXCLUDED (privilege / namespace / kernel-control surface):
+// mount, umount2, ptrace, reboot, setns, unshare, init_module, finit_module,
+// delete_module, create_module, get_kernel_syms, query_module, capget,
+// capset, syslog, kexec_load, kexec_file_load, swapon, swapoff, sethostname,
+// setdomainname, iopl, ioperm, acct, chroot, pivot_root, quotactl,
+// nfsservctl, bpf, perf_event_open, process_vm_readv/writev, userfaultfd,
+// keyctl/add_key/request_key, lookup_dcookie, all *xattr syscalls,
+// setuid/setgid/setreuid/setregid/setresuid/setresgid/setfsuid/setfsgid/
+// setgroups, personality, adjtimex, settimeofday, readahead, mlock family,
+// sysfs, uselib, ustat, vhangup, modify_ldt, _sysctl, mq_* (SysV msg),
+// ioprio_*, mbind/migrate_pages/move_pages/mempolicy, fanotify, seccomp,
+// io_uring_*, open_tree/move_mount/fsopen/fsconfig/fsmount/fspick,
+// mount_setattr, landlock_*, memfd_secret, process_madvise/mrelease.
 var allowedSyscalls = []uint32{
+	// ---- File I/O ----------------------------------------------------
 	0,   // read
 	1,   // write
 	2,   // open
@@ -75,21 +97,87 @@ var allowedSyscalls = []uint32{
 	5,   // fstat
 	6,   // lstat
 	8,   // lseek
-	9,   // mmap
-	10,  // mprotect
-	11,  // munmap
-	12,  // brk
-	13,  // rt_sigaction
-	14,  // rt_sigprocmask
-	15,  // rt_sigreturn
-	16,  // ioctl
 	17,  // pread64
 	18,  // pwrite64
 	19,  // readv
 	20,  // writev
 	21,  // access
+	40,  // sendfile
+	72,  // fcntl
+	73,  // flock
+	74,  // fsync
+	75,  // fdatasync
+	76,  // truncate
+	77,  // ftruncate
+	78,  // getdents
+	79,  // getcwd
+	80,  // chdir
+	81,  // fchdir
+	82,  // rename
+	83,  // mkdir
+	84,  // rmdir
+	85,  // creat
+	86,  // link
+	87,  // unlink
+	88,  // symlink
+	89,  // readlink
+	90,  // chmod
+	91,  // fchmod
+	92,  // chown
+	93,  // fchown
+	94,  // lchown
+	95,  // umask
+	137, // statfs
+	138, // fstatfs
+	217, // getdents64
+	221, // fadvise64
+	257, // openat
+	258, // mkdirat
+	259, // mknodat
+	260, // fchownat
+	261, // futimesat
+	262, // newfstatat
+	263, // unlinkat
+	264, // renameat
+	265, // linkat
+	266, // symlinkat
+	267, // readlinkat
+	268, // fchmodat
+	269, // faccessat
+	275, // splice
+	276, // tee
+	277, // sync_file_range
+	278, // vmsplice
+	280, // utimensat
+	285, // fallocate
+	295, // preadv
+	296, // pwritev
+	302, // prlimit64
+	316, // renameat2
+	326, // copy_file_range
+	327, // preadv2
+	328, // pwritev2
+	332, // statx
+	436, // close_range
+	437, // openat2
+	439, // faccessat2
+
+	// ---- Memory ------------------------------------------------------
+	9,   // mmap
+	10,  // mprotect
+	11,  // munmap
+	12,  // brk
 	25,  // mremap
-	35,  // nanosleep
+	26,  // msync
+	27,  // mincore
+	28,  // madvise
+	319, // memfd_create
+
+	// ---- Processes, threads, signals ---------------------------------
+	13,  // rt_sigaction
+	14,  // rt_sigprocmask
+	15,  // rt_sigreturn
+	34,  // pause
 	39,  // getpid
 	56,  // clone
 	57,  // fork
@@ -99,42 +187,137 @@ var allowedSyscalls = []uint32{
 	61,  // wait4
 	62,  // kill
 	63,  // uname
-	78,  // getdents
-	79,  // getcwd
-	89,  // readlink
-	97,  // geteuid
-	98,  // getegid
-	99,  // getuid
-	100, // getgid
-	102, // getgroups
+	109, // setpgid
 	110, // getppid
-	127, // getrlimit (needed for ulimit -t / -v)
-	137, // statfs
-	138, // fstatfs
-	158, // arch_prctl
-	160, // setrlimit (needed for ulimit -t / -v)
+	111, // getpgrp
+	112, // setsid
+	124, // getsid
+	127, // rt_sigpending
+	128, // rt_sigtimedwait
+	129, // rt_sigqueueinfo
+	130, // rt_sigsuspend
+	131, // sigaltstack
 	186, // gettid
-	202, // getcpu
-	217, // getdents64
-	218, // settimeofday
+	200, // tkill
+	202, // futex
+	218, // set_tid_address
+	219, // restart_syscall
 	231, // exit_group
-	232, // epoll_create
-	233, // epoll_ctl
-	234, // epoll_wait
-	257, // openat
-	262, // newfstatat
-	273, // fcntl
-	281, // eventfd2
-	282, // epoll_create1
-	283, // dup3
-	284, // pipe2
-	285, // inotify_init1
-	291, // preadv
-	292, // pwritev
-	302, // prlimit64
-	318, // getrandom
-	332, // memfd_create
+	234, // tgkill
+	247, // waitid
+	273, // set_robust_list
+	274, // get_robust_list
+	322, // execveat
 	334, // rseq
+	424, // pidfd_send_signal
+	434, // pidfd_open
+	435, // clone3
+	449, // futex_waitv
+
+	// ---- Identity / resource queries ---------------------------------
+	97,  // getrlimit (needed for ulimit -t / -v)
+	98,  // getrusage
+	99,  // sysinfo
+	100, // times
+	102, // getuid
+	104, // getgid
+	107, // geteuid
+	108, // getegid
+	115, // getgroups
+	118, // getresuid
+	120, // getresgid
+	121, // getpgid
+	140, // getpriority
+	141, // setpriority
+	160, // setrlimit (needed for ulimit -t / -v)
+	201, // time
+
+	// ---- Timers / clocks ---------------------------------------------
+	35,  // nanosleep
+	36,  // getitimer
+	37,  // alarm
+	38,  // setitimer
+	96,  // gettimeofday
+	222, // timer_create
+	223, // timer_settime
+	224, // timer_gettime
+	225, // timer_getoverrun
+	226, // timer_delete
+	228, // clock_gettime
+	229, // clock_getres
+	230, // clock_nanosleep
+
+	// ---- Scheduling ---------------------------------------------------
+	24,  // sched_yield
+	142, // sched_setparam
+	143, // sched_getparam
+	144, // sched_setscheduler
+	145, // sched_getscheduler
+	146, // sched_get_priority_max
+	147, // sched_get_priority_min
+	148, // sched_rr_get_interval
+	203, // sched_setaffinity
+	204, // sched_getaffinity
+	309, // getcpu
+	314, // sched_setattr
+	315, // sched_getattr
+
+	// ---- Networking ---------------------------------------------------
+	41,  // socket
+	42,  // connect
+	43,  // accept
+	44,  // sendto
+	45,  // recvfrom
+	46,  // sendmsg
+	47,  // recvmsg
+	48,  // shutdown
+	49,  // bind
+	50,  // listen
+	51,  // getsockname
+	52,  // getpeername
+	53,  // socketpair
+	54,  // setsockopt
+	55,  // getsockopt
+	288, // accept4
+	299, // recvmmsg
+	307, // sendmmsg
+
+	// ---- Poll / epoll / event fds --------------------------------------
+	7,   // poll
+	16,  // ioctl
+	22,  // pipe
+	23,  // select
+	32,  // dup
+	33,  // dup2
+	213, // epoll_create
+	232, // epoll_wait
+	233, // epoll_ctl
+	253, // inotify_init
+	254, // inotify_add_watch
+	255, // inotify_rm_watch
+	270, // pselect6
+	271, // ppoll
+	281, // epoll_pwait
+	282, // signalfd
+	283, // timerfd_create
+	284, // eventfd
+	286, // timerfd_settime
+	287, // timerfd_gettime
+	289, // signalfd4
+	290, // eventfd2
+	291, // epoll_create1
+	292, // dup3
+	293, // pipe2
+	294, // inotify_init1
+	441, // epoll_pwait2
+
+	// ---- Misc / runtime --------------------------------------------------
+	157, // prctl (thread names, dumpability)
+	158, // arch_prctl (TLS/FS base — required by Go and glibc)
+	162, // sync
+	306, // syncfs
+	318, // getrandom
+	324, // membarrier
 }
 
 // SeccompExec applies a seccomp BPF allowlist filter and exec's the target.
@@ -145,6 +328,17 @@ var allowedSyscalls = []uint32{
 // This function does not return on success — it replaces the current process
 // with the target via syscall.Exec.
 func SeccompExec(target string, args []string) {
+	// Defense in depth: honor the same guards as the sandboxer's maybeReexec.
+	// The allowlist contains x86_64 syscall numbers only — on ARM64 (e.g.
+	// Raspberry Pi) applying it would SIGSYS-kill every syscall. And when the
+	// operator disabled seccomp via SANDBOX_SECCOMP_PROFILE=off, the re-exec
+	// path must not silently re-enable it. In both cases fall back to
+	// NO_NEW_PRIVS-only hardening.
+	if runtime.GOARCH != "amd64" || getEnv("SANDBOX_SECCOMP_PROFILE", "default") == "off" {
+		NoNewPrivsExec(target, args)
+		return
+	}
+
 	// ---- Step 1: PR_SET_NO_NEW_PRIVS ----------------------------------
 	// Prevents the process (and anything it exec's) from gaining new
 	// privileges. This also makes the seccomp filter irrevocable.
@@ -161,9 +355,31 @@ func SeccompExec(target string, args []string) {
 	}
 
 	// ---- Step 3: Exec the target program ------------------------------
-	// The seccomp filter is inherited by the new program.
-	if err := syscall.Exec(target, args, os.Environ()); err != nil {
+	// The seccomp filter is inherited by the new program. argv[0] is the
+	// target itself so interpreters (python, node, bash) parse the script
+	// argument correctly.
+	argv := append([]string{target}, args...)
+	if err := syscall.Exec(target, argv, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "seccomp: exec %q: %v\n", target, err)
+		os.Exit(1)
+	}
+}
+
+// NoNewPrivsExec applies PR_SET_NO_NEW_PRIVS only (no seccomp filter) and
+// exec's the target. Used when seccomp is disabled but NO_NEW_PRIVS
+// hardening is still wanted:
+//
+//	agent --no-new-privs-exec <plugin-binary> [args...]
+//
+// This function does not return on success.
+func NoNewPrivsExec(target string, args []string) {
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "no-new-privs: PR_SET_NO_NEW_PRIVS: %v\n", err)
+		os.Exit(1)
+	}
+	argv := append([]string{target}, args...)
+	if err := syscall.Exec(target, argv, os.Environ()); err != nil {
+		fmt.Fprintf(os.Stderr, "no-new-privs: exec %q: %v\n", target, err)
 		os.Exit(1)
 	}
 }
@@ -188,9 +404,9 @@ func buildSeccompFilter() []sockFilter {
 	arch := detectAuditArch()
 	n := len(allowedSyscalls)
 
-	// The ALLOW instruction sits after: 3 arch checks + n syscall checks
-	// + 1 default-deny kill.
-	allowIdx := 3 + n + 1
+	// The ALLOW instruction sits after: 4 arch/load checks (LD arch, JEQ arch,
+	// RET KILL, LD nr) + n syscall checks + 1 default-deny kill.
+	allowIdx := 4 + n + 1
 
 	filter := make([]sockFilter, 0, allowIdx+1)
 

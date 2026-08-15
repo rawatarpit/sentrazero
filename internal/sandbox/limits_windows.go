@@ -17,5 +17,5 @@ func Apply(_ context.Context, _ *exec.Cmd, limits Limits) error {
 	if err := limits.Validate(); err != nil {
 		return err
 	}
-	return fmt.Errorf("sandbox: Windows execution disabled until Job Objects are implemented")
+	return fmt.Errorf("sandbox: rlimits are unsupported on Windows; Job Objects in sandboxer_windows.go enforce limits instead")
 }

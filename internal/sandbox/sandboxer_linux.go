@@ -8,14 +8,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"sentra-agent/internal/obs"
 	"golang.org/x/sys/unix"
+	"sentra-agent/internal/obs"
 )
 
 func newPlatformSandbox(cfg SandboxConfig) Sandboxer {
@@ -23,8 +24,8 @@ func newPlatformSandbox(cfg SandboxConfig) Sandboxer {
 }
 
 type linuxSandbox struct {
-	cfg          SandboxConfig
-	cgroupPaths  []string
+	cfg         SandboxConfig
+	cgroupPaths []string
 }
 
 func (s *linuxSandbox) Prepare(ctx context.Context, jobID string, manifest PluginManifest, network bool) (*SandboxEnv, error) {
@@ -106,6 +107,14 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 				cgSubPath = ""
 				useCgroup = false
 			} else {
+				// cpu.max enforces a bandwidth cap ("quota period" in
+				// microseconds; 100000us period = 100ms). The quota is
+				// derived from the manifest cpu_limit (percent) or the
+				// sandbox default.
+				if err := s.writeCPUMax(cgSubPath, env); err != nil {
+					obs.Warn("cgroup cpu.max write failed, CPU bandwidth not capped",
+						obs.Field{"error": err.Error(), "plugin": env.Manifest.Name})
+				}
 				s.cgroupPaths = append(s.cgroupPaths, cgSubPath)
 				obs.Info("cgroup resource limit applied", obs.Field{
 					"cgroup_path": cgSubPath,
@@ -115,10 +124,10 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 		}
 	}
 
-	if !useCgroup && memoryMB > 0 {
+	if !useCgroup && (memoryMB > 0 || env.Manifest.Resources.CPUSeconds > 0) {
 		applyRLimits(cmd, env)
-	} else if memoryMB <= 0 {
-		obs.Info("no memory limit configured for plugin", obs.Field{
+	} else if memoryMB <= 0 && env.Manifest.Resources.CPUSeconds <= 0 {
+		obs.Info("no resource limits configured for plugin", obs.Field{
 			"plugin": env.Manifest.Name,
 		})
 	}
@@ -127,6 +136,14 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 		if err := s.enableGPU(env, cmd, caps); err != nil {
 			return fmt.Errorf("gpu: %w", err)
 		}
+	}
+
+	// Re-exec through the agent binary so NO_NEW_PRIVS (and, when enabled,
+	// the seccomp allowlist filter) are applied to the plugin process before
+	// it exec's. The clone flags / namespaces set above apply to this
+	// re-exec process, and the filter is inherited by the final target.
+	if err := s.maybeReexec(env, cmd); err != nil {
+		return fmt.Errorf("sandbox reexec: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -154,6 +171,73 @@ func (s *linuxSandbox) resolveMemoryLimit(env *SandboxEnv) int64 {
 		memoryMB = s.cfg.MaxMemoryMB
 	}
 	return memoryMB
+}
+
+// writeCPUMax writes the cpu.max bandwidth limit for a cgroup v2 subdir.
+// Format: "<quota_us> <period_us>". Period is fixed at 100000us (100ms);
+// quota is cpuLimit (percent, 1-100) * 1000us, or the sandbox default.
+func (s *linuxSandbox) writeCPUMax(cgSubPath string, env *SandboxEnv) error {
+	percent := env.Manifest.Resources.CPULimit
+	if percent <= 0 {
+		percent = float64(s.cfg.DefaultCPUPercent)
+	}
+	if percent <= 0 {
+		percent = 80
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	quota := int64(percent * 1000)
+	cpuMax := fmt.Sprintf("%d 100000", quota)
+	if err := os.WriteFile(cgSubPath+"/cpu.max", []byte(cpuMax), 0644); err != nil {
+		return err
+	}
+	obs.Info("cgroup cpu.max applied", obs.Field{
+		"plugin":  env.Manifest.Name,
+		"cpu_max": cpuMax,
+	})
+	return nil
+}
+
+// maybeReexec rewrites cmd to re-exec through the agent binary when
+// NO_NEW_PRIVS and/or seccomp enforcement is enabled. The re-exec process
+// applies PR_SET_NO_NEW_PRIVS (and the seccomp allowlist filter) in its own
+// main() before exec'ing the original plugin command, so the filter is
+// inherited by the plugin.
+//
+// The seccomp allowlist is x86_64-only: the syscall numbers in
+// seccomp_linux.go are the x86_64 table, and ARM64 (e.g. Raspberry Pi) uses
+// a completely different numbering. Applying the x86_64 filter on ARM64
+// would SIGSYS-kill every plugin, so non-x86_64 builds automatically fall
+// back to NO_NEW_PRIVS-only enforcement.
+func (s *linuxSandbox) maybeReexec(env *SandboxEnv, cmd *exec.Cmd) error {
+	seccompEnabled := env.Config.SeccompProfile != "" &&
+		env.Config.SeccompProfile != "off" &&
+		runtime.GOARCH == "amd64"
+	if !seccompEnabled && !env.Config.SandboxNoNewPrivs {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve agent executable: %w", err)
+	}
+	origPath := cmd.Path
+	origArgs := make([]string, 0, len(cmd.Args)-1)
+	if len(cmd.Args) > 0 {
+		origArgs = append(origArgs, cmd.Args[1:]...)
+	}
+	mode := "--no-new-privs-exec"
+	if seccompEnabled {
+		mode = "--seccomp-exec"
+	}
+	obs.Info("sandbox re-exec through agent", obs.Field{
+		"mode":   mode,
+		"target": origPath,
+		"plugin": env.Manifest.Name,
+	})
+	cmd.Path = self
+	cmd.Args = append([]string{filepath.Base(self), mode, origPath}, origArgs...)
+	return nil
 }
 
 func (s *linuxSandbox) enableGPU(env *SandboxEnv, cmd *exec.Cmd, caps PlatformCapabilities) error {
