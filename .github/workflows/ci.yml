@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+        os: [ubuntu-latest, macos-14, macos-15-intel, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -32,7 +32,9 @@ jobs:
         run: go vet ./...
       - name: Test (pass gate — excludes known pre-existing failures)
         shell: bash
-        run: go test $(go list ./... | grep -v internal/dataset | grep -v internal/storage)
+        run: |
+          mapfile -t pkgs < <(go list ./... | grep -v internal/dataset | grep -v internal/storage)
+          go test "${pkgs[@]}"
       - name: Full test suite (informational — known failures are non-blocking)
         shell: bash
         continue-on-error: true
@@ -46,16 +48,12 @@ jobs:
         include:
           - os: ubuntu-latest
             command: sudo bash scripts/smoke-linux.sh
-            shell: bash
           - os: macos-14
             command: bash scripts/smoke-macos.sh
-            shell: bash
-          - os: macos-13
+          - os: macos-15-intel
             command: bash scripts/smoke-macos.sh
-            shell: bash
           - os: windows-latest
             command: powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
-            shell: pwsh
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -65,5 +63,5 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run smoke test
-        shell: ${{ matrix.shell }}
+        shell: bash
         run: ${{ matrix.command }}
