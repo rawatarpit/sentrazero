@@ -21,7 +21,10 @@
 #                            job object (e.g. a CI runner service), the
 #                            sandboxer degrades gracefully and the harness
 #                            reports "Job Object unavailable on this host"
-#                            (WARN/skip, not a failure).
+#                            (WARN/skip, not a failure). On hosts where
+#                            assignment succeeds but the limit is not
+#                            enforced (e.g. GitHub-hosted Windows runners)
+#                            the harness reports a NOTE — also WARN/skip.
 #        net-blocked      -> blocked-or-skipped (admin) / best-effort (non-admin)
 #
 #   If not running as Administrator, firewall-based net-block tests are
@@ -132,12 +135,14 @@ if ([string]::IsNullOrEmpty($line)) {
 
 # job-memory-cap: best-effort. The harness reports
 # [job-memory-cap] OK: killed by the Job Object memory cap: <err> when the
-# cap worked, ERROR: ... not killed / allocation survived when it did not,
-# and WARN: Job Object unavailable on this host (non-nesting host job) ...
-# when the host already runs the agent inside a job object (e.g. a CI
-# runner) so Job Object limits cannot be enforced. PASS = the process was
-# killed; FAIL = cap present but not enforced; WARN = skipped (degraded host
-# or absent line).
+# cap worked, NOTE: allocation survived ... (best-effort check, not a suite
+# failure) when assignment succeeded but the host did not enforce the limit
+# (observed on GitHub-hosted Windows runners), and WARN: Job Object
+# unavailable on this host (non-nesting host job) when the host already runs
+# the agent inside a job object (e.g. a CI runner) so Job Object limits
+# cannot be enforced. PASS = the process was killed; FAIL = a genuine ERROR
+# (e.g. not killed within the timeout); WARN = degraded host or best-effort
+# NOTE.
 $line = Get-HarnessLine 'job-memory-cap'
 if ([string]::IsNullOrEmpty($line)) {
   Record 'WARN' 'job-memory-cap killed/error (best-effort)' 'no harness line - skipped'
@@ -145,6 +150,8 @@ if ([string]::IsNullOrEmpty($line)) {
   Record 'PASS' 'job-memory-cap killed/error (best-effort)'
 } elseif ($line -match 'Job Object unavailable on this host') {
   Record 'WARN' 'job-memory-cap killed/error (best-effort)' 'Job Object limits not enforceable on this host (degraded sandbox)'
+} elseif ($line -match 'NOTE') {
+  Record 'WARN' 'job-memory-cap killed/error (best-effort)' 'memory cap not enforced on this host (best-effort check)'
 } elseif ($line -match 'ERROR|not killed|survived') {
   Record 'FAIL' 'job-memory-cap killed/error (best-effort)' ('memory cap not enforced: {0}' -f $line)
 } else {

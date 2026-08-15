@@ -15,18 +15,18 @@ import (
 	"sentra-agent/internal/system"
 )
 
-// pluginE2EScript is a tiny Node plugin used by the sandbox harness. It reads
+// pluginE2EScript is a tiny bash plugin used by the sandbox harness. It reads
 // the JSON payload from stdin and echoes it back as JSON — the same shape the
-// production scan/merge plugins emit. Node is chosen because it ships with
-// every GitHub-hosted runner (ubuntu, macos, windows) and is the most
-// portable script runtime across the three platforms the smoke tests cover.
-const pluginE2EScript = `let input = '';
-process.stdin.on('data', d => { input += d; });
-process.stdin.on('end', () => {
-  let payload = {};
-  try { payload = JSON.parse(input || '{}'); } catch (_) {}
-  process.stdout.write(JSON.stringify({ ok: true, echo: payload.echo || '' }));
-});
+// production scan/merge plugins emit. bash is used instead of a heavier
+// runtime because it is guaranteed to exist on every CI image the smoke tests
+// cover: /bin/bash on macOS and ubuntu, Git Bash on Windows. (Node is shipped
+// only inside the GitHub toolcache on some macOS images, so its location is
+// not on the PATH of a plain step shell.) bash is a first-class supported
+// plugin language (see internal/plugin getRunnerForLanguage).
+const pluginE2EScript = `#!/bin/bash
+input=$(cat)
+echo_val=$(printf '%s' "$input" | sed -n 's/.*"echo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+printf '{"ok":true,"echo":"%s"}\n' "$echo_val"
 `
 
 // runPluginE2E runs a real plugin through the PRODUCTION plugin execution
@@ -45,7 +45,7 @@ func runPluginE2E() {
 	}
 	defer os.RemoveAll(dir)
 
-	scriptPath := filepath.Join(dir, "main.js")
+	scriptPath := filepath.Join(dir, "main.sh")
 	if err := os.WriteFile(scriptPath, []byte(pluginE2EScript), 0o700); err != nil {
 		fmt.Printf("[plugin-e2e] ERROR: write plugin: %v\n", err)
 		return
@@ -54,8 +54,8 @@ func runPluginE2E() {
 	manifest := plugin.Manifest{
 		Name:     "e2e-plugin",
 		Version:  "1.0.0",
-		Filename: "main.js",
-		Language: "node",
+		Filename: "main.sh",
+		Language: "bash",
 		Trusted:  true,
 		Network:  false,
 		Resources: plugin.PluginResources{
@@ -75,7 +75,7 @@ func runPluginE2E() {
 		manifest,
 		`{"echo":"hello-plugin"}`,
 		system.DetectExecutionEnv(),
-		nil, // nativeRunner: nil is fine for a node plugin (script path)
+		nil, // nativeRunner: nil is fine for a bash plugin (script path)
 	)
 	dur := time.Since(start)
 
