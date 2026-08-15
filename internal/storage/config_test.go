@@ -6,7 +6,7 @@ import (
 
 func TestGetRemotePathWithSlug_Merged(t *testing.T) {
 	path := GetRemotePathWithSlug("uuid-1234", "my-dataset", 0, "merged")
-	expected := "my-dataset.csv"
+	expected := "my-dataset_merged.csv"
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}
@@ -14,7 +14,7 @@ func TestGetRemotePathWithSlug_Merged(t *testing.T) {
 
 func TestGetRemotePathWithSlug_MergedNoSlug(t *testing.T) {
 	path := GetRemotePathWithSlug("uuid-1234", "", 0, "merged")
-	expected := "uuid-1234.csv"
+	expected := "uuid-1234_merged.csv"
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}
@@ -46,7 +46,7 @@ func TestGetRemotePathWithSlug_UnknownType(t *testing.T) {
 
 func TestGetRemotePath_Merged(t *testing.T) {
 	path := GetRemotePath("uuid-1234", 0, "merged")
-	expected := "uuid-1234.csv"
+	expected := "uuid-1234_merged.csv"
 	if path != expected {
 		t.Errorf("expected %q, got %q", expected, path)
 	}
