@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,9 @@ func LoadConfig() SandboxConfig {
 		SandboxGID:        getEnv("SANDBOX_GID", "65534"),
 	}
 	cfg.Capabilities = DetectCapabilities(cfg)
+	if cfg.Mode == "deny" {
+		obs.Warn("sandboxing unavailable; plugin execution denied unless SANDBOX_MODE=off", obs.Field{"platform": runtime.GOOS})
+	}
 	obs.Info("sandbox config loaded", obs.Field{
 		"cgroup_path":      cfg.Cgroupsv2Path,
 		"detected_cgroup":  cfg.Capabilities.CgroupPath,
@@ -100,6 +104,8 @@ func New(cfg SandboxConfig) Sandboxer {
 	switch cfg.Mode {
 	case "off":
 		return &noopSandbox{cfg: cfg}
+	case "deny":
+		return &denySandbox{cfg: cfg}
 	default:
 		return newPlatformSandbox(cfg)
 	}
@@ -133,6 +139,40 @@ func (s *noopSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
 	return nil
 }
 
+// denySandbox is the fail-closed sandboxer. It is the DEFAULT on platforms
+// with no sandbox implementation (everything that is not linux/darwin/windows,
+// e.g. FreeBSD, OpenBSD, NetBSD, Solaris, AIX, Plan 9, js/wasm). It never runs
+// plugin code: Execute always returns an explicit error so plugins can never
+// silently execute with full host privileges. Operators can opt out explicitly
+// via SANDBOX_MODE=off (NOT recommended).
+type denySandbox struct {
+	cfg SandboxConfig
+}
+
+func (s *denySandbox) Prepare(ctx context.Context, jobID string, manifest PluginManifest, network bool) (*SandboxEnv, error) {
+	workDir := filepath.Join(getEnv("SANDBOX_TEMP_DIR", s.cfg.TempDir), jobID)
+	os.MkdirAll(workDir, 0700)
+	return &SandboxEnv{
+		WorkDir:  workDir,
+		Config:   s.cfg,
+		Manifest: manifest,
+		Network:  network,
+		Platform: runtime.GOOS,
+		Cleanup:  func() { os.RemoveAll(workDir) },
+	}, nil
+}
+
+func (s *denySandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd) error {
+	return fmt.Errorf("plugin execution denied: sandboxing is not supported on %s; set SANDBOX_MODE=off to run plugins unsandboxed (NOT recommended)", runtime.GOOS)
+}
+
+func (s *denySandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
+	if env.Cleanup != nil {
+		env.Cleanup()
+	}
+	return nil
+}
+
 func detectBestMode() string {
 	switch runtime.GOOS {
 	case "linux", "darwin", "windows":
@@ -141,7 +181,10 @@ func detectBestMode() string {
 		// out explicitly via SANDBOX_MODE=off.
 		return "native"
 	}
-	return "off"
+	// No sandbox implementation exists on this platform. Fail closed rather
+	// than silently running plugins with full host privileges. Operators can
+	// still opt out explicitly via SANDBOX_MODE=off.
+	return "deny"
 }
 
 func detectSystemMemoryMB() int64 {

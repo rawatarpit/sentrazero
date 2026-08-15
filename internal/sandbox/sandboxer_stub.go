@@ -35,7 +35,11 @@ func (s *platformSandbox) Prepare(ctx context.Context, jobID string, manifest Pl
 }
 
 func (s *platformSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd) error {
-	return cmd.Run()
+	// Fail closed: this build tag (!linux && !darwin && !windows) has no
+	// sandbox implementation, so running the command would execute plugin
+	// code with full host privileges. Never run it — return an explicit deny
+	// error instead.
+	return fmt.Errorf("plugin execution denied: sandboxing is not supported on %s; set SANDBOX_MODE=off to run plugins unsandboxed (NOT recommended)", runtime.GOOS)
 }
 
 func (s *platformSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
