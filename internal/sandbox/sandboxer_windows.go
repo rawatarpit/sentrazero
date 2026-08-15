@@ -90,10 +90,13 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 		memoryMB = s.cfg.MaxMemoryMB
 	}
 
-	jobName := "SentraZero_" + env.WorkDir
-	jobNamePtr, _ := syscall.UTF16PtrFromString(jobName)
-
-	jobHandle, _, _ := procCreateJobObj.Call(0, uintptr(unsafe.Pointer(jobNamePtr)))
+	// Use an UNNAMED job object. Naming the object from the workdir path
+	// (e.g. "SentraZero_C:\Users\...\sentrazero\job") fails: job object names
+	// live in the NT object namespace where backslashes are path separators
+	// and colons are invalid characters, so CreateJobObjectW returns NULL.
+	// An unnamed object supports AssignProcessToJobObject and kill-on-close
+	// identically.
+	jobHandle, _, _ := procCreateJobObj.Call(0, 0)
 	if jobHandle == 0 {
 		return fmt.Errorf("CreateJobObject failed")
 	}
