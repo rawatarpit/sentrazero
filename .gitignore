@@ -24,6 +24,9 @@ download/
 *.tar.gz
 *.dump
 
+# Test-generated artifacts (created at runtime by TestMain; do not commit)
+internal/dispatcher/testdata/test.jpg
+
 # Dataset / client data (Walmart baselining etc.)
 Baselining.xlsx
 Validation.xlsx
