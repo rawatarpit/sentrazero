@@ -14,8 +14,7 @@ import (
 
 // BPF/seccomp constants (not all exposed by x/sys/unix).
 const (
-	seccompSetModeFilter   = 2
-	seccompFilterFlagTsync = 1
+	seccompSetModeFilter = 2
 
 	seccompRetKill  = 0x00000000
 	seccompRetAllow = 0x7fff0000
@@ -328,6 +327,13 @@ var allowedSyscalls = []uint32{
 // This function does not return on success — it replaces the current process
 // with the target via syscall.Exec.
 func SeccompExec(target string, args []string) {
+	// The seccomp filter is per-thread, and the filter inherited by the
+	// exec'd target is the filter of the thread that calls execve. Pin this
+	// goroutine to its OS thread so the PR_SET_NO_NEW_PRIVS + seccomp +
+	// exec sequence all run on the same thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	// Defense in depth: honor the same guards as the sandboxer's maybeReexec.
 	// The allowlist contains x86_64 syscall numbers only — on ARM64 (e.g.
 	// Raspberry Pi) applying it would SIGSYS-kill every syscall. And when the
@@ -373,6 +379,11 @@ func SeccompExec(target string, args []string) {
 //
 // This function does not return on success.
 func NoNewPrivsExec(target string, args []string) {
+	// Pin to this OS thread: PR_SET_NO_NEW_PRIVS is per-thread and must be
+	// set on the same thread that performs the execve.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		fmt.Fprintf(os.Stderr, "no-new-privs: PR_SET_NO_NEW_PRIVS: %v\n", err)
 		os.Exit(1)
@@ -451,6 +462,15 @@ func detectAuditArch() uint32 {
 }
 
 // applySeccompFilter installs the BPF filter via the seccomp(2) syscall.
+//
+// NOTE: flags intentionally use 0 (apply to the calling thread only), NOT
+// SECCOMP_FILTER_FLAG_TSYNC. TSYNC attempts to synchronize the filter across
+// every thread in the process and fails with EINVAL when any thread is in a
+// state that cannot be synced — which happens routinely in a multi-threaded
+// Go runtime. We only need the filter on the thread that will exec the
+// target (SeccompExec pins the goroutine to its OS thread), and that filter
+// is inherited by the exec'd process. TSYNC is therefore both unnecessary
+// and harmful here.
 func applySeccompFilter(filter []sockFilter) error {
 	if len(filter) == 0 {
 		return fmt.Errorf("empty filter")
@@ -464,7 +484,7 @@ func applySeccompFilter(filter []sockFilter) error {
 	_, _, errno := unix.Syscall(
 		unix.SYS_SECCOMP,
 		seccompSetModeFilter,
-		seccompFilterFlagTsync,
+		0, // no TSYNC — see note above
 		uintptr(unsafe.Pointer(&prog)),
 	)
 	if errno != 0 {

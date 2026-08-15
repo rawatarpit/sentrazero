@@ -250,6 +250,16 @@ func sanitizeRuleName(name string) string {
 	return b.String()
 }
 
+// ioCounters mirrors Windows IO_COUNTERS (6 × ULONGLONG).
+type ioCounters struct {
+	ReadOperationCount  uint64
+	WriteOperationCount uint64
+	OtherOperationCount uint64
+	ReadTransferCount   uint64
+	WriteTransferCount  uint64
+	OtherTransferCount  uint64
+}
+
 type jobObjectBasicLimitInformation struct {
 	PerProcessUserTimeLimit int64
 	PerJobUserTimeLimit     int64
@@ -262,8 +272,13 @@ type jobObjectBasicLimitInformation struct {
 	SchedulingClass         uint32
 }
 
+// jobObjectExtendedLimitInformation MUST include IoInfo: Windows places an
+// IO_COUNTERS (48 bytes) between BasicLimitInformation and ProcessMemoryLimit.
+// Omitting it makes the struct undersized, so SetInformationJobObject fails
+// with STATUS_INFO_LENGTH_MISMATCH. Verified on a real Windows runner.
 type jobObjectExtendedLimitInformation struct {
 	BasicLimitInformation jobObjectBasicLimitInformation
+	IoInfo                ioCounters
 	ProcessMemoryLimit    uintptr
 	JobMemoryLimit        uintptr
 	PeakProcessMemoryUsed uintptr

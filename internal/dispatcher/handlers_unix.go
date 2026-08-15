@@ -2989,7 +2989,10 @@ func extractImageMetadata(_ context.Context, filePath string) (map[string]any, e
 		meta["image_color_model"] = fmt.Sprintf("%T", cfg.ColorModel)
 	}
 
-	fi, _ := os.Stat(filePath)
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat image %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	return meta, nil
@@ -3006,7 +3009,10 @@ func extractVideoMetadata(_ context.Context, filePath string) (map[string]any, e
 	}
 	defer f.Close()
 
-	fi, _ := os.Stat(filePath)
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat video %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	buf := make([]byte, 4096)
@@ -3048,7 +3054,10 @@ func extractPDFMetadata(_ context.Context, filePath string) (map[string]any, err
 		"format": "pdf",
 	}
 
-	fi, _ := os.Stat(filePath)
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat pdf %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	conf := model.NewDefaultConfiguration()
@@ -3079,7 +3088,10 @@ func extractAudioMetadata(_ context.Context, filePath string) (map[string]any, e
 	}
 	defer f.Close()
 
-	fi, _ := os.Stat(filePath)
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat audio %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	buf := make([]byte, 4096)
@@ -3116,7 +3128,10 @@ func extractArchiveMetadata(_ context.Context, filePath string) (map[string]any,
 		"format": "archive",
 	}
 
-	fi, _ := os.Stat(filePath)
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat archive %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	if zr, err := zip.OpenReader(filePath); err == nil {
@@ -3134,7 +3149,10 @@ func extractArchiveMetadata(_ context.Context, filePath string) (map[string]any,
 		return meta, nil
 	}
 
-	f, _ := os.Open(filePath)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive %s: %w", filePath, err)
+	}
 	defer f.Close()
 
 	var tr io.Reader = f
@@ -3182,7 +3200,10 @@ func extractBinaryMetadata(_ context.Context, filePath string) (map[string]any, 
 		"format": "binary",
 	}
 
-	fi, _ := os.Stat(filePath)
+	fi, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat binary %s: %w", filePath, err)
+	}
 	meta["file_size_bytes"] = fi.Size()
 
 	if ef, err := elf.Open(filePath); err == nil {

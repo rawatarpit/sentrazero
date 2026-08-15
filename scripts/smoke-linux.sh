@@ -41,7 +41,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 2
 fi
 
-BIN_DIR="$ROOT/bin"
+BIN_DIR="${SMOKE_BIN_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/sentrazero-smoke.XXXXXX")}"
 AGENT_BIN="$BIN_DIR/sentra-agent-linux-amd64"
 HARNESS_BIN="$BIN_DIR/sandbox-test"
 PROBE_BIN="$BIN_DIR/seccomp-probe"
@@ -52,7 +52,13 @@ RESULTS=()
 
 OUT="$(mktemp "${TMPDIR:-/tmp}/sentra-smoke-linux.XXXXXX")"
 # $OUT and $OUT.<suffix> (used for per-test captures) are all removed on exit.
-trap 'rm -f "$OUT" "$OUT".*' EXIT
+# $BIN_DIR is a throwaway root-owned temp dir (world-traversable path) so the
+# sandbox's CLONE_NEWUSER re-exec (which re-runs os.Executable()) can exec the
+# binaries: inside the user namespace the container-root can only traverse
+# paths whose owners are mapped into the namespace. A repo-local bin/ under
+# /home/runner/work/... is owned by an unmapped uid and exec fails with
+# EACCES. When SMOKE_BIN_DIR is set the caller owns cleanup.
+trap 'rm -f "$OUT" "$OUT".*; if [[ -z "${SMOKE_BIN_DIR:-}" && -n "${BIN_DIR:-}" ]]; then rm -rf "$BIN_DIR"; fi' EXIT
 
 # --- result helpers -------------------------------------------------------
 pass() { RESULTS+=("PASS|$1"); echo "  PASS  $1"; }
