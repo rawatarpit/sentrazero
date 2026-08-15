@@ -243,10 +243,14 @@ func TestExtractJSONMetadata(t *testing.T) {
 	}
 }
 
-// Test that lowercase extensions work (filepath.Ext returns lowercase)
+// Test that lowercase extensions work (filepath.Ext returns lowercase).
+// NOTE: the fixture filename must NOT be the case-insensitive alias of a
+// TestMain-generated file (e.g. "TEST.JPG" == "test.jpg" on case-insensitive
+// filesystems). Using a unique basename keeps TestMain fixtures intact when
+// tests are re-run with -count=N in a single process.
 func TestExtractFileMetadataCase(t *testing.T) {
 	// Symlink or rename test won't work easily; just verify .JPG → .jpg
-	p := testdataPath("TEST.JPG")
+	p := testdataPath("CASE-TEST.JPG")
 	if err := os.WriteFile(p, []byte("not a real jpg"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +259,7 @@ func TestExtractFileMetadataCase(t *testing.T) {
 	if err == nil {
 		// Should dispatch to extractImageMetadata due to lowercase .jpg
 		if meta["format"] != "image" {
-			t.Logf("TEST.JPG dispatched to format=%q (case-sensitive failure)", meta["format"])
+			t.Logf("CASE-TEST.JPG dispatched to format=%q (case-sensitive failure)", meta["format"])
 		}
 	}
 }

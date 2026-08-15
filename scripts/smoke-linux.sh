@@ -21,7 +21,9 @@
 #        agent --seccomp-exec /bin/echo hello          -> exit 0, prints hello
 #        agent --seccomp-exec /bin/sh -c 'echo hi'     -> exit 0 (the -c path)
 #        agent --seccomp-exec bin/seccomp-probe        -> SIGSYS (exit 159)
-#             on x86_64 only; on aarch64 seccomp is not applied -> exit 0
+#             on x86_64 when CONFIG_SECCOMP_FILTER is available; otherwise the
+#             agent degrades to NO_NEW_PRIVS-only and the probe exits 0 (SKIP);
+#             on aarch64 seccomp is not applied -> exit 0
 #        SANDBOX_SECCOMP_PROFILE=off agent --seccomp-exec probe -> exit 0
 #        agent --no-new-privs-exec sh -c 'grep NoNewPrivs ...'  -> prints 1
 #   5. Root-only (optional) cgroup check: runs a CPU-burner through the
@@ -147,8 +149,31 @@ else
   fail "net-allowed (network allowed when net=true)" "got: ${line:-<no output>}"
 fi
 
+# plugin-e2e: a REAL plugin must execute through the production path
+# (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy)
+# and return its JSON output. The harness reports
+# [plugin-e2e] OK: plugin ran inside sandbox, method=native_sandbox ...
+# when the plugin completed inside the sandbox with the echoed payload.
+line="$(line_for plugin-e2e)"
+if [[ "$line" == *"OK"* ]]; then
+  pass "plugin-e2e (plugin runs inside sandbox)"
+else
+  fail "plugin-e2e (plugin runs inside sandbox)" "got: ${line:-<no output>}"
+fi
+
 # --- 4. seccomp end-to-end with the REAL agent binary ----------------------
 echo "==> seccomp end-to-end (real agent binary)"
+
+# Detect seccomp filter-mode support the same way the agent does
+# (internal/sandbox/capabilities_linux.go probeSeccompAvailable):
+# /proc/sys/kernel/seccomp/actions_avail exists only when the kernel has
+# CONFIG_SECCOMP_FILTER. Without it SECCOMP_SET_MODE_FILTER returns
+# EOPNOTSUPP and the agent falls back to NO_NEW_PRIVS-only hardening, so
+# the SIGSYS assertion below cannot hold and is SKIPped.
+SECCOMP_FILTER_AVAIL=0
+if [[ -s /proc/sys/kernel/seccomp/actions_avail ]]; then
+  SECCOMP_FILTER_AVAIL=1
+fi
 
 # 4a. --seccomp-exec /bin/echo hello  -> exit 0 and output "hello"
 "$AGENT_BIN" --seccomp-exec /bin/echo hello >"$OUT.a" 2>&1
@@ -169,15 +194,26 @@ else
   fail "seccomp-exec /bin/sh -c 'echo hi' (exit 0)" "rc=$rc"
 fi
 
-# 4c. --seccomp-exec bin/seccomp-probe -> SIGSYS on x86_64 (exit 159);
-#     on aarch64 seccomp is NOT applied (GOARCH guard) -> probe exits 0
+# 4c. --seccomp-exec bin/seccomp-probe:
+#   - x86_64 + CONFIG_SECCOMP_FILTER  -> SIGSYS (exit 159)
+#   - x86_64 without it               -> graceful NO_NEW_PRIVS fallback
+#                                        (probe exits 0) -> SKIP
+#   - aarch64 (GOARCH guard)          -> seccomp not applied (probe exits 0)
 "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
 rc=$?
 if [[ "$ARCH" == "x86_64" ]]; then
-  if [[ $rc -eq 159 ]]; then
-    pass "seccomp-exec probe SIGSYS-killed (exit 159)"
+  if [[ $SECCOMP_FILTER_AVAIL -eq 1 ]]; then
+    if [[ $rc -eq 159 ]]; then
+      pass "seccomp-exec probe SIGSYS-killed (exit 159)"
+    else
+      fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected 159, got $rc"
+    fi
   else
-    fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected 159, got $rc"
+    if [[ $rc -eq 0 ]]; then
+      skip "seccomp-exec probe SIGSYS-killed (exit 159)" "kernel lacks CONFIG_SECCOMP_FILTER (NO_NEW_PRIVS fallback)"
+    else
+      fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected graceful fallback 0, got $rc"
+    fi
   fi
 else
   if [[ $rc -eq 0 ]]; then

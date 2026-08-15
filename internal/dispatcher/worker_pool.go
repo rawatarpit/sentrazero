@@ -34,12 +34,31 @@ var (
 	shutdownSignal = make(chan struct{})
 	resizeSignal   = make(chan struct{}, 0)
 
-	execClient *backend.ExecutionClient
+	execClient ExecutionClient
 
 	activeJobsMutex sync.Mutex
 	activeJobs      = make(map[string]struct{})
 	runningJobs     = make(map[string]struct{})
 )
+
+// ExecutionClient is the backend contract the dispatcher needs for job
+// lifecycle RPCs. *backend.ExecutionClient satisfies it. Declared as an
+// interface (rather than the concrete type) so tests can inject a
+// deterministic fake — e.g. one that blocks in VerifyJobLease to pin a
+// worker, which is how the queue-full and execution-step dedup paths are
+// tested without racing the worker goroutine.
+type ExecutionClient interface {
+	GetDeviceID() string
+	VerifyJobLease(ctx context.Context, jobID string) (*backend.JobLeaseStatus, error)
+	ReportJobFailure(ctx context.Context, jobID string, err error) error
+	ReportJobStart(ctx context.Context, jobID string) error
+	StartJob(ctx context.Context, jobID string) (*backend.StartJobResult, error)
+	RecordPluginExecutionStart(ctx context.Context, orgID, pluginID, jobID, deviceID string) (string, error)
+	RecordPluginExecutionEnd(ctx context.Context, executionID, status, errMsg string) error
+	CompleteJob(ctx context.Context, executionID, jobID, status string, durationMs int64, resultData any, isLocal bool, isLastStep bool) *backend.CompleteJobResult
+	BufferRelayEvent(ev backend.RelayJobEvent) error
+	SendJobExecutionHeartbeat(ctx context.Context, jobID string) error
+}
 
 var (
 	DefaultMaxWorkers          = 4
@@ -77,7 +96,7 @@ type jobRequest struct {
 
 var runtimeManagerInstance interface{}
 
-func SetExecutionClient(c *backend.ExecutionClient) {
+func SetExecutionClient(c ExecutionClient) {
 	execClient = c
 }
 

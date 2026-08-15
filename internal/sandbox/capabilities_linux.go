@@ -8,8 +8,8 @@ import (
 	"runtime"
 	"strings"
 
-	"sentra-agent/internal/obs"
 	"golang.org/x/sys/unix"
+	"sentra-agent/internal/obs"
 )
 
 type PlatformCapabilities struct {
@@ -38,12 +38,12 @@ func DetectCapabilities(cfg SandboxConfig) PlatformCapabilities {
 	caps.HasCgroupWrite = probeCgroupWrite(cgroupBase)
 
 	obs.Info("platform capabilities detected", obs.Field{
-		"platform":       caps.Platform,
-		"is_privileged":  caps.IsPrivileged,
-		"has_cgroup":     caps.HasCgroupWrite,
-		"cgroup_path":    caps.CgroupPath,
-		"has_userns":     caps.HasUserNS,
-		"has_seccomp":    caps.HasSeccomp,
+		"platform":      caps.Platform,
+		"is_privileged": caps.IsPrivileged,
+		"has_cgroup":    caps.HasCgroupWrite,
+		"cgroup_path":   caps.CgroupPath,
+		"has_userns":    caps.HasUserNS,
+		"has_seccomp":   caps.HasSeccomp,
 	})
 
 	return caps
@@ -68,15 +68,17 @@ func probeUserNamespace() bool {
 }
 
 func probeSeccompAvailable() bool {
-	files, err := os.ReadDir("/proc/sys/kernel/seccomp")
-	if err != nil || len(files) == 0 {
-		data, err := os.ReadFile("/proc/sys/kernel/seccomp/actions_avail")
-		if err != nil {
-			return false
-		}
-		return len(strings.TrimSpace(string(data))) > 0
+	// SECCOMP_SET_MODE_FILTER (the sandbox's allowlist mode) requires
+	// CONFIG_SECCOMP_FILTER. The kernel exposes the sysctl file
+	// /proc/sys/kernel/seccomp/actions_avail only when filter mode is
+	// compiled in; its presence with non-empty content is the reliable
+	// signal. (CONFIG_SECCOMP alone is not enough — the seccomp(2) syscall
+	// returns EOPNOTSUPP without CONFIG_SECCOMP_FILTER.)
+	data, err := os.ReadFile("/proc/sys/kernel/seccomp/actions_avail")
+	if err != nil {
+		return false
 	}
-	return false
+	return len(strings.TrimSpace(string(data))) > 0
 }
 
 func (c PlatformCapabilities) String() string {

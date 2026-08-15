@@ -129,7 +129,11 @@ func main() {
 
 	// job-memory-cap: a 128 MiB Job Object per-process memory cap vs a 256 MiB
 	// allocation. The process must be killed by the Job Object. Best-effort:
-	// PowerShell must be installed for this test to run at all.
+	// PowerShell must be installed for this test to run at all. When the host
+	// runs the agent inside a non-nesting job object (e.g. a CI runner) the
+	// sandboxer cannot enforce Job Object limits and reports the fact via the
+	// JobEnforcementReporter interface — in that case this test is skipped
+	// (reported, not asserted).
 	{
 		memManifest := base
 		memManifest.Resources.MemoryMB = 128
@@ -150,7 +154,13 @@ func main() {
 			timedOut := ctx.Err() != nil
 			sb.Destroy(ctx, env)
 			cancel()
-			if err != nil && !timedOut {
+			// Degraded path: the host already placed the child in a
+			// non-nesting job object, so Job Object limits cannot be applied.
+			// Report the skip explicitly so the smoke suite does not treat it
+			// as a failed assertion.
+			if jr, ok := sb.(sandbox.JobEnforcementReporter); ok && !jr.JobEnforcementAvailable() {
+				fmt.Printf("[job-memory-cap] WARN: Job Object unavailable on this host (non-nesting host job); memory cap not enforceable - skipped (%s)\n", dur)
+			} else if err != nil && !timedOut {
 				fmt.Printf("[job-memory-cap] OK: killed by the Job Object memory cap: %v (%s)\n", err, dur)
 			} else if timedOut {
 				fmt.Printf("[job-memory-cap] ERROR: not killed within %s (memory cap not enforced)\n", dur)
@@ -171,4 +181,9 @@ func main() {
 	netOk := base
 	netOk.Network = true
 	runTest(sb, "net-allowed", []string{"curl.exe", "-s", "--max-time", "3", "http://example.com"}, netOk, true, 15*time.Second)
+
+	// End-to-end: a real plugin through the PRODUCTION execution path
+	// (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy)
+	// inside the same Job Object machinery the commands above exercise.
+	runPluginE2E()
 }

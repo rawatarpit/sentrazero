@@ -117,6 +117,18 @@ else
   fail "net-allowed (network allowed when net=true)" "got: ${line:-<no output>}"
 fi
 
+# plugin-e2e: a REAL plugin must execute through the production path
+# (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy)
+# and return its JSON output. The harness reports
+# [plugin-e2e] OK: plugin ran inside sandbox, method=native_sandbox ...
+# when the plugin completed inside the seatbelt sandbox with the echoed payload.
+line="$(line_for plugin-e2e)"
+if [[ "$line" == *"OK"* ]]; then
+  pass "plugin-e2e (plugin runs inside sandbox)"
+else
+  fail "plugin-e2e (plugin runs inside sandbox)" "got: ${line:-<no output>}"
+fi
+
 # --- 5. summary ------------------------------------------------------------
 if [[ $FAILED -eq 1 ]]; then
   echo ""

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"sentra-agent/internal/backend"
 )
 
 func resetPoolState() {
@@ -17,6 +20,81 @@ func resetPoolState() {
 	atomic.StoreInt64(&totalFailed, 0)
 	runningJobs = make(map[string]struct{})
 	activeJobs = make(map[string]struct{})
+	execClient = nil
+	// Recreate the shutdown machinery so each test starts with live workers
+	// regardless of which tests ran before (previously shutdownSignal stayed
+	// closed after the first StopWorkerPool, silently killing workers in
+	// later tests and making queue/dedup tests order-dependent).
+	shutdownOnce = sync.Once{}
+	shutdownSignal = make(chan struct{})
+}
+
+// blockingExecutionClient is a deterministic fake backend client used by the
+// queue-full and execution-step dedup tests. VerifyJobLease blocks until
+// release() is called, which pins the worker inside executeJobSafe: the queue
+// is not drained and dedup entries are not removed until the test releases
+// the worker. This makes those behaviors deterministic instead of racing the
+// worker goroutine (previously SetExecutionClient(nil) let workers finish
+// each "test" job in microseconds — fast enough to empty the queue or drop
+// the dedup entry before the test could observe it).
+type blockingExecutionClient struct {
+	blocked     chan struct{} // receives once a worker has entered VerifyJobLease
+	released    chan struct{} // closed by release() to unblock the worker
+	releaseOnce sync.Once     // release() is idempotent (defer + explicit call)
+}
+
+func newBlockingExecutionClient() *blockingExecutionClient {
+	return &blockingExecutionClient{
+		blocked:  make(chan struct{}, 1),
+		released: make(chan struct{}),
+	}
+}
+
+// blockedCh returns a channel that receives once the worker has consumed the
+// pinned job and is inside VerifyJobLease (i.e., the queue slot is free and
+// the dedup entry is guaranteed to persist).
+func (c *blockingExecutionClient) blockedCh() <-chan struct{} { return c.blocked }
+
+// release unblocks the pinned worker so it can finish and StopWorkerPool can
+// drain cleanly.
+func (c *blockingExecutionClient) release() {
+	c.releaseOnce.Do(func() { close(c.released) })
+}
+
+func (c *blockingExecutionClient) GetDeviceID() string { return "test-device" }
+
+func (c *blockingExecutionClient) VerifyJobLease(ctx context.Context, jobID string) (*backend.JobLeaseStatus, error) {
+	select {
+	case c.blocked <- struct{}{}:
+	default:
+	}
+	select {
+	case <-c.released:
+		return &backend.JobLeaseStatus{JobID: jobID, Status: "running", AgentID: "test-device", IsValid: true}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (c *blockingExecutionClient) ReportJobFailure(ctx context.Context, jobID string, err error) error {
+	return nil
+}
+func (c *blockingExecutionClient) ReportJobStart(ctx context.Context, jobID string) error { return nil }
+func (c *blockingExecutionClient) StartJob(ctx context.Context, jobID string) (*backend.StartJobResult, error) {
+	return &backend.StartJobResult{Success: true, Ok: true, JobID: jobID, Status: "running"}, nil
+}
+func (c *blockingExecutionClient) RecordPluginExecutionStart(ctx context.Context, orgID, pluginID, jobID, deviceID string) (string, error) {
+	return "test-exec", nil
+}
+func (c *blockingExecutionClient) RecordPluginExecutionEnd(ctx context.Context, executionID, status, errMsg string) error {
+	return nil
+}
+func (c *blockingExecutionClient) CompleteJob(ctx context.Context, executionID, jobID, status string, durationMs int64, resultData any, isLocal bool, isLastStep bool) *backend.CompleteJobResult {
+	return &backend.CompleteJobResult{}
+}
+func (c *blockingExecutionClient) BufferRelayEvent(ev backend.RelayJobEvent) error { return nil }
+func (c *blockingExecutionClient) SendJobExecutionHeartbeat(ctx context.Context, jobID string) error {
+	return nil
 }
 
 func TestInitWorkerPool_DefaultWorkers(t *testing.T) {
@@ -69,8 +147,11 @@ func TestSubmitJobWithMeta_PoolNotInitialized(t *testing.T) {
 func TestSubmitJobWithMeta_DuplicateJobRejected(t *testing.T) {
 	defer resetPoolState()
 
+	client := newBlockingExecutionClient()
+	defer client.release()
+
 	InitWorkerPool(2)
-	SetExecutionClient(nil)
+	SetExecutionClient(client)
 	SetBackpressure(false)
 
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
@@ -79,12 +160,16 @@ func TestSubmitJobWithMeta_DuplicateJobRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first submission failed: %v", err)
 	}
+	// Wait until a worker has consumed the job and is pinned inside
+	// VerifyJobLease, so runningJobs[jobID] is guaranteed to still exist.
+	<-client.blockedCh()
 
 	err = SubmitJobWithMeta("test", payload, "job-duplicate", "org-1", "trace-1", "", "exec-duplicate")
 	if err == nil {
 		t.Error("expected error for duplicate job")
 	}
 
+	client.release()
 	StopWorkerPool(context.Background())
 }
 
@@ -174,9 +259,21 @@ func TestJobRequest_Structure(t *testing.T) {
 func TestSubmitJobWithMeta_QueueFullDrop(t *testing.T) {
 	defer resetPoolState()
 
+	client := newBlockingExecutionClient()
+	defer client.release()
+
 	InitWorkerPool(1)
-	SetExecutionClient(nil)
+	SetExecutionClient(client)
 	SetBackpressure(false)
+
+	// Pin the single worker inside VerifyJobLease first. This frees the queue
+	// slot for the seed job AND guarantees no worker will drain the jobs we
+	// are about to enqueue — the queue can only fill up.
+	seedPayload, _ := json.Marshal(map[string]string{"seed": "true"})
+	if err := SubmitJobWithMeta("test", seedPayload, "seed-job", "org-1", "", "", "exec-queue"); err != nil {
+		t.Fatalf("seed submission failed: %v", err)
+	}
+	<-client.blockedCh()
 
 	for i := 0; i < DefaultQueueSize; i++ {
 		payload, _ := json.Marshal(map[string]int{"index": i})
@@ -192,6 +289,7 @@ func TestSubmitJobWithMeta_QueueFullDrop(t *testing.T) {
 		t.Error("expected error when queue full")
 	}
 
+	client.release()
 	StopWorkerPool(context.Background())
 }
 
@@ -238,8 +336,11 @@ func TestMetrics(t *testing.T) {
 func TestExecutionStepDedup(t *testing.T) {
 	defer resetPoolState()
 
+	client := newBlockingExecutionClient()
+	defer client.release()
+
 	InitWorkerPool(2)
-	SetExecutionClient(nil)
+	SetExecutionClient(client)
 	SetBackpressure(false)
 
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
@@ -248,11 +349,16 @@ func TestExecutionStepDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first submission failed: %v", err)
 	}
+	// Wait until a worker has consumed the job and is pinned inside
+	// VerifyJobLease, so the activeJobs[step-dedup] entry is guaranteed to
+	// still exist (the deferred cleanup only runs after executeJobSafe returns).
+	<-client.blockedCh()
 
 	err = SubmitJobWithMeta("test", payload, "step-job-2", "org-1", "trace-2", "step-dedup", "exec-dedup")
 	if err == nil {
 		t.Error("expected error for duplicate execution step")
 	}
 
+	client.release()
 	StopWorkerPool(context.Background())
 }

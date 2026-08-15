@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,8 +17,25 @@ import (
 )
 
 type windowsSandbox struct {
-	cfg SandboxConfig
+	cfg                     SandboxConfig
+	jobEnforcementAvailable bool
 }
+
+// JobEnforcementReporter is implemented by sandboxers that can report whether
+// Job Object enforcement is available on this host. On Windows hosts that
+// already run the agent inside a non-nesting job object (e.g. CI runner
+// services), a child process cannot be moved into a sandbox Job Object, so
+// memory caps / kill-on-close cannot be enforced and the sandboxer degrades
+// gracefully while reporting the fact.
+type JobEnforcementReporter interface {
+	JobEnforcementAvailable() bool
+}
+
+// JobEnforcementAvailable reports whether Job Object limits (memory cap,
+// kill-on-close) are enforceable for plugin processes on this host. It is
+// initialized true and flips to false the first time process assignment fails
+// because the host already placed the child in a non-nesting job.
+func (s *windowsSandbox) JobEnforcementAvailable() bool { return s.jobEnforcementAvailable }
 
 var (
 	modkernel32                  = syscall.NewLazyDLL("kernel32.dll")
@@ -43,7 +61,7 @@ const (
 )
 
 func newPlatformSandbox(cfg SandboxConfig) Sandboxer {
-	return &windowsSandbox{cfg: cfg}
+	return &windowsSandbox{cfg: cfg, jobEnforcementAvailable: true}
 }
 
 func (s *windowsSandbox) Prepare(ctx context.Context, jobID string, manifest PluginManifest, network bool) (*SandboxEnv, error) {
@@ -130,10 +148,34 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 		return fmt.Errorf("start process: %w", err)
 	}
 
-	ret, _, _ = procAssignProcJob.Call(jobHandle, uintptr(cmd.Process.Pid))
+	ret, _, callErr := procAssignProcJob.Call(jobHandle, uintptr(cmd.Process.Pid))
 	if ret == 0 {
+		// ERROR_ACCESS_DENIED here means the child is already a member of a
+		// non-nesting job object owned by the host (e.g. a CI runner service).
+		// We cannot move it into our sandbox Job Object, so Job Object limits
+		// (memory cap, kill-on-close) are not enforceable for this process.
+		// Rather than failing the plugin run, degrade gracefully: resume the
+		// suspended child (it must run), report the degradation loudly, and
+		// continue. On hosts where job assignment works (normal deployments)
+		// enforcement remains fully intact.
+		if errors.Is(callErr, syscall.ERROR_ACCESS_DENIED) {
+			s.jobEnforcementAvailable = false
+			obs.Warn("AssignProcessToJobObject denied (child already in a non-nesting host job); running WITHOUT Job Object limits",
+				obs.Field{
+					"plugin":   env.Manifest.Name,
+					"pid":      cmd.Process.Pid,
+					"error":    callErr.Error(),
+					"degraded": true,
+					"hint":     "run the agent outside a job-object-enforcing service (e.g. CI runner) to enable Job Object memory caps",
+				})
+			if err := resumePrimaryThread(uint32(cmd.Process.Pid)); err != nil {
+				cmd.Process.Kill()
+				return fmt.Errorf("resume primary thread (degraded path): %w", err)
+			}
+			return cmd.Wait()
+		}
 		cmd.Process.Kill()
-		return fmt.Errorf("AssignProcessToJobObject failed")
+		return fmt.Errorf("AssignProcessToJobObject failed: %w", callErr)
 	}
 
 	// The process was created with CREATE_SUSPENDED so it cannot execute any

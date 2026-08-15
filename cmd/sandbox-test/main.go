@@ -94,4 +94,9 @@ func main() {
 	netOk := base
 	netOk.Network = true
 	runTest(sb, "net-allowed", []string{"curl", "-s", "--max-time", "3", "http://example.com"}, netOk, true)
+
+	// End-to-end: a real plugin through the PRODUCTION execution path
+	// (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy)
+	// inside the same seatbelt sandbox the commands above exercise.
+	runPluginE2E()
 }

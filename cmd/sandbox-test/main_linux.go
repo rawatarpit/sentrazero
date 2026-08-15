@@ -180,4 +180,10 @@ func main() {
 	netOk := base
 	netOk.Network = true
 	runTest(sb, "net-allowed", []string{"curl", "-s", "--max-time", "3", "http://example.com"}, netOk, true)
+
+	// End-to-end: a real plugin through the PRODUCTION execution path
+	// (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy).
+	// This runs under the same namespaces + NO_NEW_PRIVS/seccomp machinery the
+	// commands above exercise, but through the actual plugin code path.
+	runPluginE2E()
 }

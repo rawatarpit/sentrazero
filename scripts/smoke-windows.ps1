@@ -16,7 +16,12 @@
 #                                  completion is the whole point)
 #        write-workdir    -> OK
 #        job-memory-cap   -> killed/error (best-effort; process must be
-#                            killed by the Job Object memory cap)
+#                            killed by the Job Object memory cap). When the
+#                            host already runs the agent inside a non-nesting
+#                            job object (e.g. a CI runner service), the
+#                            sandboxer degrades gracefully and the harness
+#                            reports "Job Object unavailable on this host"
+#                            (WARN/skip, not a failure).
 #        net-blocked      -> blocked-or-skipped (admin) / best-effort (non-admin)
 #
 #   If not running as Administrator, firewall-based net-block tests are
@@ -127,13 +132,19 @@ if ([string]::IsNullOrEmpty($line)) {
 
 # job-memory-cap: best-effort. The harness reports
 # [job-memory-cap] OK: killed by the Job Object memory cap: <err> when the
-# cap worked, and ERROR: ... not killed / allocation survived when it did
-# not. PASS = the process was killed; FAIL = cap not enforced; absent -> WARN.
+# cap worked, ERROR: ... not killed / allocation survived when it did not,
+# and WARN: Job Object unavailable on this host (non-nesting host job) ...
+# when the host already runs the agent inside a job object (e.g. a CI
+# runner) so Job Object limits cannot be enforced. PASS = the process was
+# killed; FAIL = cap present but not enforced; WARN = skipped (degraded host
+# or absent line).
 $line = Get-HarnessLine 'job-memory-cap'
 if ([string]::IsNullOrEmpty($line)) {
   Record 'WARN' 'job-memory-cap killed/error (best-effort)' 'no harness line - skipped'
 } elseif ($line -match 'killed' -and $line -notmatch 'not killed') {
   Record 'PASS' 'job-memory-cap killed/error (best-effort)'
+} elseif ($line -match 'Job Object unavailable on this host') {
+  Record 'WARN' 'job-memory-cap killed/error (best-effort)' 'Job Object limits not enforceable on this host (degraded sandbox)'
 } elseif ($line -match 'ERROR|not killed|survived') {
   Record 'FAIL' 'job-memory-cap killed/error (best-effort)' ('memory cap not enforced: {0}' -f $line)
 } else {
@@ -157,6 +168,19 @@ if ($isAdmin) {
   } else {
     Record 'WARN' 'net-blocked blocked-or-skipped (non-admin)' 'firewall block tests skipped without admin - job-object tests still run'
   }
+}
+
+# plugin-e2e: a REAL plugin must execute through the production path
+# (plugin.Execute -> RunSandboxedPlugin -> sandbox Prepare/Execute/Destroy)
+# inside the Job Object machinery and return its JSON output. The harness
+# reports "[plugin-e2e] OK: plugin ran inside sandbox ..." on success.
+$line = Get-HarnessLine 'plugin-e2e'
+if ([string]::IsNullOrEmpty($line)) {
+  Record 'FAIL' 'plugin-e2e (plugin runs inside sandbox)' 'no harness line'
+} elseif ($line -match '\bOK\b') {
+  Record 'PASS' 'plugin-e2e (plugin runs inside sandbox)'
+} else {
+  Record 'FAIL' 'plugin-e2e (plugin runs inside sandbox)' ('got: {0}' -f $line)
 }
 
 # --- 5. summary ------------------------------------------------------------

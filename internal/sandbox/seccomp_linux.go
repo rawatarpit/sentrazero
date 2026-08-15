@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -354,8 +355,19 @@ func SeccompExec(target string, args []string) {
 	}
 
 	// ---- Step 2: Build and apply seccomp filter -----------------------
+	// If the kernel does not support filter mode (CONFIG_SECCOMP_FILTER is
+	// disabled, or an outer sandbox forbids SECCOMP_SET_MODE_FILTER), the
+	// syscall returns EOPNOTSUPP (or ENOSYS on very old kernels). Instead of
+	// failing the plugin run, degrade to NO_NEW_PRIVS-only hardening — the
+	// same level of isolation that non-amd64 and SANDBOX_SECCOMP_PROFILE=off
+	// configurations already get. The filter must not be attempted again.
 	filter := buildSeccompFilter()
 	if err := applySeccompFilter(filter); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) {
+			fmt.Fprintf(os.Stderr, "seccomp: filter mode unavailable (%v), falling back to NO_NEW_PRIVS\n", err)
+			NoNewPrivsExec(target, args)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "seccomp: apply: %v\n", err)
 		os.Exit(1)
 	}
@@ -488,7 +500,7 @@ func applySeccompFilter(filter []sockFilter) error {
 		uintptr(unsafe.Pointer(&prog)),
 	)
 	if errno != 0 {
-		return fmt.Errorf("SECCOMP_SET_MODE_FILTER: %v", errno)
+		return fmt.Errorf("SECCOMP_SET_MODE_FILTER: %w", errno)
 	}
 	return nil
 }

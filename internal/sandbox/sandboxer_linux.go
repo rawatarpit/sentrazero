@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -142,7 +141,7 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 	// the seccomp allowlist filter) are applied to the plugin process before
 	// it exec's. The clone flags / namespaces set above apply to this
 	// re-exec process, and the filter is inherited by the final target.
-	if err := s.maybeReexec(env, cmd); err != nil {
+	if err := s.maybeReexec(env, cmd, caps); err != nil {
 		return fmt.Errorf("sandbox reexec: %w", err)
 	}
 
@@ -210,10 +209,16 @@ func (s *linuxSandbox) writeCPUMax(cgSubPath string, env *SandboxEnv) error {
 // a completely different numbering. Applying the x86_64 filter on ARM64
 // would SIGSYS-kill every plugin, so non-x86_64 builds automatically fall
 // back to NO_NEW_PRIVS-only enforcement.
-func (s *linuxSandbox) maybeReexec(env *SandboxEnv, cmd *exec.Cmd) error {
+//
+// Seccomp also requires kernel CONFIG_SECCOMP_FILTER (probed via
+// caps.HasSeccomp). Kernels without it reject SECCOMP_SET_MODE_FILTER with
+// EOPNOTSUPP, so the re-exec must not attempt --seccomp-exec; it falls back
+// to NO_NEW_PRIVS-only, which is always available.
+func (s *linuxSandbox) maybeReexec(env *SandboxEnv, cmd *exec.Cmd, caps PlatformCapabilities) error {
 	seccompEnabled := env.Config.SeccompProfile != "" &&
 		env.Config.SeccompProfile != "off" &&
-		runtime.GOARCH == "amd64"
+		runtime.GOARCH == "amd64" &&
+		caps.HasSeccomp
 	if !seccompEnabled && !env.Config.SandboxNoNewPrivs {
 		return nil
 	}
@@ -280,16 +285,4 @@ func (s *linuxSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {
 
 func isUserNamespaceSupported() bool {
 	return unix.Access("/proc/self/ns/user", unix.F_OK) == nil
-}
-
-func detectSeccompAvailable() bool {
-	files, err := os.ReadDir("/proc/sys/kernel/seccomp")
-	if err != nil || len(files) == 0 {
-		data, err := os.ReadFile("/proc/sys/kernel/seccomp/actions_avail")
-		if err != nil {
-			return false
-		}
-		return len(strings.TrimSpace(string(data))) > 0
-	}
-	return false
 }
