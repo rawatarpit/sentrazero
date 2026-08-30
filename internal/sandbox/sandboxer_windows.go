@@ -59,6 +59,19 @@ const (
 	jobObjLimitActiveProc  = 0x0008
 	jobObjExtLimitInfo     = 9
 	th32csSnapThread       = 0x00000004
+	// JobObjectUIRestrictionsInformation (SetInformationJobObject info class 4)
+	// carries a JOBOBJECT_BASIC_UI_RESTRICTIONS. UI restrictions are how a Job
+	// Object stops a sandboxed process from touching the interactive desktop:
+	// clipboard, system parameters, display settings, global atoms.
+	jobObjUIRestrictionsInfo     = 4
+	jobObjUILimitHandles         = 0x0001
+	jobObjUILimitReadClipboard   = 0x0002
+	jobObjUILimitWriteClipboard  = 0x0004
+	jobObjUILimitSystemParams    = 0x0008
+	jobObjUILimitDisplaySettings = 0x0010
+	jobObjUILimitGlobalAtoms     = 0x0020
+	jobObjUILimitDesktop         = 0x0040
+	jobObjUILimitExitWindows     = 0x0080
 	// jobActiveProcessLimit bounds how many processes may be active in the
 	// sandbox Job Object at once. It must be > 1: plugins are allowed to
 	// spawn subprocesses (bash pipelines / $(...), python workers, node
@@ -151,6 +164,15 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 		return fmt.Errorf("SetInformationJobObject failed")
 	}
 
+	// Best-effort UI restrictions: stopping clipboard/system-wide tampering from
+	// a compromised plugin. These are the highest-value desktop protections a
+	// Job Object can add without a restricted token (see windowsSandbox
+	// hardening notes). Deliberately excludes UILIMIT_HANDLES and UILIMIT_DESKTOP
+	// — both break console/stdio apps (a process is created on the host desktop
+	// before assignment and standard handles are console objects; console
+	// scripts misbehave when those are restricted).
+	s.applyUIRestrictions(jobHandle)
+
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: createSuspended | createNewConsole,
 	}
@@ -212,6 +234,45 @@ func (s *windowsSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec
 	}
 
 	return cmd.Wait()
+}
+
+// applyUIRestrictions applies Job Object UI restrictions to the sandbox job,
+// best-effort. Job UI restrictions are the second layer of the Windows story
+// (after the Job Object limits themselves): a plugin that has been captured by
+// the job cannot read or write the clipboard, cannot change system parameters
+// or display settings, cannot touch global atoms, and cannot initiate a system
+// shutdown — even if the plugin code is malicious. Failures degrade with a
+// warning rather than failing the run (some hosts return ERROR_ACCESS_DENIED
+// for non-interactive sessions where these restrictions are not applicable).
+func (s *windowsSandbox) applyUIRestrictions(jobHandle uintptr) {
+	uiClass := uint32(jobObjUILimitReadClipboard |
+		jobObjUILimitWriteClipboard |
+		jobObjUILimitSystemParams |
+		jobObjUILimitDisplaySettings |
+		jobObjUILimitGlobalAtoms |
+		jobObjUILimitExitWindows)
+
+	info := jobObjectBasicUIRestrictions{UIRestrictionsClass: uiClass}
+	ret, _, callErr := procSetInfoJobObj.Call(
+		jobHandle,
+		uintptr(jobObjUIRestrictionsInfo),
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Sizeof(info)),
+	)
+	if ret == 0 {
+		obs.Warn("SetInformationJobObject(UI restrictions) failed; clipboard/system tampering restrictions not applied",
+			obs.Field{"error": callErr.Error(), "plugin": "n/a"})
+		return
+	}
+	obs.Info("job object UI restrictions applied", obs.Field{
+		"restrictions": "clipboard-read/write, system-params, display-settings, global-atoms, exit-windows",
+	})
+}
+
+// jobObjectBasicUIRestrictions mirrors the Windows JOBOBJECT_BASIC_UI_RESTRICTIONS
+// structure (a single ULONG UIRestrictionsClass).
+type jobObjectBasicUIRestrictions struct {
+	UIRestrictionsClass uint32
 }
 
 func (s *windowsSandbox) Destroy(ctx context.Context, env *SandboxEnv) error {

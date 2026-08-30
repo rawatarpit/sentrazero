@@ -63,31 +63,40 @@ func bpfJump(code uint16, k uint32, jt, jf uint8) sockFilter {
 	return sockFilter{Code: code, Jt: jt, Jf: jf, K: k}
 }
 
-// x86_64 syscall numbers that are always allowed.
-// This is a generous allowlist covering file I/O, networking, signals,
+// Syscall allowlists for the architectures the sandbox supports.
+//
+// Each list is a generous allowlist covering file I/O, networking, signals,
 // memory management, threads, timers, scheduling, and the syscalls the
-// Python / Node / Go / Rust runtimes and common JITs actually use.
+// Python / Node / Go / Rust runtimes and common JITs actually use on that
+// architecture.
 //
-// NOTE: the numbers below were audited against the x86_64 syscall table
-// (see include/uapi/asm-generic/unistd.h — x86_64 uses the 64-bit set).
-// The original list had wrong numbers for many entries (e.g. 97 != geteuid,
-// 202 = futex not getcpu, 273 = set_robust_list not fcntl, 332 = statx not
-// memfd_create), which would have SIGSYS-killed every real runtime.
+// NOTE: the numbers were audited against the arch syscall table (x86_64 uses
+// its own 64-bit numbering; arm64 uses the asm-generic set). The original
+// x86_64 list had wrong numbers for many entries (e.g. 97 != geteuid, 202 =
+// futex not getcpu, 273 = set_robust_list not fcntl, 332 = statx not
+// memfd_create), which would have SIGSYS-killed every real runtime. The arm64
+// list was added for ARM64 (Raspberry Pi etc.) whose numbering is entirely
+// different — syscalls that only exist on x86_64 (open, stat, fork, pipe,
+// alarm, arch_prctl, ...) do not exist on arm64 and must NOT be listed: the
+// generic table has no entries for them (libc/Go use the *at / clone / pipe2
+// / clock_* equivalents), so a correct arm64 table simply omits them.
 //
-// Deliberately EXCLUDED (privilege / namespace / kernel-control surface):
-// mount, umount2, ptrace, reboot, setns, unshare, init_module, finit_module,
-// delete_module, create_module, get_kernel_syms, query_module, capget,
-// capset, syslog, kexec_load, kexec_file_load, swapon, swapoff, sethostname,
-// setdomainname, iopl, ioperm, acct, chroot, pivot_root, quotactl,
-// nfsservctl, bpf, perf_event_open, process_vm_readv/writev, userfaultfd,
-// keyctl/add_key/request_key, lookup_dcookie, all *xattr syscalls,
-// setuid/setgid/setreuid/setregid/setresuid/setresgid/setfsuid/setfsgid/
-// setgroups, personality, adjtimex, settimeofday, readahead, mlock family,
-// sysfs, uselib, ustat, vhangup, modify_ldt, _sysctl, mq_* (SysV msg),
-// ioprio_*, mbind/migrate_pages/move_pages/mempolicy, fanotify, seccomp,
-// io_uring_*, open_tree/move_mount/fsopen/fsconfig/fsmount/fspick,
+// Deliberately EXCLUDED on both architectures (privilege / namespace /
+// kernel-control surface):
+// vfs helpers, mount, umount2, ptrace, reboot, setns, unshare, init_module,
+// finit_module, delete_module, create_module, get_kernel_syms, query_module,
+// capget, capset, syslog, kexec_load, kexec_file_load, swapon, swapoff,
+// sethostname, setdomainname, iopl, ioperm, acct, chroot, pivot_root,
+// quotactl, nfsservctl, bpf, perf_event_open, process_vm_readv/writev,
+// userfaultfd, keyctl/add_key/request_key, lookup_dcookie, all *xattr
+// syscalls, setuid/setgid/setreuid/setregid/setresuid/setresgid/setfsuid/
+// setfsgid/setgroups, personality, adjtimex, settimeofday, readahead, mlock
+// family, sysfs, uselib, ustat, vhangup, modify_ldt, _sysctl, mq_* (SysV msg),
+// msgget/msgctl/msgsnd/msgrcv, semget/semctl/semop, shmget/shmctl/shmat/
+// shmdt, ioprio_*, mbind/migrate_pages/move_pages/mempolicy, fanotify,
+// seccomp, io_uring_*, open_tree/move_mount/fsopen/fsconfig/fsmount/fspick,
 // mount_setattr, landlock_*, memfd_secret, process_madvise/mrelease.
-var allowedSyscalls = []uint32{
+var allowedSyscallsX86_64 = []uint32{
 	// ---- File I/O ----------------------------------------------------
 	0,   // read
 	1,   // write
@@ -320,6 +329,244 @@ var allowedSyscalls = []uint32{
 	324, // membarrier
 }
 
+// allowedSyscallsArm64 is the equivalent allowlist for AArch64 (arm64). The
+// generic syscall table (include/uapi/asm-generic/unistd.h) is what Linux/arm64
+// implements. Every arm64 entry below maps 1:1 to an x86_64 entry above via
+// the *at / clone / pipe2 / clock_* equivalents where the x86_64 syscall does
+// not exist on arm64 (open→openat, stat→newfstatat, fork→clone, pipe→pipe2,
+// epoll_create→epoll_create1, ...). Entries in the x86_64 list that simply
+// have no arm64 syscall (pause, alarm, time, select, poll, dup2, getpgrp,
+// futimesat, arch_prctl) are intentionally omitted.
+var allowedSyscallsArm64 = []uint32{
+	// ---- File I/O ----------------------------------------------------
+	63,  // read
+	64,  // write
+	57,  // close
+	62,  // lseek
+	56,  // openat (+ open/creat emulation)
+	67,  // pread64
+	68,  // pwrite64
+	65,  // readv
+	66,  // writev
+	48,  // faccessat (+ access emulation)
+	71,  // sendfile
+	25,  // fcntl
+	32,  // flock
+	82,  // fsync
+	83,  // fdatasync
+	45,  // truncate
+	46,  // ftruncate
+	61,  // getdents64
+	17,  // getcwd
+	49,  // chdir
+	50,  // fchdir
+	38,  // renameat (+ rename emulation)
+	34,  // mkdirat (+ mkdir emulation)
+	33,  // mknodat
+	55,  // fchown (+ chown/lchown via fchownat)
+	54,  // fchownat
+	35,  // unlinkat (+ unlink/rmdir emulation)
+	37,  // linkat (+ link emulation)
+	36,  // symlinkat (+ symlink emulation)
+	78,  // readlinkat (+ readlink emulation)
+	52,  // fchmod
+	53,  // fchmodat (+ chmod emulation)
+	166, // umask
+	43,  // statfs
+	44,  // fstatfs
+	79,  // newfstatat (+ stat/lstat emulation)
+	80,  // fstat
+	223, // fadvise64
+	276, // renameat2
+	47,  // fallocate
+	69,  // preadv
+	70,  // pwritev
+	261, // prlimit64
+	76,  // splice
+	77,  // tee
+	84,  // sync_file_range
+	75,  // vmsplice
+	88,  // utimensat
+	285, // copy_file_range
+	286, // preadv2
+	287, // pwritev2
+	291, // statx
+	436, // close_range
+	437, // openat2
+	439, // faccessat2
+
+	// ---- Memory ------------------------------------------------------
+	222, // mmap
+	226, // mprotect
+	215, // munmap
+	214, // brk
+	216, // mremap
+	227, // msync
+	232, // mincore
+	233, // madvise
+	279, // memfd_create
+
+	// ---- Processes, threads, signals ---------------------------------
+	134, // rt_sigaction
+	135, // rt_sigprocmask
+	139, // rt_sigreturn
+	171, // getpid
+	220, // clone (+ fork/vfork emulation)
+	221, // execve
+	93,  // exit
+	94,  // exit_group
+	260, // wait4
+	129, // kill
+	160, // uname
+	154, // setpgid
+	172, // getppid
+	156, // getsid
+	157, // setsid
+	136, // rt_sigpending
+	137, // rt_sigtimedwait
+	138, // rt_sigqueueinfo
+	133, // rt_sigsuspend
+	132, // sigaltstack
+	177, // gettid
+	130, // tkill
+	98,  // futex
+	96,  // set_tid_address
+	128, // restart_syscall
+	131, // tgkill
+	95,  // waitid
+	99,  // set_robust_list
+	100, // get_robust_list
+	281, // execveat
+	293, // rseq
+	424, // pidfd_send_signal
+	434, // pidfd_open
+	435, // clone3
+	449, // futex_waitv
+
+	// ---- Identity / resource queries ---------------------------------
+	163, // getrlimit (needed for ulimit -t / -v)
+	165, // getrusage
+	178, // sysinfo
+	153, // times
+	173, // getuid
+	175, // getgid
+	174, // geteuid
+	176, // getegid
+	158, // getgroups
+	148, // getresuid
+	150, // getresgid
+	155, // getpgid (+ getpgrp emulation)
+	141, // getpriority
+	140, // setpriority
+	164, // setrlimit (needed for ulimit -t / -v)
+
+	// ---- Timers / clocks ---------------------------------------------
+	101, // nanosleep
+	102, // getitimer
+	103, // setitimer
+	169, // gettimeofday
+	107, // timer_create
+	110, // timer_settime
+	108, // timer_gettime
+	109, // timer_getoverrun
+	111, // timer_delete
+	113, // clock_gettime
+	114, // clock_getres
+	115, // clock_nanosleep
+
+	// ---- Scheduling ---------------------------------------------------
+	124, // sched_yield
+	118, // sched_setparam
+	121, // sched_getparam
+	119, // sched_setscheduler
+	120, // sched_getscheduler
+	125, // sched_get_priority_max
+	126, // sched_get_priority_min
+	127, // sched_rr_get_interval
+	122, // sched_setaffinity
+	123, // sched_getaffinity
+	168, // getcpu
+	274, // sched_setattr
+	275, // sched_getattr
+
+	// ---- Networking ---------------------------------------------------
+	198, // socket
+	203, // connect
+	202, // accept
+	206, // sendto
+	207, // recvfrom
+	211, // sendmsg
+	212, // recvmsg
+	210, // shutdown
+	200, // bind
+	201, // listen
+	204, // getsockname
+	205, // getpeername
+	199, // socketpair
+	208, // setsockopt
+	209, // getsockopt
+	242, // accept4
+	243, // recvmmsg
+	269, // sendmmsg
+
+	// ---- Poll / epoll / event fds --------------------------------------
+	73,  // ppoll (+ poll emulation)
+	72,  // pselect6 (+ select emulation)
+	29,  // ioctl
+	59,  // pipe2 (+ pipe emulation)
+	23,  // dup (+ dup2 emulation via dup3)
+	24,  // dup3
+	20,  // epoll_create1 (+ epoll_create emulation)
+	21,  // epoll_ctl
+	22,  // epoll_pwait (+ epoll_wait emulation)
+	26,  // inotify_init1 (+ inotify_init emulation)
+	27,  // inotify_add_watch
+	28,  // inotify_rm_watch
+	74,  // signalfd4
+	85,  // timerfd_create
+	86,  // timerfd_settime
+	87,  // timerfd_gettime
+	19,  // eventfd2 (+ eventfd emulation)
+	441, // epoll_pwait2
+
+	// ---- Misc / runtime --------------------------------------------------
+	167, // prctl (thread names, dumpability)
+	81,  // sync
+	267, // syncfs
+	278, // getrandom
+	283, // membarrier
+}
+
+// seccompSupportedArch reports whether the running architecture has an audited
+// syscall allowlist (and therefore an audit-architecture constant to match).
+// Only amd64 and arm64 do. Unsupported architectures must NEVER apply a filter:
+// applying a mismatched table would SIGSYS-kill every syscall (including
+// exit_group), and the audit-arch check in the BPF program would reject
+// everything anyway. Such builds fall back to NO_NEW_PRIVS-only hardening.
+func seccompSupportedArch() bool {
+	switch runtime.GOARCH {
+	case "amd64", "arm64":
+		return true
+	default:
+		return false
+	}
+}
+
+// syscallsForArch returns the audited allowlist for the running architecture.
+// It must stay in sync with detectAuditArch. Callers must gate on
+// seccompSupportedArch first; the default case is defensive and intentionally
+// unreachable from the gated paths.
+func syscallsForArch() []uint32 {
+	switch runtime.GOARCH {
+	case "arm64":
+		return allowedSyscallsArm64
+	case "amd64":
+		return allowedSyscallsX86_64
+	default:
+		return allowedSyscallsX86_64
+	}
+}
+
 // SeccompExec applies a seccomp BPF allowlist filter and exec's the target.
 // It is used by the agent's Linux sandbox as a re-exec entry point:
 //
@@ -336,12 +583,12 @@ func SeccompExec(target string, args []string) {
 	defer runtime.UnlockOSThread()
 
 	// Defense in depth: honor the same guards as the sandboxer's maybeReexec.
-	// The allowlist contains x86_64 syscall numbers only — on ARM64 (e.g.
-	// Raspberry Pi) applying it would SIGSYS-kill every syscall. And when the
-	// operator disabled seccomp via SANDBOX_SECCOMP_PROFILE=off, the re-exec
-	// path must not silently re-enable it. In both cases fall back to
-	// NO_NEW_PRIVS-only hardening.
-	if runtime.GOARCH != "amd64" || getEnv("SANDBOX_SECCOMP_PROFILE", "default") == "off" {
+	// The allowlists contain arch-specific syscall numbers — on an arch without
+	// an audited table (e.g. 386, riscv64) applying any filter would
+	// SIGSYS-kill every syscall. And when the operator disabled seccomp via
+	// SANDBOX_SECCOMP_PROFILE=off, the re-exec path must not silently re-enable
+	// it. In both cases fall back to NO_NEW_PRIVS-only hardening.
+	if !seccompSupportedArch() || getEnv("SANDBOX_SECCOMP_PROFILE", "default") == "off" {
 		NoNewPrivsExec(target, args)
 		return
 	}
@@ -425,6 +672,7 @@ func NoNewPrivsExec(target string, args []string) {
 //	[N+1] RET ALLOW         ; allow label
 func buildSeccompFilter() []sockFilter {
 	arch := detectAuditArch()
+	allowedSyscalls := syscallsForArch()
 	n := len(allowedSyscalls)
 
 	// The ALLOW instruction sits after: 4 arch/load checks (LD arch, JEQ arch,

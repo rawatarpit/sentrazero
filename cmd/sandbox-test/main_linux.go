@@ -20,8 +20,9 @@ import (
 // runs with SandboxNoNewPrivs=true (the default) or SeccompProfile != "off",
 // the sandboxer rewrites the child command to re-exec through this very binary
 // with either "--seccomp-exec <target> [args...]" or "--no-new-privs-exec
-// <target> [args...]" as the first argument, so NO_NEW_PRIVS (and, on amd64,
-// the seccomp allowlist) can be applied in-process before exec'ing the plugin.
+// <target> [args...]" as the first argument, so NO_NEW_PRIVS (and, on amd64
+// and arm64, the seccomp allowlist) can be applied in-process before exec'ing
+// the plugin.
 //
 // This must run before anything else in main(): the target's own arguments may
 // begin with "-" and must be handed through verbatim.
@@ -106,7 +107,7 @@ func main() {
 
 	cfg := sandbox.LoadConfig()
 	// Force the hardened path so the sandboxer's re-exec machinery is
-	// exercised: seccomp on amd64, NO_NEW_PRIVS-only elsewhere.
+	// exercised: seccomp on amd64/arm64, NO_NEW_PRIVS-only elsewhere.
 	cfg.SandboxNoNewPrivs = true
 	cfg.SeccompProfile = "default"
 	sb := sandbox.New(cfg)

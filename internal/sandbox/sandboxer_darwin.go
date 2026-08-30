@@ -61,7 +61,8 @@ func (s *macSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.Cmd
 	if !env.Network {
 		netPolicy = macSandboxNetworkBlock()
 	}
-	sbProfile := fmt.Sprintf(macSandboxProfileTpl, netPolicy, env.WorkDir)
+	home, _ := os.UserHomeDir()
+	sbProfile := fmt.Sprintf(macSandboxProfileTpl, netPolicy, macSandboxHomeDeny(home), env.WorkDir)
 	sbPath := filepath.Join(env.WorkDir, ".sandbox.sb")
 	if err := os.WriteFile(sbPath, []byte(sbProfile), 0600); err != nil {
 		return fmt.Errorf("write sandbox profile: %w", err)
@@ -146,6 +147,10 @@ const macSandboxProfileTpl = `(version 1)
 ; Allow writes to Users home directories (needed for .sentra cache etc)
 (allow file-write* (subpath "/Users"))
 
+; Home-level privacy denies (credentials + app-private data that script
+; runtimes never legitimately touch). Injected by macSandboxHomeDeny when
+; os.UserHomeDir() resolves; empty when it does not.
+%s
 ; Allow read-write in work directory (MUST be last: overrides preceding deny rules)
 (allow file-read* file-write* (subpath "%s"))
 `
@@ -158,6 +163,30 @@ func macSandboxNetworkBlock() string {
 func macSandboxNetworkAllow() string {
 	return `(allow network*)
 (allow system-socket)`
+}
+
+// macSandboxHomeDeny returns Seatbelt deny rules for the user's credentials
+// and app-private data. The baseline profile allows reading everything under
+// "/" (required for macOS 15+ firmlink compatibility) and writing under
+// "/Users" (required for ~/.sentra), so without these rules a compromised
+// plugin could exfiltrate the user's Keychain database, browser cookies and
+// mail. Script runtimes do not read these paths, so the denies are safe.
+//
+// The deny block is injected before the work-dir allow (which must remain the
+// LAST rule in the profile so Seatbelt's last-match-wins semantics keep the
+// work dir writable even if it ever lands under one of these paths).
+func macSandboxHomeDeny(home string) string {
+	if home == "" {
+		return "; (no home dir resolved - home privacy denies skipped)"
+	}
+	return fmt.Sprintf(`; Deny credentials / app-private data under the resolved home dir
+(deny file-read* file-write* (subpath "%s/Library/Keychains"))
+(deny file-read* file-write* (subpath "%s/Library/HTTPStorages"))
+(deny file-read* (subpath "%s/Library/Cookies"))
+(deny file-read* (subpath "%s/Library/WebKit"))
+(deny file-read* (subpath "%s/Library/Mail"))
+(deny file-read* (subpath "%s/Library/Safari"))`,
+		home, home, home, home, home, home)
 }
 
 func macSandboxMemoryLimit(memoryMB int64) string {

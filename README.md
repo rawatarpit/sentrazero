@@ -234,7 +234,7 @@ The agent is a true cross-platform binary — compile once per platform, run any
 
 | Feature | Linux | macOS | Windows |
 |---------|-------|-------|---------|
-| **Syscall filter** | Seccomp BPF allowlist (213 syscalls, default-deny) — **enforced by default on x86_64** via agent re-exec (`agent --seccomp-exec <binary>`); disable with `SANDBOX_SECCOMP_PROFILE=off`. The list is audited for the Python/Node/Go/Rust runtimes. **ARM64 (e.g. Raspberry Pi) automatically falls back to NO_NEW_PRIVS-only** — the x86_64 syscall numbers do not apply to ARM64 | — | — |
+| **Syscall filter** | Seccomp BPF allowlist (default-deny) — **enforced by default on x86_64 and ARM64** (aarch64, incl. Raspberry Pi / Apple Silicon Linux) via agent re-exec (`agent --seccomp-exec <binary>`); disable with `SANDBOX_SECCOMP_PROFILE=off`. Each arch has its own audited syscall table for the Python/Node/Go/Rust runtimes (213 syscalls on x86_64, 180 on ARM64 using the asm-generic table). Unsupported archs (386/riscv64/ppc64le/s390x) fall back to NO_NEW_PRIVS-only | — | — |
 | **Namespace isolation** | User/PID/Mount/UTS/IPC, plus Network when the manifest disables network | — | — |
 | **Process isolation** | Namespace clone (`CLONE_NEW*`) with user-namespace UID/GID mapping, plus `PR_SET_NO_NEW_PRIVS` (set in the re-exec entry, `SANDBOX_NO_NEW_PRIVS=0` to disable) | Seatbelt (Apple sandbox, deny-default profile) | Job Objects |
 | **Network isolation** | `CLONE_NEWNET` (loopback-only, no external connectivity) when `network=false`; host network shared when `network=true` | Seatbelt `(deny network*)` | Per-job Windows Firewall outbound-block rule (best-effort, requires admin) when `network=false` |

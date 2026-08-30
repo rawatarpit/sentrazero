@@ -21,9 +21,9 @@
 #        agent --seccomp-exec /bin/echo hello          -> exit 0, prints hello
 #        agent --seccomp-exec /bin/sh -c 'echo hi'     -> exit 0 (the -c path)
 #        agent --seccomp-exec bin/seccomp-probe        -> SIGSYS (exit 159)
-#             on x86_64 when CONFIG_SECCOMP_FILTER is available; otherwise the
-#             agent degrades to NO_NEW_PRIVS-only and the probe exits 0 (SKIP);
-#             on aarch64 seccomp is not applied -> exit 0
+#             on x86_64 AND aarch64 when CONFIG_SECCOMP_FILTER is available;
+#             otherwise the agent degrades to NO_NEW_PRIVS-only and the probe
+#             exits 0 (SKIP)
 #        SANDBOX_SECCOMP_PROFILE=off agent --seccomp-exec probe -> exit 0
 #        agent --no-new-privs-exec sh -c 'grep NoNewPrivs ...'  -> prints 1
 #   5. Root-only (optional) cgroup check: runs a CPU-burner through the
@@ -195,31 +195,22 @@ else
 fi
 
 # 4c. --seccomp-exec bin/seccomp-probe:
-#   - x86_64 + CONFIG_SECCOMP_FILTER  -> SIGSYS (exit 159)
-#   - x86_64 without it               -> graceful NO_NEW_PRIVS fallback
-#                                        (probe exits 0) -> SKIP
-#   - aarch64 (GOARCH guard)          -> seccomp not applied (probe exits 0)
+#   - amd64/aarch64 + CONFIG_SECCOMP_FILTER -> SIGSYS (exit 159)
+#   - amd64/aarch64 without it              -> graceful NO_NEW_PRIVS fallback
+#                                             (probe exits 0) -> SKIP
 "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
 rc=$?
-if [[ "$ARCH" == "x86_64" ]]; then
-  if [[ $SECCOMP_FILTER_AVAIL -eq 1 ]]; then
-    if [[ $rc -eq 159 ]]; then
-      pass "seccomp-exec probe SIGSYS-killed (exit 159)"
-    else
-      fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected 159, got $rc"
-    fi
+if [[ $SECCOMP_FILTER_AVAIL -eq 1 ]]; then
+  if [[ $rc -eq 159 ]]; then
+    pass "seccomp-exec probe SIGSYS-killed (exit 159)"
   else
-    if [[ $rc -eq 0 ]]; then
-      skip "seccomp-exec probe SIGSYS-killed (exit 159)" "kernel lacks CONFIG_SECCOMP_FILTER (NO_NEW_PRIVS fallback)"
-    else
-      fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected graceful fallback 0, got $rc"
-    fi
+    fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected 159, got $rc"
   fi
 else
   if [[ $rc -eq 0 ]]; then
-    pass "seccomp not applied on $ARCH (probe exits 0)"
+    skip "seccomp-exec probe SIGSYS-killed (exit 159)" "kernel lacks CONFIG_SECCOMP_FILTER (NO_NEW_PRIVS fallback)"
   else
-    fail "seccomp not applied on $ARCH (probe exits 0)" "expected 0, got $rc"
+    fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected graceful fallback 0, got $rc"
   fi
 fi
 

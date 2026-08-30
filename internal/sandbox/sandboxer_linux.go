@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync/atomic"
 	"syscall"
@@ -219,11 +218,12 @@ func (s *linuxSandbox) writeCPUMax(cgSubPath string, env *SandboxEnv) error {
 // main() before exec'ing the original plugin command, so the filter is
 // inherited by the plugin.
 //
-// The seccomp allowlist is x86_64-only: the syscall numbers in
-// seccomp_linux.go are the x86_64 table, and ARM64 (e.g. Raspberry Pi) uses
-// a completely different numbering. Applying the x86_64 filter on ARM64
-// would SIGSYS-kill every plugin, so non-x86_64 builds automatically fall
-// back to NO_NEW_PRIVS-only enforcement.
+// The seccomp allowlists live in seccomp_linux.go and are audited per
+// architecture: x86_64 (its own numbering) and ARM64 (the asm-generic table,
+// used on Raspberry Pi and Apple Silicon Linux hosts). ARM64 uses a completely
+// different numbering from x86_64, so the filter is only attempted on
+// architectures with an audited table (see seccompSupportedArch); everything
+// else automatically falls back to NO_NEW_PRIVS-only enforcement.
 //
 // Seccomp also requires kernel CONFIG_SECCOMP_FILTER (probed via
 // caps.HasSeccomp). Kernels without it reject SECCOMP_SET_MODE_FILTER with
@@ -232,7 +232,7 @@ func (s *linuxSandbox) writeCPUMax(cgSubPath string, env *SandboxEnv) error {
 func (s *linuxSandbox) maybeReexec(env *SandboxEnv, cmd *exec.Cmd, caps PlatformCapabilities) error {
 	seccompEnabled := env.Config.SeccompProfile != "" &&
 		env.Config.SeccompProfile != "off" &&
-		runtime.GOARCH == "amd64" &&
+		seccompSupportedArch() &&
 		caps.HasSeccomp
 	if !seccompEnabled && !env.Config.SandboxNoNewPrivs {
 		return nil
