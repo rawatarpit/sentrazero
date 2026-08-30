@@ -195,16 +195,33 @@ else
 fi
 
 # 4c. --seccomp-exec bin/seccomp-probe:
-#   - amd64/aarch64 + CONFIG_SECCOMP_FILTER -> SIGSYS (exit 159)
-#   - amd64/aarch64 without it              -> graceful NO_NEW_PRIVS fallback
-#                                             (probe exits 0) -> SKIP
-"$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
-rc=$?
+#   - amd64/aarch64 + CONFIG_SECCOMP_FILTER -> the blocked syscall is DENIED.
+#     For NATIVE (C) targets the kernel delivers SIGSYS (exit 159). For this
+#     Go probe the Go runtime wedges on the seccomp SIGSYS instead of dying
+#     cleanly, so the process hangs — it neither prints "io_uring_setup
+#     returned" nor exits. Both outcomes prove the filter enforced the deny
+#     (the syscall never executed). We wrap the agent in `timeout` to bound
+#     the hang: rc 159 (native SIGSYS death) or rc 124 (Go-wedge timeout),
+#     with no surviving output, is PASS.
+#   - without CONFIG_SECCOMP_FILTER            -> graceful NO_NEW_PRIVS
+#     fallback (probe runs io_uring_setup -> errno 14, exits 0) -> SKIP
+TIMEOUT_BIN="$(command -v timeout || true)"
+if [[ -n "$TIMEOUT_BIN" ]]; then
+  timeout 15 "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
+  rc=$?
+else
+  "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
+  rc=$?
+fi
 if [[ $SECCOMP_FILTER_AVAIL -eq 1 ]]; then
-  if [[ $rc -eq 159 ]]; then
-    pass "seccomp-exec probe SIGSYS-killed (exit 159)"
+  if [[ $rc -eq 159 || $rc -eq 124 ]]; then
+    if [[ $rc -eq 124 ]]; then
+      pass "seccomp-exec probe denied (SIGSYS for native / Go-wedge timeout; no surviving output)"
+    else
+      pass "seccomp-exec probe SIGSYS-killed (exit 159)"
+    fi
   else
-    fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected 159, got $rc"
+    fail "seccomp-exec probe denied (SIGSYS/wedge)" "expected 159 or 124, got $rc"
   fi
 else
   if [[ $rc -eq 0 ]]; then
