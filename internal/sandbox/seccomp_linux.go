@@ -15,7 +15,12 @@ import (
 
 // BPF/seccomp constants (not all exposed by x/sys/unix).
 const (
-	seccompSetModeFilter = 2
+	// SECCOMP_SET_MODE_FILTER is op 1 for the seccomp(2) syscall. Op 2 is
+	// SECCOMP_GET_ACTION_AVAIL, which interprets the pointer argument as an
+	// action number and returns -EOPNOTSUPP — using it here silently
+	// disabled real filter mode and made every install fall back to
+	// NO_NEW_PRIVS-only hardening. Kernel: include/uapi/linux/seccomp.h.
+	seccompSetModeFilter = 1
 
 	seccompRetKill  = 0x00000000
 	seccompRetAllow = 0x7fff0000
@@ -410,7 +415,6 @@ var allowedSyscallsArm64 = []uint32{
 	134, // rt_sigaction
 	135, // rt_sigprocmask
 	139, // rt_sigreturn
-	171, // getpid
 	220, // clone (+ fork/vfork emulation)
 	221, // execve
 	93,  // exit
@@ -419,7 +423,6 @@ var allowedSyscallsArm64 = []uint32{
 	129, // kill
 	160, // uname
 	154, // setpgid
-	172, // getppid
 	156, // getsid
 	157, // setsid
 	136, // rt_sigpending
@@ -427,7 +430,6 @@ var allowedSyscallsArm64 = []uint32{
 	138, // rt_sigqueueinfo
 	133, // rt_sigsuspend
 	132, // sigaltstack
-	177, // gettid
 	130, // tkill
 	98,  // futex
 	96,  // set_tid_address
@@ -446,12 +448,15 @@ var allowedSyscallsArm64 = []uint32{
 	// ---- Identity / resource queries ---------------------------------
 	163, // getrlimit (needed for ulimit -t / -v)
 	165, // getrusage
-	178, // sysinfo
+	179, // sysinfo
 	153, // times
-	173, // getuid
-	175, // getgid
-	174, // geteuid
-	176, // getegid
+	172, // getpid
+	173, // getppid
+	174, // getuid
+	175, // geteuid
+	176, // getgid
+	177, // getegid
+	178, // gettid
 	158, // getgroups
 	148, // getresuid
 	150, // getresgid
