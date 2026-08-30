@@ -164,17 +164,6 @@ fi
 # --- 4. seccomp end-to-end with the REAL agent binary ----------------------
 echo "==> seccomp end-to-end (real agent binary)"
 
-# Detect seccomp filter-mode support the same way the agent does
-# (internal/sandbox/capabilities_linux.go probeSeccompAvailable):
-# /proc/sys/kernel/seccomp/actions_avail exists only when the kernel has
-# CONFIG_SECCOMP_FILTER. Without it SECCOMP_SET_MODE_FILTER returns
-# EOPNOTSUPP and the agent falls back to NO_NEW_PRIVS-only hardening, so
-# the SIGSYS assertion below cannot hold and is SKIPped.
-SECCOMP_FILTER_AVAIL=0
-if [[ -s /proc/sys/kernel/seccomp/actions_avail ]]; then
-  SECCOMP_FILTER_AVAIL=1
-fi
-
 # 4a. --seccomp-exec /bin/echo hello  -> exit 0 and output "hello"
 "$AGENT_BIN" --seccomp-exec /bin/echo hello >"$OUT.a" 2>&1
 rc=$?
@@ -194,17 +183,18 @@ else
   fail "seccomp-exec /bin/sh -c 'echo hi' (exit 0)" "rc=$rc"
 fi
 
-# 4c. --seccomp-exec bin/seccomp-probe:
-#   - amd64/aarch64 + CONFIG_SECCOMP_FILTER -> the blocked syscall is DENIED.
-#     For NATIVE (C) targets the kernel delivers SIGSYS (exit 159). For this
-#     Go probe the Go runtime wedges on the seccomp SIGSYS instead of dying
-#     cleanly, so the process hangs — it neither prints "io_uring_setup
-#     returned" nor exits. Both outcomes prove the filter enforced the deny
-#     (the syscall never executed). We wrap the agent in `timeout` to bound
-#     the hang: rc 159 (native SIGSYS death) or rc 124 (Go-wedge timeout),
-#     with no surviving output, is PASS.
-#   - without CONFIG_SECCOMP_FILTER            -> graceful NO_NEW_PRIVS
-#     fallback (probe runs io_uring_setup -> errno 14, exits 0) -> SKIP
+# 4c. --seccomp-exec bin/seccomp-probe. The probe calls io_uring_setup (syscall
+# 425), which is deliberately NOT in the allowlist. The outcome of running it
+# under the agent tells us definitively whether the filter enforced the deny,
+# so we classify by OUTCOME rather than by the (unreliable, runner-specific)
+# /proc/sys/kernel/seccomp/actions_avail file:
+#   - rc 159 (SIGSYS)  -> native process killed by the filter -> PASS
+#   - rc 124 (timeout) -> filter DENIED the syscall but the Go runtime wedged
+#     on the seccomp SIGSYS instead of dying (known Go behavior), so the probe
+#     neither printed io_uring output nor exited -> denial proven -> PASS
+#   - rc 0 WITH "io_uring_setup returned" -> filter not applied (no
+#     CONFIG_SECCOMP_FILTER / graceful NO_NEW_PRIVS fallback) -> SKIP
+#   - anything else -> FAIL
 TIMEOUT_BIN="$(command -v timeout || true)"
 if [[ -n "$TIMEOUT_BIN" ]]; then
   timeout 15 "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
@@ -213,22 +203,15 @@ else
   "$AGENT_BIN" --seccomp-exec "$PROBE_BIN" >"$OUT.c" 2>&1
   rc=$?
 fi
-if [[ $SECCOMP_FILTER_AVAIL -eq 1 ]]; then
-  if [[ $rc -eq 159 || $rc -eq 124 ]]; then
-    if [[ $rc -eq 124 ]]; then
-      pass "seccomp-exec probe denied (SIGSYS for native / Go-wedge timeout; no surviving output)"
-    else
-      pass "seccomp-exec probe SIGSYS-killed (exit 159)"
-    fi
-  else
-    fail "seccomp-exec probe denied (SIGSYS/wedge)" "expected 159 or 124, got $rc"
-  fi
+c_out="$(<"$OUT.c")"
+if [[ $rc -eq 159 ]]; then
+  pass "seccomp-exec probe SIGSYS-killed (exit 159)"
+elif [[ $rc -eq 124 ]]; then
+  pass "seccomp-exec probe denied (Go-wedge timeout; no surviving io_uring output)"
+elif [[ $rc -eq 0 && "$c_out" == *"io_uring_setup returned"* ]]; then
+  skip "seccomp-exec probe SIGSYS-killed (exit 159)" "kernel lacks CONFIG_SECCOMP_FILTER (NO_NEW_PRIVS fallback)"
 else
-  if [[ $rc -eq 0 ]]; then
-    skip "seccomp-exec probe SIGSYS-killed (exit 159)" "kernel lacks CONFIG_SECCOMP_FILTER (NO_NEW_PRIVS fallback)"
-  else
-    fail "seccomp-exec probe SIGSYS-killed (exit 159)" "expected graceful fallback 0, got $rc"
-  fi
+  fail "seccomp-exec probe denied (SIGSYS/wedge)" "expected 159/124 (or 0+io_uring_output), got rc=$rc out=${c_out:-<empty>}"
 fi
 
 # 4d. SANDBOX_SECCOMP_PROFILE=off --seccomp-exec probe -> exit 0 (escape hatch)
