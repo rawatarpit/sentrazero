@@ -137,8 +137,21 @@ func (s *linuxSandbox) Execute(ctx context.Context, env *SandboxEnv, cmd *exec.C
 		if cpuSeconds > 0 {
 			applyCPULimit(cmd, env)
 		}
-	case memoryMB > 0 || cpuSeconds > 0:
-		applyRLimits(cmd, env)
+	case cpuSeconds > 0:
+		// No writable cgroup is available, so an RSS-based memory cap
+		// (memory.max) cannot be applied. Fall back to the POSIX CPU-time
+		// rlimit ONLY. RLIMIT_AS (address space) is deliberately NOT set:
+		// script runtimes (Node/V8, Go, the JVM) reserve large virtual-address
+		// regions at startup, so an address-space cap keyed to the plugin's
+		// memory_mb kills them before they can run — e.g. Playwright's Node
+		// driver exits with "Connection closed while reading from the driver"
+		// and Chromium never launches. This mirrors the cgroup path above,
+		// which also never stacks RLIMIT_AS on top of memory.max. The tradeoff
+		// is that without a cgroup the plugin's memory is not hard-capped.
+		applyCPULimit(cmd, env)
+	case memoryMB > 0:
+		obs.Info("memory limit requested but no writable cgroup available; memory is not hard-capped (RLIMIT_AS intentionally omitted)",
+			obs.Field{"plugin": env.Manifest.Name, "memory_mb": memoryMB})
 	default:
 		obs.Info("no resource limits configured for plugin", obs.Field{
 			"plugin": env.Manifest.Name,

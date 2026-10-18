@@ -25,6 +25,22 @@ const (
 	seccompRetKill  = 0x00000000
 	seccompRetAllow = 0x7fff0000
 
+	// seccompRetErrno causes the syscall to fail with the errno in the low
+	// 16 bits instead of executing. It is the DEFAULT action for syscalls
+	// outside the allowlist: the syscall is still denied (never executed),
+	// but the process is not killed, so a runtime that merely *probes* an
+	// unsupported syscall can fall back. This is required in practice because
+	// mainstream runtimes probe syscalls we deliberately exclude — e.g. Node's
+	// libuv probes io_uring_setup (425), and Node/V8 and Chromium call capget
+	// (125) at startup. With a KILL default those probes SIGSYS-terminate the
+	// process (the Playwright Node driver and Chromium both die this way).
+	// Docker's default seccomp profile uses the same EPERM-by-default model.
+	// KILL is still used for an architecture mismatch, where the running
+	// binary is executing a foreign-architecture syscall table and nothing
+	// about the process can be trusted.
+	seccompRetErrno = 0x00050000
+	seccompEperm    = 1
+
 	// BPF instruction classes
 	bpfLD  = 0x00
 	bpfJMP = 0x05
@@ -90,7 +106,7 @@ func bpfJump(code uint16, k uint32, jt, jf uint8) sockFilter {
 // kernel-control surface):
 // vfs helpers, mount, umount2, ptrace, reboot, setns, unshare, init_module,
 // finit_module, delete_module, create_module, get_kernel_syms, query_module,
-// capget, capset, syslog, kexec_load, kexec_file_load, swapon, swapoff,
+// syslog, kexec_load, kexec_file_load, swapon, swapoff,
 // sethostname, setdomainname, iopl, ioperm, acct, chroot, pivot_root,
 // quotactl, nfsservctl, bpf, perf_event_open, process_vm_readv/writev,
 // userfaultfd, keyctl/add_key/request_key, lookup_dcookie, all *xattr
@@ -241,6 +257,13 @@ var allowedSyscallsX86_64 = []uint32{
 	118, // getresuid
 	120, // getresgid
 	121, // getpgid
+	125, // capget (read-only capability query; Node/V8 and Chromium call
+	     //        this at startup.)
+	126, // capset (Chromium's DropAllCapabilities() lowers its own cap sets
+	     //        at startup and aborts if this fails. A process can only
+	     //        *lower* caps here — it can never gain beyond its permitted
+	     //        set — so this is safe, and matches Docker's default
+	     //        seccomp profile, which allows capget+capset.)
 	140, // getpriority
 	141, // setpriority
 	160, // setrlimit (needed for ulimit -t / -v)
@@ -461,6 +484,13 @@ var allowedSyscallsArm64 = []uint32{
 	148, // getresuid
 	150, // getresgid
 	155, // getpgid (+ getpgrp emulation)
+	90,  // capget (read-only capability query; Node/V8 and Chromium call
+	     //        this at startup.)
+	91,  // capset (Chromium's DropAllCapabilities() lowers its own cap sets
+	     //        at startup and aborts if this fails. A process can only
+	     //        *lower* caps here — it can never gain beyond its permitted
+	     //        set — so this is safe, and matches Docker's default
+	     //        seccomp profile, which allows capget+capset.)
 	141, // getpriority
 	140, // setpriority
 	164, // setrlimit (needed for ulimit -t / -v)
@@ -661,7 +691,9 @@ func NoNewPrivsExec(target string, args []string) {
 
 // buildSeccompFilter returns a BPF program that implements a default-deny
 // allowlist for seccomp. Only the syscalls listed in allowedSyscalls are
-// permitted; everything else kills the process.
+// permitted; everything else fails with EPERM (it is never executed, but the
+// process keeps running so runtimes can fall back — see seccompRetErrno).
+// A foreign-architecture syscall is killed.
 //
 // BPF program layout:
 //
@@ -673,15 +705,15 @@ func NoNewPrivsExec(target string, args []string) {
 //	[5] JEQ nr1, jt, 0     ; ...
 //	...
 //	[N-1] JEQ nrN-1, 1, 0  ; last allowed syscall
-//	[N]   RET KILL          ; default-deny
-//	[N+1] RET ALLOW         ; allow label
+//	[N]   RET ERRNO(EPERM) ; default-deny
+//	[N+1] RET ALLOW        ; allow label
 func buildSeccompFilter() []sockFilter {
 	arch := detectAuditArch()
 	allowedSyscalls := syscallsForArch()
 	n := len(allowedSyscalls)
 
 	// The ALLOW instruction sits after: 4 arch/load checks (LD arch, JEQ arch,
-	// RET KILL, LD nr) + n syscall checks + 1 default-deny kill.
+	// RET KILL, LD nr) + n syscall checks + 1 default-deny.
 	allowIdx := 4 + n + 1
 
 	filter := make([]sockFilter, 0, allowIdx+1)
@@ -704,8 +736,8 @@ func buildSeccompFilter() []sockFilter {
 		}
 	}
 
-	// ---- Default deny + allow label ---------------------------------
-	filter = append(filter, bpfStmt(bpfRET|bpfK, seccompRetKill))
+	// ---- Default deny (EPERM) + allow label -------------------------
+	filter = append(filter, bpfStmt(bpfRET|bpfK, seccompRetErrno|seccompEperm))
 	filter = append(filter, bpfStmt(bpfRET|bpfK, seccompRetAllow))
 
 	return filter

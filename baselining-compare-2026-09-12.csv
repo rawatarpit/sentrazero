@@ -1,0 +1,20 @@
+product_id,item_id,pt,brand,product_name,Reference 'Item has published dups ?',Pipeline 'Item has published dups ?',Reference published_dup_1,Pipeline published_dup_1,Pipeline count,Pipeline max_candidate_similarity,Status,Comments
+32351ZIYJIEB,411341227,Projector Replacement Lamps,Aishtec,Sharp BQC-XGP10XE-1 Philips Projector Bare Lamp,No,No,None,,,,OK,No duplicate found
+73M2VN3ZVULD,14309662011,Pants,Ayolanni,Ayolanni Cargo Spring Pants for Women Plus Size Button Wide Leg Black High Waist Solid Pants Ladies Sweatpants,No,No,None,,,,OK,No duplicate found
+5EAOW8EXR3B7,17971614418,Sweatshirts & Hoodies,Intoyouu,The Life of A Teacher Sweatshirt Comfort Colors Cute Teacher Life Shirt Back To School,No,No,None,,,,OK,No duplicate found
+7BOCSIIWTJKW,15936650668,Backpacks,TKBIIuds,Howl'S Moving Castle Casual Backpacks Business Travel Shoulder Bag With Usb Interface Laptop Backpack For Office Work,No,No,None,,,,OK,No duplicate found
+6G3927H908Q1,16992567578,T-Shirts,Simple Fit,Simple Fit Super Duck Shirt Vintage Wrestling T-Shirt,No,No,None,,,,OK,No duplicate found
+1OI2D8YT242C,16765407051,Curtains & Valances,Eclive,Floral Sheer Curtains - Flower Print Voile Window Panels with Light Filtering | Semi-Sheer Tulle Drapes for Living Room & Bedroom | Romantic Blossom Design Window Treatments,No,No,None,,,,OK,No duplicate found
+55ARRC66XSVK,17895373454,Pants,Wagiet,"Women's High Waist Wide Leg Relaxes Body Pants - Loose Straight Elegant Dress Trousers,Soft Stretch Fabric, Work-Ready For Women,Size:L",Yes,No,4KPELIL3O99I,,,,OK (ref dup delisted on Walmart),ref dup listing is now 404/delisted on Walmart
+56423I1JKL2O,5760415676,Baseball Shirts,Fotbe,"Fotbe Snowflakes and Hearts Baseball Jersey Shirt for Men and Women, Casual Short Sleeves Button Down T-Shirt-XX-Large",No,No,None,,,,OK,No duplicate found
+1O74NE15NOCF,16816170652,T-Shirts,ANUNSHIRT,"ANUNSHIRT Rva Richmond Skyline Commonwealth Virginia Local Souvenir T-Shirt Unisex S-5XL Hot Trending Shirt, Vintage Birthday Gift",No,No,None,,,,OK,No duplicate found
+3A0RP402CGXV,5493553731,Scrub Jackets,CHMORA,CHMORA Scrubs for Women Tops Long Sleeve Pocket Working Crewneck Solid Color Single-breasted Protective Overalls Cardigan Jacket,No,No,None,,,,OK,No duplicate found
+14C5K62LKGV1,6136764769,Casual & Dress Shoes,Sonzj-II,US Veteran Shoes Sneakers Black Size 8,No,No,None,,,,OK,Different size
+6SI4CIXW2W93,16979102268,Fanny Packs,Fuzoiu,"Fuzoiu Cute Poodle Dog Print Unisex Square Double Layer Waist Bag,Crossbody Fanny Pack Travel Workout Accessory",Yes,No,1GRNU54IHI1Q,,,,OK (ref dup delisted on Walmart),ref dup listing is now 404/delisted on Walmart
+47XZNSPTKSFC,4923343,Books,Kevin J. Anderson,Dune: The Road to Dune (Paperback),No,No,None,,,,OK,No duplicate found
+5VIN1FWX5UIQ,14618400812,Button-Up Shirts,GOKIU,Gokiu Mario Men's Button Down Shirts Short Sleeve Casual Shirts Beach Summer Shirt with Pocket,No,No,None,,,,OK,No duplicate found
+4SSRDR9DVA6R,17361218828,T-Shirts,XQYLOS,XQYLOS Kids Girls Short Sleeve T-Shirts Round Neck Casual ùë™artoon Graphic Print Tops Fashion Summer Comfy Relaxed Tees,No,No,None,,,,OK,No duplicate found
+5QMX9U45RV1I,14841516548,Coasters,KLL,"KLL Cute puppy Drink Coasters Set of 4,PU Leather Absorbent Coasters Set Decorative Coffee Cup Coasters Housewarming Gift for Home Decor-Octagon",Yes,No,6ZHVYS953OCL,,,,OK (ref dup delisted on Walmart),ref dup listing is now 404/delisted on Walmart
+7DUGRD8WNLT1,10648902176,T-Shirts,JUNFPRINTEE,Black T-Shirt with Bold Graphic I Love Horror Movies and My Cat for Cat Lovers,Yes,No,6Y1WTCI36Q80,,,,OK (ref dup delisted on Walmart),ref dup listing is now 404/delisted on Walmart
+5KYT88Y8S7UU,5278433836,Books,Parallax Press,Pre-Owned How to Relax (Paperback) 1941529089 9781941529089,No,No,None,,,,OK,Different Isbn
+5JT8BRIR0Y7S,851435366,Art Prints,Stupell,"Cool Panda Sunglasses Black And White Paint Drip 11 in x 14 in Framed Painting Art Prints, by Stupell Home D√©cor",No,No,None,,,,OK,Different size

@@ -14,8 +14,9 @@ type Manifest struct {
 	Checksum string `json:"checksum,omitempty"` // REQUIRED (SHA256 hex)
 
 	// Classification
-	PluginType string `json:"plugin_type,omitempty"` // "core" | "client"
-	Language   string `json:"language,omitempty"`    // rust, python, etc.
+	PluginType  string `json:"plugin_type,omitempty"` // "core" | "client"
+	Language    string `json:"language,omitempty"`    // rust, python, etc.
+	PluginGroup string `json:"plugin_group,omitempty"`
 
 	// 🔒 TRUST (NON-NEGOTIABLE)
 	Trusted bool `json:"trusted"` // MUST be true for execution

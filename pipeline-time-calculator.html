@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Pipeline Time & Rows Calculator</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:2rem auto;max-width:860px;color:#222;background:#f4f6f8;padding:0 1rem}
+h1{font-size:1.5rem;margin-bottom:.3rem}
+.sub{color:#667;font-size:.9rem;margin-bottom:1.5rem}
+.card{background:#fff;border:1px solid #e2e5ea;border-radius:12px;padding:1.5rem;margin:1rem 0;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.pipe-tabs{display:flex;gap:.5rem;margin-bottom:1rem}
+.tab{flex:1;padding:.7rem;border:2px solid #e2e5ea;border-radius:10px;background:#fff;cursor:pointer;text-align:center;font-weight:600}
+.tab.active{background:#1a7f37;border-color:#1a7f37;color:#fff}
+.mode-tabs{display:flex;gap:.5rem;margin-bottom:1rem}
+.mtab{flex:1;padding:.5rem;border:2px solid #e2e5ea;border-radius:8px;background:#fff;cursor:pointer;text-align:center;font-size:.9rem}
+.mtab.active{background:#2b6cb0;border-color:#2b6cb0;color:#fff}
+input[type=number],input[type=text]{width:100%;padding:.7rem;font-size:1.2rem;border:1px solid #ccc;border-radius:8px;box-sizing:border-box}
+label.field{display:block;font-size:.8rem;font-weight:600;color:#555;margin:.5rem 0 .3rem}
+.result{background:#eef7ee;border:1px solid #b7e0b7;border-radius:10px;padding:1rem;margin-top:1rem}
+.result.big{font-size:1.6rem;font-weight:800;color:#1a7f37}
+.breakdown{font-size:.85rem;color:#444;margin-top:.5rem;line-height:1.6}
+.footer{margin-top:2rem;padding-top:1rem;border-top:1px solid #ccc;font-size:.8rem;color:#777}
+small{color:#777}
+</style></head><body>
+<h1>Sentra Pipeline Time & Rows Calculator</h1>
+<div class="sub">Estimated from measured run data (2026-09-09 instrumented measurement on sentrazero, agent sentra)</div>
+
+<div class="card">
+  <div class="pipe-tabs">
+    <div class="tab active" id="tab-val" onclick="setPipe('val')">Validation (scrape + compare)</div>
+    <div class="tab" id="tab-base" onclick="setPipe('base')">Baselining (dedup scan)</div>
+  </div>
+  <div class="mode-tabs">
+    <div class="mtab active" id="mtab-rows" onclick="setMode('rows')">Input rows → get time</div>
+    <div class="mtab" id="mtab-time" onclick="setMode('time')">Input time → get rows</div>
+  </div>
+
+  <div id="input-rows">
+    <label class="field">Number of rows (input products)</label>
+    <input type="number" id="rows-input" value="28" min="1" max="10000" oninput="calcRowsToTime()">
+  </div>
+  <div id="input-time" style="display:none">
+    <label class="field">Available time (minutes)</label>
+    <input type="number" id="time-input" value="60" min="0.1" step="0.1" oninput="calcTimeToRows()">
+  </div>
+
+  <div class="result" id="result-box" style="display:none">
+    <div class="big" id="result-big"></div>
+    <div class="breakdown" id="result-detail"></div>
+  </div>
+</div>
+
+<p>Measured per-row costs: <b id="per-row-txt"></b></p>
+<div class="footer">Calculator built from instrumented run data · per-row = plugin wall time, pipeline wall adds startup / S3 / chunk / merge overhead · compare.py v1.4.2 · ScraperAPI generic</div>
+
+<script>
+// Measured data (instrumented run, 2026-09-09)
+var DATA = {
+  val: {
+    name: 'Validation (Walmart Scrape & Compare v2)',
+    perRowSec: 30.5,            // avg scrape per row
+    perRowTxt: '30.5s per row (scrape step 0)',
+    step1Sec: 4.39,             // compare.py batch
+    mergeSec: 2.2,              // merge_dataset
+    startupSec: 3,              // plugin startup + S3 + chunk overhead
+    step1Txt: 'compare.py 4.4s (batch) + merge 2.2s',
+  },
+  base: {
+    name: 'Baselining (Walmart Duplicate Detection v1)',
+    perRowSec: 11.5,            // avg search per row (ScraperAPI generic)
+    perRowTxt: '11.5s per row (walmart_search generic, step 0)',
+    step1Sec: 0.29,             // dup_classify batch
+    mergeSec: 2.7,              // merge_dataset
+    startupSec: 3,
+    step1Txt: 'dup_classify.py 0.3s (batch) + merge 2.7s',
+  }
+};
+
+var pipe = 'val';
+var mode = 'rows';
+
+function setPipe(p) {
+  pipe = p;
+  document.getElementById('tab-val').classList.toggle('active', p==='val');
+  document.getElementById('tab-base').classList.toggle('active', p==='base');
+  updatePerRowTxt();
+  if (mode==='rows') calcRowsToTime(); else calcTimeToRows();
+}
+function setMode(m) {
+  mode = m;
+  document.getElementById('mtab-rows').classList.toggle('active', m==='rows');
+  document.getElementById('mtab-time').classList.toggle('active', m==='time');
+  document.getElementById('input-rows').style.display = m==='rows' ? 'block' : 'none';
+  document.getElementById('input-time').style.display = m==='time' ? 'block' : 'none';
+  if (m==='rows') calcRowsToTime(); else calcTimeToRows();
+}
+function updatePerRowTxt() {
+  document.getElementById('per-row-txt').textContent = DATA[pipe].perRowTxt;
+}
+
+function fmtDur(sec) {
+  if (sec < 60) return sec.toFixed(1) + ' s';
+  var m = Math.floor(sec/60), s = Math.round(sec%60);
+  var h = Math.floor(m/60), mm = m%60;
+  if (h>0) return h + ' h ' + mm + ' m ' + s + ' s';
+  return m + ' min ' + s + ' s';
+}
+function fmtRow(n) { return n.toLocaleString(); }
+
+function calcRowsToTime() {
+  var rows = parseFloat(document.getElementById('rows-input').value);
+  if (!rows || rows < 1) { hide(); return; }
+  var d = DATA[pipe];
+  var total = rows * d.perRowSec + d.step1Sec + d.mergeSec;
+  var step0 = rows * d.perRowSec;
+  var pipeline = rows * d.perRowSec + d.step1Sec + d.mergeSec + d.startupSec;
+  var show = document.getElementById('result-box');
+  show.style.display = 'block';
+  document.getElementById('result-big').textContent = fmtDur(total) + '  (est. pipeline wall: ' + fmtDur(pipeline) + ')';
+  document.getElementById('result-detail').innerHTML =
+    '<b>' + d.name + '</b> — ' + fmtRow(rows) + ' rows<br>' +
+    'Step 0: ' + fmtDur(step0) + '<br>' +
+    d.step1Txt + '<br>' +
+    '<b>Estimated total: ' + fmtDur(total) + '</b>' +
+    '<br><small>Pipeline wall incl. startup/S3/chunk overhead: ' + fmtDur(pipeline) + '</small>';
+}
+function calcTimeToRows() {
+  var mins = parseFloat(document.getElementById('time-input').value);
+  if (!mins || mins <= 0) { hide(); return; }
+  var d = DATA[pipe];
+  var sec = mins * 60;
+  // account for fixed overheads, then rows = remaining / perRow
+  var fixed = d.step1Sec + d.mergeSec + d.startupSec;
+  var avail = sec - fixed;
+  var rows = Math.floor(avail / d.perRowSec);
+  if (rows < 0) rows = 0;
+  var step0 = rows * d.perRowSec;
+  var used = step0 + d.step1Sec + d.mergeSec + d.startupSec;
+  var show = document.getElementById('result-box');
+  show.style.display = 'block';
+  if (rows <= 0) {
+    document.getElementById('result-big').textContent = 'Not enough time for even 1 row';
+    document.getElementById('result-detail').textContent =
+      'Fixed overhead per run: ' + fmtDur(d.step1Sec+d.mergeSec+d.startupSec) + ' (step1 + merge + startup). ' +
+      'Need at least ' + fmtDur(d.perRowSec + d.step1Sec + d.mergeSec + d.startupSec) + ' for 1 row.';
+    return;
+  }
+  document.getElementById('result-big').textContent = '~' + fmtRow(rows) + ' rows';
+  document.getElementById('result-detail').innerHTML =
+    '<b>' + d.name + '</b> — ' + fmtDur(mins*60) + ' available<br>' +
+    'Step 0 (per-row @ ' + d.perRowSec + 's): ' + fmtDur(step0) + '<br>' +
+    d.step1Txt + ' + startup ' + d.startupSec + 's<br>' +
+    '<b>Fits ~' + fmtRow(rows) + ' rows</b>' +
+    '<br><small>Estimated used: ' + fmtDur(used) + ' of ' + fmtDur(sec) + '</small>';
+}
+function hide() { document.getElementById('result-box').style.display = 'none'; }
+
+// init
+updatePerRowTxt();
+calcRowsToTime();
+</script>
+</body></html>

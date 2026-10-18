@@ -201,6 +201,7 @@ func InstallPlugin(ctx context.Context, p DBPlugin, baseDir string) (bool, error
 		Checksum:       p.Checksum,
 		PluginType:     p.PluginType,
 		Language:       p.Language,
+		PluginGroup:    p.PluginGroup,
 		Trusted:        p.Trusted,
 		Network:        p.Network,
 		Resources:      PluginResources{},

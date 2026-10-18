@@ -248,9 +248,14 @@ func ComputeFileChecksum(path string) (string, error) {
 func VerifyPluginIntegrity(ctx context.Context, manifest Manifest, pluginDir string) error {
 	binaryPath := filepath.Join(pluginDir, manifest.Filename)
 
-	if manifest.Trusted {
-		obs.Info("skipping verification for trusted bundled plugin", obs.Field{
-			"plugin": manifest.Name,
+	// Backwards-compatible trust: a trusted plugin with no signature skips
+	// full integrity verification unless strict signature enforcement is
+	// enabled. Keep this permissive by default so unsigned fleet plugins do
+	// not fail startup verification.
+	if manifest.Trusted && manifest.Signature == "" && !strictPluginSignatures() {
+		obs.Info("skipping verification for trusted unsigned plugin", obs.Field{
+			"plugin":       manifest.Name,
+			"plugin_group": manifest.PluginGroup,
 		})
 		return nil
 	}

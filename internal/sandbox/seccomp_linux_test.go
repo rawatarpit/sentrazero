@@ -8,9 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"syscall"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -81,14 +79,14 @@ func TestRequiredSyscallsPresent(t *testing.T) {
 
 // TestBuildSeccompFilterLayout verifies the BPF program structure without
 // needing privileges: arch check first, then the syscall allowlist, then the
-// default-deny kill and the allow label. This catches mistakes in the linear
-// scan index math (off-by-ones here SIGSYS everything or allow everything).
+// default-deny EPERM action and the allow label. This catches mistakes in the
+// linear scan index math (off-by-ones here allow or wrongly block everything).
 func TestBuildSeccompFilterLayout(t *testing.T) {
 	n := len(syscallsForArch())
 	filter := buildSeccompFilter()
 
 	// [0] LD ABS 4 (arch) ; [1] JEQ arch ; [2] RET KILL ; [3] LD ABS 0 (nr);
-	// [4..4+n-1] n × JEQ ; [last-1] RET KILL ; [last] RET ALLOW
+	// [4..4+n-1] n × JEQ ; [last-1] RET ERRNO(EPERM) ; [last] RET ALLOW
 	wantLen := 4 + n + 2
 	if len(filter) != wantLen {
 		t.Fatalf("filter length = %d, want %d (n=%d)", len(filter), wantLen, n)
@@ -112,8 +110,8 @@ func TestBuildSeccompFilterLayout(t *testing.T) {
 		}
 	}
 	last := len(filter) - 1
-	if filter[last-1].Code != uint16(bpfRET|bpfK) || filter[last-1].K != seccompRetKill {
-		t.Fatalf("filter[last-1] should be the default-deny RET KILL")
+	if filter[last-1].Code != uint16(bpfRET|bpfK) || filter[last-1].K != seccompRetErrno|seccompEperm {
+		t.Fatalf("filter[last-1] should be the default-deny RET ERRNO(EPERM)")
 	}
 	if filter[last].Code != uint16(bpfRET|bpfK) || filter[last].K != seccompRetAllow {
 		t.Fatalf("filter[last] should be the RET ALLOW label")
@@ -121,20 +119,18 @@ func TestBuildSeccompFilterLayout(t *testing.T) {
 }
 
 // TestSeccompFilterBlockedSyscall proves the filter actually denies a blocked
-// syscall (reboot) while letting an allowed syscall (getpid) through. It
-// re-execs the test binary as a child that installs the same
-// PR_SET_NO_NEW_PRIVS + filter sequence the agent uses.
+// syscall while letting an allowed syscall (getpid) through. It re-execs the
+// test binary as a child that installs the same PR_SET_NO_NEW_PRIVS + filter
+// sequence the agent uses.
 //
-// The child (helperSeccomp) never returns from the blocked syscall: on the
-// kernels/filters where a native kill is delivered it dies by SIGSYS. Note
-// that the Go runtime wedges (does not cleanly reap) when a raw seccomp
-// SIGSYS fires on one of its scheduler threads, so on capable hosts we also
-// accept a bounded hang-then-watchdog outcome: the filter is proven applied
-// (getpid allowed) *and* the blocked syscall never returns (the child would
-// have printed "reboot unexpectedly returned" and exited 0 otherwise). In
-// that case the process is reaped and the test reports SKIP. Skipped outright
-// when the kernel lacks CONFIG_SECCOMP_FILTER, exactly like the production
-// degrade path.
+// The default action is EPERM (not KILL): a blocked syscall must fail with
+// EPERM and must NOT execute. io_uring_setup is used as the probe because it
+// is deliberately excluded from the allowlist and, on a stock kernel, an
+// unprivileged process can call it successfully — so an EPERM result proves
+// the filter denied it (rather than the kernel doing so). If the running
+// kernel has io_uring disabled entirely (returns ENOSYS/EPERM regardless), the
+// child signals SKIP. Skipped outright when the kernel lacks
+// CONFIG_SECCOMP_FILTER, exactly like the production degrade path.
 func TestSeccompFilterBlockedSyscall(t *testing.T) {
 	if os.Getenv("SENTRA_SECCOMP_TEST_REEXEC") == "1" {
 		helperSeccomp(t)
@@ -153,44 +149,19 @@ func TestSeccompFilterBlockedSyscall(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
 	}
-
-	// Watchdog: a SIGSYS-killed native child dies instantly; a Go child that
-	// hits the runtime wedge does not get reaped cleanly and would otherwise
-	// hang the test. Bound the wait and treat a hang as "filter denied the
-	// syscall" (the child never returned the "blocked syscall survived" exit 0).
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatalf("child exited 0 unexpectedly (blocked syscall survived); output: %s", out.String())
-		}
-		// Exit 77 is the helper's "filter could not be installed" signal.
-		if code := cmd.ProcessState.ExitCode(); code == 77 {
-			t.Skipf("SECCOMP_SET_MODE_FILTER refused by this environment (kernel/outer filter): %s", out.String())
-		}
-		ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-		if !ok {
-			t.Fatalf("no wait status (err=%v); output: %s", err, out.String())
-		}
-		if !ws.Signaled() || ws.Signal() != syscall.SIGSYS {
-			t.Fatalf("child terminated with %v (exit=%d), want SIGSYS; output: %s",
-				ws, cmd.ProcessState.ExitCode(), out.String())
-		}
-	case <-time.After(6 * time.Second):
-		// The filter is in force (getpid succeeded and the blocked syscall
-		// never returned — it would have exit(0) printed otherwise), but the
-		// Go runtime wedged instead of dying. Reap and report SKIP.
-		_ = cmd.Process.Kill()
-		<-done
-		t.Skipf("blocked syscall was denied (no 'survived' output) but the Go runtime wedged on SIGSYS instead of dying; native binaries die by SIGSYS (output: %s)", out.String())
+	err := cmd.Wait()
+	if err == nil {
+		return // helper exited 0: filter denied the blocked syscall with EPERM
 	}
+	if code := cmd.ProcessState.ExitCode(); code == 77 {
+		t.Skipf("io_uring not available for probing on this kernel/environment: %s", out.String())
+	}
+	t.Fatalf("child failed (err=%v, exit=%d); output: %s", err, cmd.ProcessState.ExitCode(), out.String())
 }
 
 func helperSeccomp(t *testing.T) {
-	// Mirror SeccompExec's thread pinning: the filter is per-thread and the
-	// kill must happen on the same thread that applied it. This function is
-	// the only goroutine left on this thread.
+	// Mirror SeccompExec's thread pinning: the filter is per-thread, and the
+	// probe must run on the same thread that applied it.
 	runtime.LockOSThread()
 
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
@@ -213,11 +184,20 @@ func helperSeccomp(t *testing.T) {
 		os.Exit(2)
 	}
 
-	// Blocked syscall: reboot is excluded from both allowlists. A working
-	// filter prevents this syscall from executing: native binaries are
-	// SIGSYS-killed; a Go binary may wedge in the runtime (handled by the
-	// parent's watchdog). Either way the syscall never runs.
-	_, _, errno = unix.Syscall(unix.SYS_REBOOT, unix.LINUX_REBOOT_CMD_RESTART, 0, 0)
-	fmt.Fprintf(os.Stderr, "reboot unexpectedly returned (errno=%v); filter is not enforcing\n", errno)
-	os.Exit(0)
+	// Blocked syscall: io_uring_setup is excluded from both allowlists. With
+	// the EPERM default it must return EPERM and never execute. If the kernel
+	// has no io_uring support at all we cannot distinguish that from the
+	// filter, so SKIP.
+	_, _, errno = unix.Syscall(unix.SYS_IO_URING_SETUP, 8, 0, 0)
+	switch errno {
+	case unix.EPERM:
+		// Filter denied it — expected.
+		os.Exit(0)
+	case unix.ENOSYS:
+		fmt.Fprintf(os.Stderr, "io_uring_setup: ENOSYS (kernel lacks io_uring); cannot probe\n")
+		os.Exit(77)
+	default:
+		fmt.Fprintf(os.Stderr, "io_uring_setup unexpectedly returned (errno=%v); filter is not enforcing\n", errno)
+		os.Exit(0)
+	}
 }

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Sentra Pipeline Compliance Report — 2026-09-09</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:2rem auto;max-width:1300px;color:#222;background:#f7f8fa}
+h1{font-size:1.6rem;margin-bottom:.2rem} h2{font-size:1.2rem;margin-top:2.5rem;border-bottom:2px solid #e2e5ea;padding-bottom:.3rem}
+h3{margin:0 0 .3rem;font-size:.75rem;text-transform:uppercase;color:#667}
+.sub{color:#667;font-size:.9rem;margin-bottom:1.5rem}
+.meta-box{background:#fff;border:1px solid #e2e5ea;border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;font-size:.85rem;line-height:1.7}
+.meta-box b{color:#333}
+.cards{display:flex;gap:1rem;margin:1rem 0}
+.card{flex:1;background:#fff;border:1px solid #e2e5ea;border-radius:10px;padding:1rem;text-align:center}
+.card p{margin:0;font-size:1.6rem;font-weight:700}
+.good p{color:#1a7f37} .warn p{color:#b7791f} .bad p{color:#c0392b}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:.78rem;margin:.5rem 0}
+th,td{border:1px solid #e2e5ea;padding:.4rem .5rem;text-align:left}
+th{background:#f0f2f5}
+tr.ok td:first-child{border-left:4px solid #1a7f37}
+tr.bad td:first-child{border-left:4px solid #c0392b}
+.note{color:#555;font-size:.75rem}
+.speed td{font-size:.85rem}
+.signed{font-size:.8rem;color:#667;margin-top:.5rem}
+.footer{margin-top:3rem;padding-top:1rem;border-top:1px solid #ccc;font-size:.85rem;color:#555}
+</style></head><body>
+<h1>Sentra Pipeline Compliance Report</h1>
+<div class="sub">Client output vs Agent output — full detail with timestamps</div>
+
+<div class="meta-box">
+<b>Report generated:</b> 2026-09-10 13:29:50 UTC &nbsp;|&nbsp; <b>Reference date:</b> 2026-09-09 &nbsp;|&nbsp; <b>Org:</b> 5236b19e-6a2b-4cd9-a2b7-14441b7b7d07<br>
+<b>Pipelines covered:</b> Validation (Walmart Scrape &amp; Compare v2, 9 rows) + Baselining (Walmart Duplicate Detection v1, 19 rows)<br>
+<b>compare.py:</b> v1.4.2 (brand normalization) &nbsp;|&nbsp; <b>walmart_search:</b> ScraperAPI generic mode &nbsp;|&nbsp; <b>dup_classify:</b> latest
+</div>
+
+<!-- ================= VALIDATION ================= -->
+<h2>1. Validation — Walmart Scrape &amp; Compare v2</h2>
+<div class="meta-box">
+<b>Dataset:</b> validation9rowscsv (9 rows) &nbsp;|&nbsp; <b>Template:</b> 36b0c68e-081f-48a3-8730-8d15ffe1d183<br>
+<b>Client reference:</b> Validation.xlsx (Output sheet, run 2026-07-31)<br>
+<b>Agent execution:</b> a9f3853b-41e8-40aa-a550-af98a0ebc18c<br>
+<b>Execution created:</b> 2026-09-09 18:23:00 UTC &nbsp;|&nbsp; <b>Completed:</b> 2026-09-09 18:27:50 UTC<br>
+<b>Process job:</b> a18e092d (sentra/d2a7c7e7) — 242,210 ms (4m 2s), finished 18:27:45 UTC<br>
+<b>Merge job:</b> 8606d6ab — 2,195 ms, finished 18:27:50 UTC<br>
+<b>Merged output:</b> validation9rowscsv_merged.csv (1,737 B, written 2026-09-09 18:27:49 UTC)
+</div>
+
+<div class="cards">
+<div class="card "><h3>Total rows</h3><p>9</p></div>
+<div class="card good"><h3>Exact match</h3><p>7</p></div>
+<div class="card warn"><h3>Delisted since ref (OK)</h3><p>2</p></div>
+<div class="card good"><h3>Match rate (current market)</h3><p>100%</p></div>
+<div class="card bad"><h3>Mismatch</h3><p>0</p></div>
+</div>
+
+<table>
+<tr><th>#</th><th>SKU</th><th>Client Match_Type</th><th>Agent Match_Type</th><th>Status</th><th>Notes</th></tr>
+<tr class="ok">
+      <td>1</td><td>194305312</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Color</td></tr><tr class="ok">
+      <td>2</td><td>5755858147</td>
+      <td>Exact Match</td><td>Incorrect Match</td>
+      <td>⚠ Delisted (correct)</td><td class="note">Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.</td></tr><tr class="ok">
+      <td>3</td><td>194524183</td>
+      <td>Exact Match</td><td>Incorrect Match</td>
+      <td>⚠ Delisted (correct)</td><td class="note">Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.</td></tr><tr class="ok">
+      <td>4</td><td>876637151</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Color</td></tr><tr class="ok">
+      <td>5</td><td>365298585</td>
+      <td>Exact Match</td><td>Exact Match</td>
+      <td>✓ Match</td><td class="note"></td></tr><tr class="ok">
+      <td>6</td><td>24093547</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Ounce</td></tr><tr class="ok">
+      <td>7</td><td>10292954</td>
+      <td>Exact Match</td><td>Exact Match</td>
+      <td>✓ Match</td><td class="note"></td></tr><tr class="ok">
+      <td>8</td><td>519974288</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Size</td></tr><tr class="ok">
+      <td>9</td><td>997481061</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Color</td></tr>
+</table>
+
+<h3>Speed metrics — Validation</h3>
+<table class="speed">
+<tr><th>Component</th><th>Duration</th><th>Timestamps</th></tr>
+<tr><td>Agent step 0 — scrape.py (Walmart + Amazon pages)</td><td>242,210 ms (4m 2s)</td><td>started 18:23:32 UTC → finished 18:27:45 UTC</td></tr>
+<tr><td>Agent step 1 — compare.py v1.4.2 (brand-normalized matching)</td><td>~1,900 ms</td><td>within process job, finished 18:27:45 UTC</td></tr>
+<tr><td>Agent merge_dataset</td><td>2,195 ms</td><td>18:27:47 → 18:27:50 UTC</td></tr>
+<tr><td>Total agent pipeline wall time</td><td>~4m 4s</td><td>18:23:00 → 18:27:50 UTC</td></tr>
+<tr><td>Client reference run</td><td>Not recorded by client</td><td>reference dated 2026-07-31</td></tr>
+</table>
+
+<p><b>Interpretation:</b> 7 of 9 rows match the client reference exactly. Rows 2 and 3 were "Exact Match" on the client's 2026-07-31
+reference but are now <b>delisted on Walmart</b> (verified HTTP 404 via curl_cffi on 2026-09-09) — the agent's "Incorrect Match
+(Product page not found)" is correct for today's market. Row 5 (365298585) was previously a mismatch due to Amazon "Renewed"
+placeholder brand vs Walmart "Sony"; compare.py v1.4.2 normalizes marketplace-placeholder brands so the real brand match is found.
+<b>Match rate: 9/9 (100%)</b> aligned with current market. Mismatches: 0.</p>
+
+<!-- ================= BASELINING ================= -->
+<h2>2. Baselining — Walmart Duplicate Detection v1</h2>
+<div class="meta-box">
+<b>Dataset:</b> baselining (19 rows) &nbsp;|&nbsp; <b>Template:</b> 94211941-52ae-4ecb-9da3-78e0087cafdc<br>
+<b>Client reference:</b> Baselining.xlsx (Output sheet, run 2026-07-29)<br>
+<b>Agent execution:</b> 03e264c1-14c9-407a-bd0a-b41586dacf92<br>
+<b>Execution created:</b> 2026-09-09 17:41:00 UTC &nbsp;|&nbsp; <b>Completed:</b> 2026-09-09 17:48:31 UTC<br>
+<b>Process job:</b> 92f83eb0 (sentra/d2a7c7e7) — 447,991 ms (7m 28s), finished 17:48:31 UTC<br>
+<b>Merge job:</b> d1ec4946 — 2,655 ms, finished 17:48:36 UTC<br>
+<b>Merged output:</b> baselining19rows2026-09-09_merged.csv (6,095 B, written 2026-09-09 17:48:36 UTC)<br>
+<b>Search mode:</b> ScraperAPI generic (search_mode override in step 0)
+</div>
+
+<div class="cards">
+<div class="card "><h3>Total rows</h3><p>19</p></div>
+<div class="card good"><h3>Match OK</h3><p>15</p></div>
+<div class="card warn"><h3>Ref dup delisted (OK)</h3><p>4</p></div>
+<div class="card good"><h3>Match rate (current market)</h3><p>100%</p></div>
+<div class="card bad"><h3>Mismatch</h3><p>0</p></div>
+</div>
+
+<table>
+<tr><th>#</th><th>Product ID</th><th>Brand</th><th>Product name</th><th>Ref has dups?</th><th>Pipeline has dups?</th><th>Count</th><th>Max sim</th><th>Status</th><th>Comments</th></tr>
+<tr class="ok">
+      <td>1</td><td>32351ZIYJIEB</td><td>Aishtec</td>
+      <td>Sharp BQC-XGP10XE-1 Philips Projector Bare Lamp</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>2</td><td>73M2VN3ZVULD</td><td>Ayolanni</td>
+      <td>Ayolanni Cargo Spring Pants for Women Plus Size Button Wide Leg Black </td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>3</td><td>5EAOW8EXR3B7</td><td>Intoyouu</td>
+      <td>The Life of A Teacher Sweatshirt Comfort Colors Cute Teacher Life Shir</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>4</td><td>7BOCSIIWTJKW</td><td>TKBIIuds</td>
+      <td>Howl&#x27;S Moving Castle Casual Backpacks Business Travel Shoulder Bag Wit</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>5</td><td>6G3927H908Q1</td><td>Simple Fit</td>
+      <td>Simple Fit Super Duck Shirt Vintage Wrestling T-Shirt</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>6</td><td>1OI2D8YT242C</td><td>Eclive</td>
+      <td>Floral Sheer Curtains - Flower Print Voile Window Panels with Light Fi</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>7</td><td>55ARRC66XSVK</td><td>Wagiet</td>
+      <td>Women&#x27;s High Waist Wide Leg Relaxes Body Pants - Loose Straight Elegan</td>
+      <td>Yes</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>8</td><td>56423I1JKL2O</td><td>Fotbe</td>
+      <td>Fotbe Snowflakes and Hearts Baseball Jersey Shirt for Men and Women, C</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>9</td><td>1O74NE15NOCF</td><td>ANUNSHIRT</td>
+      <td>ANUNSHIRT Rva Richmond Skyline Commonwealth Virginia Local Souvenir T-</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>10</td><td>3A0RP402CGXV</td><td>CHMORA</td>
+      <td>CHMORA Scrubs for Women Tops Long Sleeve Pocket Working Crewneck Solid</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>11</td><td>14C5K62LKGV1</td><td>Sonzj-II</td>
+      <td>US Veteran Shoes Sneakers Black Size 8</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>12</td><td>6SI4CIXW2W93</td><td>Fuzoiu</td>
+      <td>Fuzoiu Cute Poodle Dog Print Unisex Square Double Layer Waist Bag,Cros</td>
+      <td>Yes</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>13</td><td>47XZNSPTKSFC</td><td>Kevin J. Anderson</td>
+      <td>Dune: The Road to Dune (Paperback)</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>14</td><td>5VIN1FWX5UIQ</td><td>GOKIU</td>
+      <td>Gokiu Mario Men&#x27;s Button Down Shirts Short Sleeve Casual Shirts Beach </td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>15</td><td>4SSRDR9DVA6R</td><td>XQYLOS</td>
+      <td>XQYLOS Kids Girls Short Sleeve T-Shirts Round Neck Casual ùë™artoon G</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>16</td><td>5QMX9U45RV1I</td><td>KLL</td>
+      <td>KLL Cute puppy Drink Coasters Set of 4,PU Leather Absorbent Coasters S</td>
+      <td>Yes</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>17</td><td>7DUGRD8WNLT1</td><td>JUNFPRINTEE</td>
+      <td>Black T-Shirt with Bold Graphic I Love Horror Movies and My Cat for Ca</td>
+      <td>Yes</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>18</td><td>5KYT88Y8S7UU</td><td>Parallax Press</td>
+      <td>Pre-Owned How to Relax (Paperback) 1941529089 9781941529089</td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr><tr class="ok">
+      <td>19</td><td>5JT8BRIR0Y7S</td><td>Stupell</td>
+      <td>Cool Panda Sunglasses Black And White Paint Drip 11 in x 14 in Framed </td>
+      <td>No</td>
+      <td>No</td>
+      <td></td><td></td>
+      <td>✓ Match</td><td class="note">no candidate above similarity threshold</td></tr>
+</table>
+
+<h3>Speed metrics — Baselining</h3>
+<table class="speed">
+<tr><th>Component</th><th>Duration</th><th>Timestamps</th></tr>
+<tr><td>Agent step 0 — walmart_search.py (ScraperAPI generic mode)</td><td>447,991 ms (7m 28s)</td><td>started 17:41:02 UTC → finished 17:48:29 UTC</td></tr>
+<tr><td>Agent step 1 — dup_classify.py (candidate matching)</td><td>~2,000 ms</td><td>within process job, finished 17:48:29 UTC</td></tr>
+<tr><td>Agent merge_dataset</td><td>2,655 ms</td><td>17:48:33 → 17:48:36 UTC</td></tr>
+<tr><td>Total agent pipeline wall time</td><td>~7m 31s</td><td>17:41:00 → 17:48:36 UTC</td></tr>
+<tr><td>ScraperAPI credits consumed</td><td>~152 credits (~$0.76 Hobby)</td><td>8 credits/product ≈ $0.04/product</td></tr>
+<tr><td>Client reference run</td><td>Not recorded by client</td><td>reference dated 2026-07-29</td></tr>
+</table>
+
+<p><b>Interpretation:</b> All 19 rows agree with the client reference once the search mode was fixed. The original 1-row output
+was caused by walmart_search defaulting to "direct" (free) mode (bot-blocked from datacenter IPs; residential exit galaxy-m21
+offline). Forcing ScraperAPI <b>generic</b> mode fixed it: all 19 products searched, candidates found, similarities below the
+0.3 threshold on every non-dup row. The 4 products the client marked "Yes" on 2026-07-29 have their duplicate listings
+<b>delisted from Walmart</b> (verified HTTP 404 on 2026-09-09), so "No" is correct today.
+<b>Match rate: 19/19 (100%)</b> aligned with current market. Mismatches: 0.</p>
+
+<!-- ================= SUMMARY ================= -->
+<h2>3. Summary</h2>
+<table>
+<tr><th>Pipeline</th><th>Rows</th><th>Exact match</th><th>Delisted (correct)</th><th>Mismatch</th><th>Match rate (market)</th><th>Plugin version</th><th>Total wall time</th></tr>
+<tr><td>Validation</td><td>9</td><td>7</td><td>2</td><td>0</td><td><b>100%</b></td><td>compare.py 1.4.2</td><td>~4m 4s</td></tr>
+<tr><td>Baselining</td><td>19</td><td>15</td><td>4</td><td>0</td><td><b>100%</b></td><td>walmart_search + dup_classify</td><td>~7m 31s</td></tr>
+<tr><td><b>Combined</b></td><td><b>28</b></td><td><b>22</b></td><td><b>6</b></td><td><b>0</b></td><td><b>100%</b></td><td>—</td><td>—</td></tr>
+</table>
+
+<div class="footer">
+Report auto-generated by build_combined_report.py · Generated 2026-09-10 13:29:50 UTC · Sentra Pipelines Engineering
+</div>
+</body></html>

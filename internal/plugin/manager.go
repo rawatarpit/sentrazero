@@ -17,14 +17,33 @@ import (
 	"sentra-agent/internal/obs"
 )
 
-func verifyManifestSignatureFromEnv(manifest Manifest) error {
-	if manifest.Trusted && manifest.Signature == "" {
-		obs.Info("skipping signature verification for trusted plugin", obs.Field{
-			"plugin": manifest.Name,
-		})
-		return nil
+// strictPluginSignatures reports whether unsigned plugins must be rejected
+// outright. Default: false, which preserves the historical behaviour of
+// executing trusted-but-unsigned plugins. Enable with
+// SENTRA_STRICT_PLUGIN_SIGNATURES=1 once every plugin in the org has been
+// signed by the platform signing key (see plugin_signing_keys).
+func strictPluginSignatures() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SENTRA_STRICT_PLUGIN_SIGNATURES"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
+}
+
+func verifyManifestSignatureFromEnv(manifest Manifest) error {
 	if manifest.Signature == "" {
+		// Backwards-compatible trust: a trusted plugin with no signature is
+		// allowed to run unless strict signature enforcement is enabled. This
+		// keeps existing (unsigned) fleet plugins working during the signing
+		// rollout instead of hard-failing agent startup.
+		if manifest.Trusted && !strictPluginSignatures() {
+			obs.Info("skipping signature verification for trusted unsigned plugin", obs.Field{
+				"plugin":       manifest.Name,
+				"plugin_group": manifest.PluginGroup,
+			})
+			return nil
+		}
 		return fmt.Errorf("manifest signature is required but missing")
 	}
 	if manifest.SignatureKeyID == "" {
@@ -61,15 +80,30 @@ func verifyManifestSignatureFromEnv(manifest Manifest) error {
 		return fmt.Errorf("invalid signature encoding: %w", err)
 	}
 
-	signingData := fmt.Sprintf("%s|%s|%s|%s",
-		manifest.Name,
-		manifest.Version,
-		manifest.Filename,
-		manifest.Checksum,
-	)
-	hash := sha256.Sum256([]byte(signingData))
+	// Canonical payload: SHA256(plugin file bytes) — must match what
+	// register_plugin/upload_plugin_file sign (crypto.subtle.digest SHA-256
+	// over the uploaded binary) and VerifyPluginSignature verifies.
+	baseDir, err := EnsurePluginDir()
+	if err != nil {
+		return fmt.Errorf("plugin dir lookup failed: %w", err)
+	}
+	platform := getCurrentPlatform()
+	pluginDir := filepath.Join(baseDir, manifest.Name, platform)
+	manifestPath := filepath.Join(pluginDir, manifest.Name+".json")
+	if data, readErr := os.ReadFile(manifestPath); readErr == nil {
+		var disk Manifest
+		if json.Unmarshal(data, &disk) == nil && disk.Filename != "" {
+			manifest.Filename = disk.Filename
+		}
+	}
+	pluginPath := filepath.Join(pluginDir, manifest.Filename)
+	pluginBytes, err := os.ReadFile(pluginPath)
+	if err != nil {
+		return fmt.Errorf("failed to read plugin file for signature verification: %w", err)
+	}
+	fileHash := sha256.Sum256(pluginBytes)
 
-	if !ed25519.Verify(pubKey, hash[:], sigBytes) {
+	if !ed25519.Verify(pubKey, fileHash[:], sigBytes) {
 		obs.Warn("manifest signature verification failed", obs.Field{
 			"plugin_name": manifest.Name,
 			"key_id":      manifest.SignatureKeyID,

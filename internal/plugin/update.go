@@ -130,6 +130,7 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 				Checksum:       remote.Checksum,
 				PluginType:     remote.PluginType,
 				Language:       remote.Language,
+				PluginGroup:    remote.PluginGroup,
 				Trusted:        remote.Trusted,
 				Signature:      remote.Signature,
 				SignatureKeyID: remote.SignatureKeyID,
@@ -160,7 +161,7 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 
 				// Bug #11 fix: Verify signature after download
 				if remote.Signature != "" && remote.SignatureKeyID != "" {
-					if err := VerifyPluginSignature(ctx, binaryPath, remote.Signature, remote.SignatureKeyID); err != nil {
+					if err := VerifyPluginSignature(ctx, manifestPath, remote.Signature, remote.SignatureKeyID); err != nil {
 						log.Printf("⚠️ Plugin %s/%s signature verification failed: %v", pluginName, platformKey, err)
 						os.Remove(binaryPath)
 						manifestPathBroken := filepath.Join(pluginDir, pluginName+"_broken_"+time.Now().Format("20060102_150405")+".json")

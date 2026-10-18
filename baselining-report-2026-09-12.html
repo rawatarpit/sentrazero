@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Baselining Report — 2026-09-12</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:2rem auto;max-width:1200px;color:#222;background:#f7f8fa}
+h1{font-size:1.5rem}h2{font-size:1.15rem;margin-top:2rem}
+.cards{display:flex;gap:1rem;margin:1rem 0}
+.card{flex:1;background:#fff;border:1px solid #e2e5ea;border-radius:10px;padding:1rem;text-align:center}
+.card h3{margin:0 0 .3rem;font-size:.75rem;text-transform:uppercase;color:#667}
+.card p{margin:0;font-size:1.6rem;font-weight:700}
+.good p{color:#1a7f37} .warn p{color:#b7791f} .bad p{color:#c0392b}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:.8rem;margin:.5rem 0}
+th,td{border:1px solid #e2e5ea;padding:.4rem .5rem;text-align:left}
+th{background:#f0f2f5}
+tr.ok td:first-child{border-left:4px solid #1a7f37}
+tr.bad td:first-child{border-left:4px solid #c0392b}
+.note{color:#555;font-size:.75rem}
+.speed td{font-size:.85rem}
+.meta{color:#667;font-size:.85rem}
+</style></head><body>
+<h1>Baselining Report — client vs agent (published-duplicates detection)</h1>
+<div class="meta">Template: Walmart Duplicate Detection v1 (94211941) · Dataset: baselining_19rows_2026-09-09 (d35b5991) · Agent execution: 4f574f30 (2026-09-12 13:35Z, agent sentra) · walmart_search.py ScraperAPI generic mode · dup_classify.py · merge_dataset</div>
+
+<div class="cards">
+  <div class="card"><h3>Total rows</h3><p>19</p></div>
+  <div class="card good"><h3>Match OK</h3><p>15</p></div>
+  <div class="card warn"><h3>Ref dup delisted (OK)</h3><p>4</p></div>
+  <div class="card bad"><h3>Mismatch</h3><p>0</p></div>
+</div>
+<h2>Per-row comparison</h2>
+<table>
+<tr><th>#</th><th>Product ID</th><th>Brand</th><th>Product name</th><th>Ref has dups?</th><th>Pipeline has dups?</th><th>Pipeline count</th><th>Max similarity</th><th>Status</th><th>Comments</th></tr>
+<tr class="ok">
+      <td>1</td><td>32351ZIYJIEB</td><td>Aishtec</td>
+      <td>Sharp BQC-XGP10XE-1 Philips Projector Bare Lamp</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>2</td><td>73M2VN3ZVULD</td><td>Ayolanni</td>
+      <td>Ayolanni Cargo Spring Pants for Women Plus Size Button Wide </td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>3</td><td>5EAOW8EXR3B7</td><td>Intoyouu</td>
+      <td>The Life of A Teacher Sweatshirt Comfort Colors Cute Teacher</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>4</td><td>7BOCSIIWTJKW</td><td>TKBIIuds</td>
+      <td>Howl&#x27;S Moving Castle Casual Backpacks Business Travel Should</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>5</td><td>6G3927H908Q1</td><td>Simple Fit</td>
+      <td>Simple Fit Super Duck Shirt Vintage Wrestling T-Shirt</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>6</td><td>1OI2D8YT242C</td><td>Eclive</td>
+      <td>Floral Sheer Curtains - Flower Print Voile Window Panels wit</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>7</td><td>55ARRC66XSVK</td><td>Wagiet</td>
+      <td>Women&#x27;s High Waist Wide Leg Relaxes Body Pants - Loose Strai</td><td>Yes</td><td>No</td>
+      <td></td><td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>8</td><td>56423I1JKL2O</td><td>Fotbe</td>
+      <td>Fotbe Snowflakes and Hearts Baseball Jersey Shirt for Men an</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>9</td><td>1O74NE15NOCF</td><td>ANUNSHIRT</td>
+      <td>ANUNSHIRT Rva Richmond Skyline Commonwealth Virginia Local S</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>10</td><td>3A0RP402CGXV</td><td>CHMORA</td>
+      <td>CHMORA Scrubs for Women Tops Long Sleeve Pocket Working Crew</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>11</td><td>14C5K62LKGV1</td><td>Sonzj-II</td>
+      <td>US Veteran Shoes Sneakers Black Size 8</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">Different size</td></tr><tr class="ok">
+      <td>12</td><td>6SI4CIXW2W93</td><td>Fuzoiu</td>
+      <td>Fuzoiu Cute Poodle Dog Print Unisex Square Double Layer Wais</td><td>Yes</td><td>No</td>
+      <td></td><td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>13</td><td>47XZNSPTKSFC</td><td>Kevin J. Anderson</td>
+      <td>Dune: The Road to Dune (Paperback)</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>14</td><td>5VIN1FWX5UIQ</td><td>GOKIU</td>
+      <td>Gokiu Mario Men&#x27;s Button Down Shirts Short Sleeve Casual Shi</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>15</td><td>4SSRDR9DVA6R</td><td>XQYLOS</td>
+      <td>XQYLOS Kids Girls Short Sleeve T-Shirts Round Neck Casual ù</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>16</td><td>5QMX9U45RV1I</td><td>KLL</td>
+      <td>KLL Cute puppy Drink Coasters Set of 4,PU Leather Absorbent </td><td>Yes</td><td>No</td>
+      <td></td><td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>17</td><td>7DUGRD8WNLT1</td><td>JUNFPRINTEE</td>
+      <td>Black T-Shirt with Bold Graphic I Love Horror Movies and My </td><td>Yes</td><td>No</td>
+      <td></td><td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>18</td><td>5KYT88Y8S7UU</td><td>Parallax Press</td>
+      <td>Pre-Owned How to Relax (Paperback) 1941529089 9781941529089</td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">Different Isbn</td></tr><tr class="ok">
+      <td>19</td><td>5JT8BRIR0Y7S</td><td>Stupell</td>
+      <td>Cool Panda Sunglasses Black And White Paint Drip 11 in x 14 </td><td>No</td><td>No</td>
+      <td></td><td></td><td>✓ Match</td><td class="note">Different size</td></tr>
+</table>
+<h2>Speed metrics</h2>
+<table class="speed"><tr><th>Component</th><th>Duration</th></tr><tr><td>Agent step 0 — walmart_search.py (ScraperAPI generic mode)</td><td>650,305 ms (10m 50s)</td></tr><tr><td>Agent step 1 — dup_classify.py (candidate matching)</td><td>~2,000 ms</td></tr><tr><td>Agent merge_dataset</td><td>2,604 ms</td></tr><tr><td>Total agent pipeline wall time</td><td>~10m 55s</td></tr><tr><td>ScraperAPI key used</td><td>Test key b264d9bd… (production key exhausted its monthly quota on 2026-09-12)</td></tr><tr><td>Client reference run (2026-07-29)</td><td>Not recorded by client</td></tr></table>
+<h2>Interpretation</h2>
+<p>All 19 rows agree with the client reference once the search mode is set to ScraperAPI <b>generic</b> mode.
+The production ScraperAPI key exhausted its monthly quota on 2026-09-12 (HTTP 403 on every query, causing the first
+baselining attempt to run until the sandbox killed it at 15 min). Re-run with the per-run test key
+(<code>b264d9bd…</code>) in the step config override: all 19 products were searched, candidates found, and similarities
+below the 0.3 threshold on every non-dup row.</p>
+<p>The 4 products the client marked "Yes" (have published dups) on 2026-07-29 now have their duplicate listings
+<b>delisted from Walmart</b> (verified HTTP 404 on 2026-09-09), so the pipeline correctly answers "No" today.</p>
+<p><b>Match rate:</b> 15/19 exact + 4/19 ref-dup-delisted (both correct) = <b>19/19 (100%)</b> aligned with the current market. Mismatches: 0.</p>
+</body></html>

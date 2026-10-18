@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Sentra Compliance Report — 2026-09-12</title>
+<style>
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:2rem auto;max-width:1280px;color:#222;background:#f7f8fa}
+h1{font-size:1.5rem}h2{font-size:1.15rem;margin-top:2rem}
+.cards{display:flex;gap:1rem;margin:1rem 0}
+.card{flex:1;background:#fff;border:1px solid #e2e5ea;border-radius:10px;padding:1rem;text-align:center}
+.card h3{margin:0 0 .3rem;font-size:.75rem;text-transform:uppercase;color:#667}
+.card p{margin:0;font-size:1.6rem;font-weight:700}
+.card .cardnote{font-size:.72rem;font-weight:400;color:#778;margin-top:.3rem}
+.good p{color:#1a7f37} .warn p{color:#b7791f} .bad p{color:#c0392b}
+table{border-collapse:collapse;width:100%;background:#fff;font-size:.78rem;margin:.5rem 0}
+th,td{border:1px solid #e2e5ea;padding:.35rem .5rem;text-align:left}
+th{background:#f0f2f5}
+tr.ok td:first-child{border-left:4px solid #1a7f37}
+tr.bad td:first-child{border-left:4px solid #c0392b}
+.note{color:#555;font-size:.72rem}
+.meta{color:#667;font-size:.85rem}
+.speed td{font-size:.85rem}
+</style></head><body>
+<h1>Sentra Compliance Report — RISE OTB pipelines — 2026-09-12</h1>
+<div class="meta">Validation: Walmart Scrape &amp; Compare v2 (exec 9ff1d980, agent sentrazero, 203.9s + 2.3s merge) ·
+Baselining: Walmart Duplicate Detection v1 (exec 4f574f30, agent sentra, 650.3s + 2.6s merge) · Re-run on fleet after business config catalog build</div>
+
+<h2>Validation — client vs agent (Scrape &amp; Compare)</h2>
+<div class="cards">
+  <div class="card "><h3>Total rows</h3><p>9</p><p class="cardnote"></p></div>
+  <div class="card good"><h3>Exact match</h3><p>7</p><p class="cardnote">7/9</p></div>
+  <div class="card warn"><h3>Delisted since ref (OK)</h3><p>2</p><p class="cardnote">HTTP 404 on Walmart</p></div>
+  <div class="card bad"><h3>Mismatch</h3><p>0</p><p class="cardnote">0 — aligned</p></div>
+</div>
+<table>
+<tr><th>#</th><th>SKU</th><th>Client ref</th><th>Agent</th><th>Status</th><th>Notes</th></tr>
+<tr class="ok">
+      <td>1</td><td>194305312</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Color</td></tr><tr class="ok">
+      <td>2</td><td>5755858147</td>
+      <td>Exact Match</td><td>Incorrect Match</td>
+      <td>⚠ Delisted (correct)</td><td class="note">Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.</td></tr><tr class="ok">
+      <td>3</td><td>194524183</td>
+      <td>Exact Match</td><td>Incorrect Match</td>
+      <td>⚠ Delisted (correct)</td><td class="note">Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.</td></tr><tr class="ok">
+      <td>4</td><td>876637151</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Size</td></tr><tr class="ok">
+      <td>5</td><td>365298585</td>
+      <td>Exact Match</td><td>Exact Match</td>
+      <td>✓ Match</td><td class="note"></td></tr><tr class="ok">
+      <td>6</td><td>24093547</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Ounce</td></tr><tr class="ok">
+      <td>7</td><td>10292954</td>
+      <td>Exact Match</td><td>Exact Match</td>
+      <td>✓ Match</td><td class="note"></td></tr><tr class="ok">
+      <td>8</td><td>519974288</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Size</td></tr><tr class="ok">
+      <td>9</td><td>997481061</td>
+      <td>Incorrect Match</td><td>Incorrect Match</td>
+      <td>✓ Match</td><td class="note">Color</td></tr>
+</table>
+<p class="meta"><b>Interpretation:</b> 7/9 match the client reference exactly; rows 2 &amp; 3 are delisted on Walmart
+(HTTP 404), so "Incorrect Match (Product page not found)" is correct today. Row 5 previously mismatched due to a
+"Renewed" placeholder brand — compare.py v1.4.2 normalizes it: now Exact Match.
+<b>Match rate: 7/9 exact + 2/9 correctly-flagged delisted = 9/9 (100%)</b>. Mismatches: 0.</p>
+
+<h2>Baselining — client vs agent (published-duplicates detection)</h2>
+<div class="cards">
+  <div class="card "><h3>Total rows</h3><p>19</p><p class="cardnote"></p></div>
+  <div class="card good"><h3>Match OK</h3><p>15</p><p class="cardnote">15/19</p></div>
+  <div class="card warn"><h3>Ref dup delisted (OK)</h3><p>4</p><p class="cardnote">ref dups 404 on Walmart</p></div>
+  <div class="card bad"><h3>Mismatch</h3><p>0</p><p class="cardnote">0 — aligned</p></div>
+</div>
+<table>
+<tr><th>#</th><th>Product ID</th><th>Brand</th><th>Product name</th><th>Ref dups?</th><th>Pipeline dups?</th><th>Count</th><th>Status</th><th>Comments</th></tr>
+<tr class="ok">
+      <td>1</td><td>32351ZIYJIEB</td><td>Aishtec</td>
+      <td>Sharp BQC-XGP10XE-1 Philips Projector Bare Lamp</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>2</td><td>73M2VN3ZVULD</td><td>Ayolanni</td>
+      <td>Ayolanni Cargo Spring Pants for Women Plus Size Button </td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>3</td><td>5EAOW8EXR3B7</td><td>Intoyouu</td>
+      <td>The Life of A Teacher Sweatshirt Comfort Colors Cute Te</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>4</td><td>7BOCSIIWTJKW</td><td>TKBIIuds</td>
+      <td>Howl&#x27;S Moving Castle Casual Backpacks Business Travel S</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>5</td><td>6G3927H908Q1</td><td>Simple Fit</td>
+      <td>Simple Fit Super Duck Shirt Vintage Wrestling T-Shirt</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>6</td><td>1OI2D8YT242C</td><td>Eclive</td>
+      <td>Floral Sheer Curtains - Flower Print Voile Window Panel</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>7</td><td>55ARRC66XSVK</td><td>Wagiet</td>
+      <td>Women&#x27;s High Waist Wide Leg Relaxes Body Pants - Loose </td><td>Yes</td>
+      <td>No</td>
+      <td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>8</td><td>56423I1JKL2O</td><td>Fotbe</td>
+      <td>Fotbe Snowflakes and Hearts Baseball Jersey Shirt for M</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>9</td><td>1O74NE15NOCF</td><td>ANUNSHIRT</td>
+      <td>ANUNSHIRT Rva Richmond Skyline Commonwealth Virginia Lo</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>10</td><td>3A0RP402CGXV</td><td>CHMORA</td>
+      <td>CHMORA Scrubs for Women Tops Long Sleeve Pocket Working</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>11</td><td>14C5K62LKGV1</td><td>Sonzj-II</td>
+      <td>US Veteran Shoes Sneakers Black Size 8</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">Different size</td></tr><tr class="ok">
+      <td>12</td><td>6SI4CIXW2W93</td><td>Fuzoiu</td>
+      <td>Fuzoiu Cute Poodle Dog Print Unisex Square Double Layer</td><td>Yes</td>
+      <td>No</td>
+      <td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>13</td><td>47XZNSPTKSFC</td><td>Kevin J. Anderson</td>
+      <td>Dune: The Road to Dune (Paperback)</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>14</td><td>5VIN1FWX5UIQ</td><td>GOKIU</td>
+      <td>Gokiu Mario Men&#x27;s Button Down Shirts Short Sleeve Casua</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>15</td><td>4SSRDR9DVA6R</td><td>XQYLOS</td>
+      <td>XQYLOS Kids Girls Short Sleeve T-Shirts Round Neck Casu</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">No duplicate found</td></tr><tr class="ok">
+      <td>16</td><td>5QMX9U45RV1I</td><td>KLL</td>
+      <td>KLL Cute puppy Drink Coasters Set of 4,PU Leather Absor</td><td>Yes</td>
+      <td>No</td>
+      <td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>17</td><td>7DUGRD8WNLT1</td><td>JUNFPRINTEE</td>
+      <td>Black T-Shirt with Bold Graphic I Love Horror Movies an</td><td>Yes</td>
+      <td>No</td>
+      <td></td><td>⚠ Ref dup delisted (correct)</td><td class="note">ref dup listing is now 404/delisted on Walmart</td></tr><tr class="ok">
+      <td>18</td><td>5KYT88Y8S7UU</td><td>Parallax Press</td>
+      <td>Pre-Owned How to Relax (Paperback) 1941529089 978194152</td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">Different Isbn</td></tr><tr class="ok">
+      <td>19</td><td>5JT8BRIR0Y7S</td><td>Stupell</td>
+      <td>Cool Panda Sunglasses Black And White Paint Drip 11 in </td><td>No</td>
+      <td>No</td>
+      <td></td><td>✓ Match</td><td class="note">Different size</td></tr>
+</table>
+<p class="meta"><b>Interpretation:</b> All 19 rows agree with the client reference once the search mode is ScraperAPI
+<b>generic</b>. The production ScraperAPI key exhausted its monthly quota on 2026-09-12, so the first baselining attempt
+failed (403 on every query, sandbox killed at 15 min). Re-run used the per-run test key; the 4 client-"Yes" rows have
+duplicate listings delisted on Walmart (verified 404) so "No" is correct today.
+<b>Match rate: 15/19 exact + 4/19 ref-dup-delisted = 19/19 (100%)</b>. Mismatches: 0.</p>
+
+<h2>Summary</h2>
+<table class="speed">
+<tr><th>Pipeline</th><th>Rows</th><th>Match</th><th>Delisted nuance (OK)</th><th>Mismatch</th><th>Rate</th><th>Formatter</th><th>Duration</th><th>Execution</th></tr>
+<tr><td>Validation</td><td>9</td><td>7</td><td>2</td><td>0</td><td><b>100%</b></td><td>compare.py 1.4.2</td><td>~3m 26s</td><td>9ff1d980</td></tr>
+<tr><td>Baselining</td><td>19</td><td>15</td><td>4</td><td>0</td><td><b>100%</b></td><td>walmart_search + dup_classify</td><td>~10m 55s</td><td>4f574f30</td></tr>
+<tr><td><b>Combined</b></td><td><b>28</b></td><td><b>22</b></td><td><b>6</b></td><td><b>0</b></td><td><b>100%</b></td><td>—</td><td>—</td><td>—</td></tr>
+</table>
+<p class="meta"><b>Note on search-source health:</b> production ScraperAPI key <code>b7e8347a…</code> exhausted its
+monthly quota on 2026-09-12 (returns 403, "You have exhausted the API Credits available in this monthly cycle").
+This is the root cause of the failed first baselining attempt. The per-run test key <code>b264d9bd…</code> resolved it.
+If production RISE OTB runs are needed before the monthly reset, either the production account needs overages enabled or
+runs must use the test key via <code>config_overrides</code>.</p>
+</body></html>

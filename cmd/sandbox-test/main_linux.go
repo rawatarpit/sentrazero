@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -147,24 +146,30 @@ func main() {
 		fmt.Printf("[cpu-time-limit] ERROR: busy loop was not killed by the CPU limit: err=%v timedOut=%v (%s)\n", cpuRes.err, cpuRes.timedOut, cpuRes.duration)
 	}
 
-	// Test: virtual-memory rlimit — `ulimit -v` must report a finite limit
-	// after the sandbox applies it (verify the limit, not the exact value:
-	// 64 MiB is 65536 KiB, but applyRLimits passes memoryMB*1024*1024
-	// bytes-as-KiB, so 67108864 may be reported instead).
+	// Test: memory limiting. An RSS-based memory cap (memory.max) is only
+	// available when the sandbox can write to a cgroup. Without one the
+	// sandboxer deliberately does NOT set RLIMIT_AS (address space), because
+	// an address-space cap kills script runtimes that reserve large
+	// virtual-address regions at startup (Node/V8, Go, the JVM) — e.g. the
+	// Playwright Node driver dies with "Connection closed while reading from
+	// the driver". So on a cgroup-less host `ulimit -v` must be UNLIMITED.
 	memManifest := base
 	memManifest.Resources.MemoryMB = 64
 	memRes := executeTest(sb, "mem-limit-applied", []string{"sh", "-c", "ulimit -v"}, memManifest, false, 15*time.Second)
 	if memRes.err != nil {
 		printResult("mem-limit-applied", memRes)
-	} else if kb, perr := strconv.ParseInt(memRes.stdout, 10, 64); perr == nil && kb > 0 {
-		fmt.Printf("[mem-limit-applied] OK: ulimit -v = %s KiB (%s)\n", memRes.stdout, memRes.duration)
+	} else if cfg.Capabilities.HasCgroupWrite {
+		fmt.Printf("[mem-limit-applied] OK: memory capped via cgroup memory.max (ulimit -v = %s is expected to be unlimited) (%s)\n", memRes.stdout, memRes.duration)
+	} else if memRes.stdout == "unlimited" {
+		fmt.Printf("[mem-limit-applied] OK: no writable cgroup → RLIMIT_AS intentionally unset, ulimit -v = unlimited (%s)\n", memRes.duration)
 	} else {
-		fmt.Printf("[mem-limit-applied] ERROR: ulimit -v = %q, expected a finite KiB limit (%s)\n", memRes.stdout, memRes.duration)
+		fmt.Printf("[mem-limit-applied] ERROR: ulimit -v = %q; expected 'unlimited' without a writable cgroup (an address-space cap breaks Node/V8) (%s)\n", memRes.stdout, memRes.duration)
 	}
 
 	// Best-effort kill check: force a 64 MiB address-space limit, then read
-	// 400 MiB. The kernel should kill the process. Reported, not asserted —
-	// this is not a suite failure if it behaves unexpectedly.
+	// 400 MiB. This verifies the kernel enforces RLIMIT_AS when it IS set
+	// (independent of the sandbox). Reported, not asserted — this is not a
+	// suite failure if it behaves unexpectedly.
 	killRes := executeTest(sb, "mem-limit-kill", []string{"sh", "-c", "ulimit -v 65536; head -c 400000000 /dev/zero > /dev/null"}, memManifest, false, 15*time.Second)
 	if killRes.err != nil && !killRes.timedOut {
 		fmt.Printf("[mem-limit-kill] OK: killed under the 64 MiB vmem limit: %v (%s)\n", killRes.err, killRes.duration)

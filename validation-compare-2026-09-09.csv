@@ -1,0 +1,10 @@
+row,prmry_sku_id,client_match_type,agent_match_type,status,notes
+1,194305312,Incorrect Match,Incorrect Match,MATCH,Color
+2,5755858147,Exact Match,Incorrect Match,OK-DELISTED,Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.
+3,194524183,Exact Match,Incorrect Match,OK-DELISTED,Product delisted on Walmart (HTTP 404 as of 2026-09-09); client ref from 2026-07-31 still had it.
+4,876637151,Incorrect Match,Incorrect Match,MATCH,Color
+5,365298585,Exact Match,Exact Match,MATCH,
+6,24093547,Incorrect Match,Incorrect Match,MATCH,Ounce
+7,10292954,Exact Match,Exact Match,MATCH,
+8,519974288,Incorrect Match,Incorrect Match,MATCH,Size
+9,997481061,Incorrect Match,Incorrect Match,MATCH,Color
