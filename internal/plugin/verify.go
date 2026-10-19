@@ -165,21 +165,11 @@ func IsKeyValid(key *SignatureKey) bool {
 	return true
 }
 
-func loadManifest(manifestPath string) (*Manifest, error) {
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
-	}
-
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
-	}
-
-	return &manifest, nil
-}
-
-func VerifyPluginSignature(ctx context.Context, manifestPath, signatureB64, keyID string) error {
+// VerifyPluginSignature verifies an Ed25519 signature over SHA256(pluginPath).
+// pluginPath must point at the actual plugin binary, not the manifest. This
+// avoids ambiguity when the plugin is installed under a platform fallback
+// directory such as any-any.
+func VerifyPluginSignature(ctx context.Context, pluginPath, signatureB64, keyID string) error {
 	if signatureB64 == "" {
 		return fmt.Errorf("plugin signature is required but not provided")
 	}
@@ -208,16 +198,6 @@ func VerifyPluginSignature(ctx context.Context, manifestPath, signatureB64, keyI
 	if len(signature) != ed25519.SignatureSize {
 		return fmt.Errorf("invalid signature size: expected %d, got %d", ed25519.SignatureSize, len(signature))
 	}
-
-	// Load manifest to get the plugin filename
-	manifest, err := loadManifest(manifestPath)
-	if err != nil {
-		return fmt.Errorf("failed to load manifest for signature verification: %w", err)
-	}
-
-	// Get the plugin file path (manifest is at pluginDir/pluginName.json)
-	pluginDir := filepath.Dir(manifestPath)
-	pluginPath := filepath.Join(pluginDir, manifest.Filename)
 
 	// Read the plugin file and compute SHA256 hash
 	pluginBytes, err := os.ReadFile(pluginPath)
@@ -276,8 +256,7 @@ func VerifyPluginIntegrity(ctx context.Context, manifest Manifest, pluginDir str
 		return fmt.Errorf("signature and signature_key_id are required but not provided")
 	}
 
-	manifestPath := filepath.Join(pluginDir, manifest.Name+".json")
-	if err := VerifyPluginSignature(ctx, manifestPath, manifest.Signature, manifest.SignatureKeyID); err != nil {
+	if err := VerifyPluginSignature(ctx, binaryPath, manifest.Signature, manifest.SignatureKeyID); err != nil {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 	manifest.SignatureVerified = true

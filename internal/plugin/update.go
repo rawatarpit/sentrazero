@@ -113,6 +113,13 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 				needsDownload = true
 			}
 
+			// Refresh manifests when a plugin has just been signed on the server,
+			// so the signature is persisted locally before strict mode is enabled.
+			if !needsDownload && remote.Signature != "" && local.Signature == "" {
+				log.Printf("🔐 Plugin %s is now signed, refreshing manifest", pluginName)
+				needsDownload = true
+			}
+
 			if needsDownload {
 				if remote.SignedURL == "" {
 					log.Printf("⚠️ Plugin %s has no signed URL, skipping update", pluginName)
@@ -122,27 +129,27 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 
 				log.Printf("⬆️ Updating plugin %s/%s → %s", pluginName, platformKey, remote.Version)
 
-			manifest := Manifest{
-				Name:           remote.Name,
-				Version:        remote.Version,
-				Filename:       filepath.Base(remote.StoragePath),
-				URL:            remote.SignedURL,
-				Checksum:       remote.Checksum,
-				PluginType:     remote.PluginType,
-				Language:       remote.Language,
-				PluginGroup:    remote.PluginGroup,
-				Trusted:        remote.Trusted,
-				Signature:      remote.Signature,
-				SignatureKeyID: remote.SignatureKeyID,
-				Network:        remote.Network,
-				Resources:      PluginResources{},
-			}
-
-			if len(remote.Resources) > 0 {
-				if err := json.Unmarshal(remote.Resources, &manifest.Resources); err != nil {
-					log.Printf("⚠️ Failed to parse resources for %s during auto-update: %v", remote.Name, err)
+				manifest := Manifest{
+					Name:           remote.Name,
+					Version:        remote.Version,
+					Filename:       filepath.Base(remote.StoragePath),
+					URL:            remote.SignedURL,
+					Checksum:       remote.Checksum,
+					PluginType:     remote.PluginType,
+					Language:       remote.Language,
+					PluginGroup:    remote.PluginGroup,
+					Trusted:        remote.Trusted,
+					Signature:      remote.Signature,
+					SignatureKeyID: remote.SignatureKeyID,
+					Network:        remote.Network,
+					Resources:      PluginResources{},
 				}
-			}
+
+				if len(remote.Resources) > 0 {
+					if err := json.Unmarshal(remote.Resources, &manifest.Resources); err != nil {
+						log.Printf("⚠️ Failed to parse resources for %s during auto-update: %v", remote.Name, err)
+					}
+				}
 
 				if err := downloadWithRetries(ctx, remote.SignedURL, binaryPath); err != nil {
 					log.Printf("⚠️ Failed to download plugin %s/%s: %v", pluginName, platformKey, err)
@@ -159,9 +166,10 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 					}
 				}
 
-				// Bug #11 fix: Verify signature after download
+				// Verify the signature over the newly downloaded binary
+				// before replacing the manifest on disk.
 				if remote.Signature != "" && remote.SignatureKeyID != "" {
-					if err := VerifyPluginSignature(ctx, manifestPath, remote.Signature, remote.SignatureKeyID); err != nil {
+					if err := VerifyPluginSignature(ctx, binaryPath, remote.Signature, remote.SignatureKeyID); err != nil {
 						log.Printf("⚠️ Plugin %s/%s signature verification failed: %v", pluginName, platformKey, err)
 						os.Remove(binaryPath)
 						manifestPathBroken := filepath.Join(pluginDir, pluginName+"_broken_"+time.Now().Format("20060102_150405")+".json")
@@ -171,6 +179,11 @@ func AutoUpdatePlugins(ctx context.Context) (updated, skipped, failed int, newPl
 						continue
 					}
 					log.Printf("✅ Plugin %s/%s signature verified", pluginName, platformKey)
+				} else if strictPluginSignatures() {
+					log.Printf("❌ Plugin %s/%s is unsigned and strict signature enforcement is enabled", pluginName, platformKey)
+					os.Remove(binaryPath)
+					failed++
+					continue
 				}
 
 				nData, _ := json.MarshalIndent(manifest, "", "  ")

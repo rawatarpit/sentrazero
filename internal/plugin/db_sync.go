@@ -35,17 +35,17 @@ type DBPlugin struct {
 	Trusted           bool            `json:"trusted"`
 	RolloutPercentage int             `json:"rollout_percentage"`
 	SignedURL         string          `json:"signed_url"`
-	OS                string              `json:"os"`
-	Arch              string              `json:"arch"`
-	PluginGroup       string              `json:"plugin_group"`
-	Network           bool                `json:"network"`
-	RuntimeDeps       json.RawMessage     `json:"runtime_dependencies"`
+	OS                string          `json:"os"`
+	Arch              string          `json:"arch"`
+	PluginGroup       string          `json:"plugin_group"`
+	Network           bool            `json:"network"`
+	RuntimeDeps       json.RawMessage `json:"runtime_dependencies"`
 }
 
 type PluginListResponse struct {
-	Ok    bool      `json:"ok"`
+	Ok    bool       `json:"ok"`
 	Data  []DBPlugin `json:"data"`
-	Error string    `json:"error,omitempty"`
+	Error string     `json:"error,omitempty"`
 }
 
 func FetchPluginsFromAPI(ctx context.Context, deviceID, orgID, backendURL, anonKey, deviceToken string) ([]DBPlugin, error) {
@@ -253,25 +253,33 @@ func InstallPlugin(ctx context.Context, p DBPlugin, baseDir string) (bool, error
 	}
 
 	localManifestPath := filepath.Join(pluginDir, p.Name+".json")
-	data, _ := json.MarshalIndent(manifest, "", " ")
-
-	if err := os.WriteFile(localManifestPath+".tmp", data, 0600); err != nil {
-		return false, fmt.Errorf("save manifest: %w", err)
-	}
-	os.Rename(localManifestPath+".tmp", localManifestPath)
-
 	outPath := filepath.Join(pluginDir, manifest.Filename)
-	if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
+
+	verifyBinary := func(path string) error {
 		if p.Checksum != "" {
-			if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
-				log.Printf("⚠️ Cached plugin %s failed checksum verification: %v - re-downloading", p.Name, err)
-				os.Remove(outPath)
-			} else {
-				log.Printf("⏭️ Plugin %s already cached and verified", p.Name)
-				return true, nil
+			if err := verifyFileSHA256(path, p.Checksum); err != nil {
+				return fmt.Errorf("checksum verification failed: %w", err)
 			}
+		}
+		if p.Signature != "" && p.SignatureKeyID != "" {
+			if err := VerifyPluginSignature(ctx, path, p.Signature, p.SignatureKeyID); err != nil {
+				return fmt.Errorf("signature verification failed: %w", err)
+			}
+			return nil
+		}
+		if strictPluginSignatures() {
+			return fmt.Errorf("plugin is unsigned and strict signature enforcement is enabled")
+		}
+		return nil
+	}
+
+	if st, err := os.Stat(outPath); err == nil && st.Size() > 0 {
+		if err := verifyBinary(outPath); err != nil {
+			log.Printf("⚠️ Cached plugin %s failed verification: %v - re-downloading", p.Name, err)
+			os.Remove(outPath)
 		} else {
-			log.Printf("⏭️ Plugin %s already cached (no checksum)", p.Name)
+			log.Printf("⏭️ Plugin %s already cached and verified", p.Name)
+			writeManifest(localManifestPath, manifest)
 			return true, nil
 		}
 	}
@@ -280,15 +288,34 @@ func InstallPlugin(ctx context.Context, p DBPlugin, baseDir string) (bool, error
 		return false, fmt.Errorf("download plugin: %w", err)
 	}
 
-	if p.Checksum != "" {
-		if err := verifyFileSHA256(outPath, p.Checksum); err != nil {
-			os.Remove(outPath)
-			return false, fmt.Errorf("checksum verification failed: %w", err)
-		}
+	if err := verifyBinary(outPath); err != nil {
+		os.Remove(outPath)
+		return false, err
+	}
+
+	// Only persist the manifest after the binary has passed verification so a
+	// failed download/signature check never leaves a loadable manifest behind.
+	if err := writeManifest(localManifestPath, manifest); err != nil {
+		os.Remove(outPath)
+		return false, err
 	}
 
 	log.Printf("✅ Synced plugin: %s (version: %s)", p.Name, p.Version)
 	return true, nil
+}
+
+func writeManifest(path string, manifest Manifest) error {
+	data, err := json.MarshalIndent(manifest, "", " ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(path+".tmp", data, 0600); err != nil {
+		return fmt.Errorf("save manifest: %w", err)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return fmt.Errorf("install manifest: %w", err)
+	}
+	return nil
 }
 
 func loadConfig() (*Config, error) {

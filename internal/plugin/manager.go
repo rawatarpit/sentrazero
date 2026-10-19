@@ -31,7 +31,7 @@ func strictPluginSignatures() bool {
 	}
 }
 
-func verifyManifestSignatureFromEnv(manifest Manifest) error {
+func verifyManifestSignatureFromEnv(manifest Manifest, pluginDir string) error {
 	if manifest.Signature == "" {
 		// Backwards-compatible trust: a trusted plugin with no signature is
 		// allowed to run unless strict signature enforcement is enabled. This
@@ -83,18 +83,10 @@ func verifyManifestSignatureFromEnv(manifest Manifest) error {
 	// Canonical payload: SHA256(plugin file bytes) — must match what
 	// register_plugin/upload_plugin_file sign (crypto.subtle.digest SHA-256
 	// over the uploaded binary) and VerifyPluginSignature verifies.
-	baseDir, err := EnsurePluginDir()
-	if err != nil {
-		return fmt.Errorf("plugin dir lookup failed: %w", err)
-	}
-	platform := getCurrentPlatform()
-	pluginDir := filepath.Join(baseDir, manifest.Name, platform)
-	manifestPath := filepath.Join(pluginDir, manifest.Name+".json")
-	if data, readErr := os.ReadFile(manifestPath); readErr == nil {
-		var disk Manifest
-		if json.Unmarshal(data, &disk) == nil && disk.Filename != "" {
-			manifest.Filename = disk.Filename
-		}
+	// The caller passes the resolved plugin directory, which may be a
+	// platform fallback such as any-any.
+	if manifest.Filename == "" {
+		return fmt.Errorf("manifest filename is required for signature verification")
 	}
 	pluginPath := filepath.Join(pluginDir, manifest.Filename)
 	pluginBytes, err := os.ReadFile(pluginPath)
@@ -234,12 +226,12 @@ func LoadAndUpdatePlugin(
 		return "", Manifest{}, fmt.Errorf("plugin %s is not trusted", pluginName)
 	}
 
-	if err := verifyManifestSignatureFromEnv(manifest); err != nil {
-		return "", Manifest{}, fmt.Errorf("plugin %s signature verification failed: %w", pluginName, err)
-	}
-
 	if manifest.Filename == "" {
 		return "", Manifest{}, fmt.Errorf("plugin %s missing filename", pluginName)
+	}
+
+	if err := verifyManifestSignatureFromEnv(manifest, pluginDir); err != nil {
+		return "", Manifest{}, fmt.Errorf("plugin %s signature verification failed: %w", pluginName, err)
 	}
 
 	binaryPath := filepath.Join(pluginDir, manifest.Filename)
