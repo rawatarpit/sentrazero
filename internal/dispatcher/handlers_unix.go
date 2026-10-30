@@ -30,11 +30,12 @@ import (
 	"github.com/parquet-go/parquet-go"
 	pdfcpuapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/xuri/excelize/v2"
 
 	executorv2 "sentra-agent/cmd/agent/executor/v2"
 	runtimev2 "sentra-agent/cmd/agent/runtime/v2"
-	backendclient "sentra-agent/internal/backend"
 	"sentra-agent/internal/auth"
+	backendclient "sentra-agent/internal/backend"
 	"sentra-agent/internal/config"
 	"sentra-agent/internal/dataset"
 	"sentra-agent/internal/httpclient"
@@ -83,10 +84,10 @@ func firstNonEmpty(vals ...string) string {
 type MergeStrategy string
 
 const (
-	StrategyAffinity       MergeStrategy = "affinity"
-	StrategySharedMount    MergeStrategy = "shared_mount"
-	StrategyByteRange      MergeStrategy = "byte_range"
-	StrategyFilePerChunk   MergeStrategy = "file_per_chunk"
+	StrategyAffinity     MergeStrategy = "affinity"
+	StrategySharedMount  MergeStrategy = "shared_mount"
+	StrategyByteRange    MergeStrategy = "byte_range"
+	StrategyFilePerChunk MergeStrategy = "file_per_chunk"
 )
 
 type MergeChunk struct {
@@ -134,12 +135,12 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 
 	// Get execution_id from context (injected by ExecuteJob)
 	executionID := obs.ExecutionID(ctx)
-	
+
 	// If not in context, fall back to payload
 	if executionID == "" {
 		executionID = job.ExecutionID
 	}
-	
+
 	// execution_id may be empty for background scan jobs
 	if executionID == "" {
 		obs.Warn("executeScanDataset: no execution_id (background scan)", obs.Field{
@@ -147,15 +148,15 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 			"dataset_id": job.DatasetID,
 		})
 	}
-	
+
 	// Use executionID from context, inject into job for downstream
 	job.ExecutionID = executionID
 
 	obs.Info("executeScanDataset received job", obs.Field{
-		"job_id":        job.ID,
+		"job_id":       job.ID,
 		"execution_id": executionID,
 		"dataset_id":   job.DatasetID,
-		"storage_mode":  job.StorageMode,
+		"storage_mode": job.StorageMode,
 		"storage_type": job.StorageType,
 		"source_path":  job.SourcePath,
 		"input_path":   job.InputPath,
@@ -259,7 +260,7 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	}
 
 	obs.Info("executeScanDataset: listing remote objects", obs.Field{
-		"remote_path": remotePath,
+		"remote_path":          remotePath,
 		"source_path_provided": job.SourcePath != "",
 	})
 
@@ -342,10 +343,10 @@ func executeScanDataset(ctx context.Context, payload json.RawMessage) error {
 	summary["source_files"] = sourceFiles
 
 	obs.Info("scan completed", obs.Field{
-		"job_id":        job.ID,
-		"dataset_id":    job.DatasetID,
+		"job_id":       job.ID,
+		"dataset_id":   job.DatasetID,
 		"summary_keys": len(summary),
-		"file_count":    len(objects),
+		"file_count":   len(objects),
 	})
 
 	// Report scan results to backend - non-critical, don't fail job on error
@@ -375,9 +376,9 @@ func reportDatasetScan(ctx context.Context, datasetID, orgID, storageType string
 
 	reportPayload := map[string]interface{}{
 		"dataset_id":   datasetID,
-		"org_id":      orgID,
+		"org_id":       orgID,
 		"storage_type": storageType,
-		"summary":     summary,
+		"summary":      summary,
 	}
 
 	payloadBytes, err := json.Marshal(reportPayload)
@@ -798,17 +799,17 @@ type ProcessPayload struct {
 	SourcePath  string `json:"source_path,omitempty"`
 
 	// Compound job fields (in nested payload)
-	IsCompound       bool            `json:"is_compound,omitempty"`
-	Steps            []CompoundStep  `json:"steps,omitempty"`
-	TotalSteps       int             `json:"total_steps,omitempty"`
-	CurrentStepIndex int             `json:"current_step_index,omitempty"`
+	IsCompound       bool           `json:"is_compound,omitempty"`
+	Steps            []CompoundStep `json:"steps,omitempty"`
+	TotalSteps       int            `json:"total_steps,omitempty"`
+	CurrentStepIndex int            `json:"current_step_index,omitempty"`
 
 	// File/Byte-Range chunking strategy (Phase 2)
-	ChunkStrategy   string   `json:"chunk_strategy,omitempty"`
-	ByteRangeStart  int64    `json:"byte_range_start,omitempty"`
-	ByteRangeEnd    int64    `json:"byte_range_end,omitempty"`
-	FileList        []string `json:"file_list,omitempty"`
-	SourceFilePath  string   `json:"source_file_path,omitempty"`
+	ChunkStrategy  string   `json:"chunk_strategy,omitempty"`
+	ByteRangeStart int64    `json:"byte_range_start,omitempty"`
+	ByteRangeEnd   int64    `json:"byte_range_end,omitempty"`
+	FileList       []string `json:"file_list,omitempty"`
+	SourceFilePath string   `json:"source_file_path,omitempty"`
 }
 
 type CompoundStep struct {
@@ -2232,10 +2233,10 @@ func executeCompoundProcessChunk(
 		}
 
 		obs.Info("compound job completed, uploaded output file", obs.Field{
-			"execution_id":  executionID,
-			"chunk_id":      chunkID,
-			"steps":         len(steps),
-			"output_file":   uploadFilePath,
+			"execution_id": executionID,
+			"chunk_id":     chunkID,
+			"steps":        len(steps),
+			"output_file":  uploadFilePath,
 		})
 	} else {
 		// Nothing to upload — write minimal metadata JSON as last resort
@@ -2267,10 +2268,10 @@ func executeCompoundProcessChunk(
 		}
 
 		obs.Info("compound job completed, no output file found", obs.Field{
-			"execution_id":  executionID,
-			"chunk_id":      chunkID,
-			"steps":         len(steps),
-			"output_dir":    lastOutputDir,
+			"execution_id": executionID,
+			"chunk_id":     chunkID,
+			"steps":        len(steps),
+			"output_dir":   lastOutputDir,
 		})
 	}
 
@@ -2498,14 +2499,14 @@ func executeIngestDataset(ctx context.Context, payload json.RawMessage) error {
 
 func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[string]any, error) {
 	summary := map[string]any{
-		"file_count":        0,
-		"total_size_bytes":  int64(0),
-		"file_types":        map[string]int{},
-		"headers":            []string{},
-		"columns":            []string{},
-		"sample_row_count":   0,
-		"detected_formats":  []string{},
-		"schema":             map[string]string{},
+		"file_count":       0,
+		"total_size_bytes": int64(0),
+		"file_types":       map[string]int{},
+		"headers":          []string{},
+		"columns":          []string{},
+		"sample_row_count": 0,
+		"detected_formats": []string{},
+		"schema":           map[string]string{},
 	}
 
 	inputIsDir := inputPath
@@ -2553,7 +2554,7 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 			ext = "(no extension)"
 		}
 		fileTypes[ext]++
-		
+
 		// Use first file as sample for metadata extraction
 		if sampleFile == nil && f.Size() > 0 {
 			sampleFile = f
@@ -2575,7 +2576,7 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 		metadata, err := extractFileMetadata(ctx, samplePath)
 		if err != nil {
 			obs.Warn("failed to extract file metadata", obs.Field{
-				"path": samplePath,
+				"path":  samplePath,
 				"error": err.Error(),
 			})
 		} else {
@@ -2583,7 +2584,7 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 			for k, v := range metadata {
 				summary[k] = v
 			}
-			
+
 			// Track detected formats
 			if format, ok := metadata["format"].(string); ok && format != "" {
 				summary["detected_formats"] = []string{format}
@@ -2592,11 +2593,11 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 	}
 
 	obs.Info("built-in scan complete", obs.Field{
-		"file_count":      fileCount,
-		"total_size_mb":   totalSize / (1024 * 1024),
-		"unique_types":   len(fileTypes),
-		"sample_file":    summary["sample_file"],
-		"columns":        len(summary["columns"].([]string)),
+		"file_count":    fileCount,
+		"total_size_mb": totalSize / (1024 * 1024),
+		"unique_types":  len(fileTypes),
+		"sample_file":   summary["sample_file"],
+		"columns":       len(summary["columns"].([]string)),
 	})
 
 	return summary, nil
@@ -2604,10 +2605,12 @@ func scanDatasetBuiltin(ctx context.Context, inputPath, workDir string) (map[str
 
 func extractFileMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
-	
+
 	switch ext {
 	case ".csv", ".tsv", ".txt":
 		return extractCSVMetadata(ctx, filePath)
+	case ".xlsx", ".xlsm":
+		return extractExcelMetadata(ctx, filePath)
 	case ".json", ".jsonl":
 		return extractJSONMetadata(ctx, filePath)
 	case ".parquet":
@@ -2633,8 +2636,8 @@ func extractFileMetadata(ctx context.Context, filePath string) (map[string]any, 
 
 func extractCSVMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":       "csv",
-		"sample_file":  filepath.Base(filePath),
+		"format":      "csv",
+		"sample_file": filepath.Base(filePath),
 	}
 
 	file, err := os.Open(filePath)
@@ -2713,9 +2716,106 @@ func extractCSVMetadata(ctx context.Context, filePath string) (map[string]any, e
 	return metadata, nil
 }
 
+func extractExcelMetadata(_ context.Context, filePath string) (map[string]any, error) {
+	metadata := map[string]any{
+		"format":      "excel",
+		"sample_file": filepath.Base(filePath),
+	}
+
+	workbook, err := excelize.OpenFile(filePath)
+	if err != nil {
+		return metadata, err
+	}
+	defer workbook.Close()
+
+	sheetNames := workbook.GetSheetList()
+	metadata["sheet_names"] = sheetNames
+	if len(sheetNames) == 0 {
+		return metadata, nil
+	}
+
+	sheetName := sheetNames[0]
+	metadata["sheet_name"] = sheetName
+
+	rows, err := workbook.Rows(sheetName)
+	if err != nil {
+		return metadata, err
+	}
+	defer rows.Close()
+
+	headers := []string{}
+	schema := map[string]string{}
+	sampleRows := []map[string]any{}
+	rowCount := 0
+
+	for rows.Next() {
+		row, err := rows.Columns()
+		if err != nil {
+			return metadata, err
+		}
+
+		if rowCount == 0 {
+			headers = make([]string, len(row))
+			for i, header := range row {
+				headers[i] = strings.TrimSpace(header)
+			}
+			metadata["headers"] = headers
+			metadata["columns"] = headers
+			metadata["column_count"] = len(headers)
+			metadata["has_header"] = true
+		} else {
+			if len(sampleRows) < 10 {
+				rowMap := map[string]any{}
+				for i, value := range row {
+					if i < len(headers) {
+						rowMap[headers[i]] = value
+					}
+				}
+				sampleRows = append(sampleRows, rowMap)
+			}
+
+			for i, value := range row {
+				if i >= len(headers) || value == "" {
+					continue
+				}
+				column := headers[i]
+				if _, exists := schema[column]; !exists {
+					schema[column] = detectValueType(value)
+				}
+			}
+		}
+
+		rowCount++
+		if rowCount >= 100 {
+			break
+		}
+	}
+
+	metadata["sample_row_count"] = rowCount
+	metadata["schema"] = schema
+	metadata["sample_rows"] = sampleRows
+
+	estimatedRows := 0
+	if rowCount > 0 {
+		estimatedRows = rowCount - 1
+	}
+	if dimension, err := workbook.GetSheetDimension(sheetName); err == nil && dimension != "" {
+		lastCell := strings.ReplaceAll(dimension, "$", "")
+		if idx := strings.LastIndex(lastCell, ":"); idx >= 0 {
+			lastCell = lastCell[idx+1:]
+		}
+		if _, row, err := excelize.CellNameToCoordinates(lastCell); err == nil && row > 1 {
+			estimatedRows = row - 1
+		}
+	}
+	metadata["estimated_row_count"] = estimatedRows
+
+	return metadata, nil
+}
+
 func extractJSONMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":       "json",
+		"format":      "json",
 		"sample_file": filepath.Base(filePath),
 	}
 
@@ -2777,8 +2877,8 @@ func extractJSONMetadata(ctx context.Context, filePath string) (map[string]any, 
 
 func extractJSONLMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":        "jsonl",
-		"sample_file":   filepath.Base(filePath),
+		"format":      "jsonl",
+		"sample_file": filepath.Base(filePath),
 	}
 
 	file, err := os.Open(filePath)
@@ -2831,7 +2931,7 @@ func extractJSONLMetadata(ctx context.Context, filePath string) (map[string]any,
 
 func extractParquetMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":       "parquet",
+		"format":      "parquet",
 		"sample_file": filepath.Base(filePath),
 	}
 
@@ -2886,8 +2986,8 @@ func extractParquetMetadata(ctx context.Context, filePath string) (map[string]an
 
 func detectAndExtractMetadata(ctx context.Context, filePath string) (map[string]any, error) {
 	metadata := map[string]any{
-		"format":          "unknown",
-		"sample_file":     filepath.Base(filePath),
+		"format":      "unknown",
+		"sample_file": filepath.Base(filePath),
 	}
 
 	if info, err := os.Stat(filePath); err == nil {
@@ -3435,25 +3535,25 @@ func fallbackToV2Runtime(
 	}
 
 	v2Job := executorv2.Job{
-		ID:               job.ID,
-		Type:             job.Type,
-		Payload:          payloadMap,
-		PluginID:         job.PluginID,
-		PluginCode:       string(pluginCode),
-		RuntimeType:      string(rtType),
-		RuntimeDeps:      mapDepsToV2(manifest.Dependencies),
-		ExecutionID:      job.ExecutionID,
-		ExecutionStepID:  job.ExecutionStepID,
-		OrgID:            job.OrgID,
-		TimeoutSeconds:   300,
-		Trusted:          manifest.Trusted,
+		ID:              job.ID,
+		Type:            job.Type,
+		Payload:         payloadMap,
+		PluginID:        job.PluginID,
+		PluginCode:      string(pluginCode),
+		RuntimeType:     string(rtType),
+		RuntimeDeps:     mapDepsToV2(manifest.Dependencies),
+		ExecutionID:     job.ExecutionID,
+		ExecutionStepID: job.ExecutionStepID,
+		OrgID:           job.OrgID,
+		TimeoutSeconds:  300,
+		Trusted:         manifest.Trusted,
 	}
 
 	obs.Info("falling back to v2 runtime", obs.Field{
-		"plugin":     manifest.Name,
-		"language":   manifest.Language,
-		"runtime":    rtType,
-		"plugin_id":  job.PluginID,
+		"plugin":    manifest.Name,
+		"language":  manifest.Language,
+		"runtime":   rtType,
+		"plugin_id": job.PluginID,
 	})
 
 	execResult, err := executorInstance.ExecuteJob(ctx, v2Job)
@@ -3595,5 +3695,3 @@ func copyFile(src, dst string) error {
 	_, err = io.Copy(dstFile, srcFile)
 	return err
 }
-
-

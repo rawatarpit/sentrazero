@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 )
 
 var testdataDir string
@@ -229,6 +231,66 @@ func TestExtractCSVMetadata(t *testing.T) {
 	}
 	if meta["format"] != "csv" {
 		t.Errorf("format = %q, want %q", meta["format"], "csv")
+	}
+}
+
+func TestExtractExcelMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.xlsx")
+
+	workbook := excelize.NewFile()
+	sheetIndex, err := workbook.NewSheet("Raw input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workbook.DeleteSheet("Sheet1")
+	workbook.SetActiveSheet(sheetIndex)
+
+	headers := []string{"prmry_sku_id", "Walmart_Url", "comp_item_id__1", "Comp_Url"}
+	for i, header := range headers {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+		if err := workbook.SetCellValue("Raw input", cell, header); err != nil {
+			t.Fatal(err)
+		}
+	}
+	values := []string{"194305312", "https://www.walmart.com/ip/194305312", "B0012OG95S", "https://www.amazon.com/dp/B0012OG95S"}
+	for i, value := range values {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 2)
+		if err := workbook.SetCellValue("Raw input", cell, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := workbook.SaveAs(path); err != nil {
+		t.Fatal(err)
+	}
+	workbook.Close()
+
+	meta, err := extractFileMetadata(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta["format"] != "excel" {
+		t.Fatalf("format = %q, want %q", meta["format"], "excel")
+	}
+	if meta["sheet_name"] != "Raw input" {
+		t.Errorf("sheet_name = %q, want %q", meta["sheet_name"], "Raw input")
+	}
+	gotHeaders, ok := meta["headers"].([]string)
+	if !ok {
+		t.Fatalf("headers has type %T, want []string", meta["headers"])
+	}
+	if len(gotHeaders) != len(headers) {
+		t.Fatalf("headers = %v, want %v", gotHeaders, headers)
+	}
+	for i := range headers {
+		if gotHeaders[i] != headers[i] {
+			t.Errorf("headers[%d] = %q, want %q", i, gotHeaders[i], headers[i])
+		}
+	}
+	if meta["column_count"] != len(headers) {
+		t.Errorf("column_count = %v, want %d", meta["column_count"], len(headers))
+	}
+	if meta["estimated_row_count"] != 1 {
+		t.Errorf("estimated_row_count = %v, want 1", meta["estimated_row_count"])
 	}
 }
 

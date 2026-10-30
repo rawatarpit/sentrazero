@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RISE OTB validation call console: intake, run-of-show, calibration profiles, and fallbacks.">
+  <title>RISE OTB · Validation Call Console</title>
+  <link rel="stylesheet" href="rise-otb-call-console.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">SZ</span>
+      <span class="brand-copy">
+        <strong>SentraZero</strong>
+        <span>RISE OTB · Validation call</span>
+      </span>
+    </div>
+    <div class="topbar-meta">
+      <span class="status-pill"><span class="dot" aria-hidden="true"></span> Calibration call</span>
+      <span class="meta-item">Thu 29 Oct 2026</span>
+      <span class="meta-item">45 min</span>
+      <button class="btn ghost print-hide" id="printBtn" type="button">Print</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="rail print-hide" aria-label="Page sections">
+      <div class="rail-inner">
+        <p class="rail-label">On this page</p>
+        <nav>
+          <a href="#glance">Call at a glance</a>
+          <a href="#checklist">Pre-call checklist</a>
+          <a href="#run-of-show">Run of show</a>
+          <a href="#intake">Intake decision tree</a>
+          <a href="#preflight">CSV preflight</a>
+          <a href="#click-path">Live click path</a>
+          <a href="#wizard">Wizard answers</a>
+          <a href="#calibration">Calibration console</a>
+          <a href="#say-avoid">Say / avoid</a>
+          <a href="#fallbacks">Fallbacks</a>
+          <a href="#after">After the call</a>
+          <a href="#reference">Reference IDs</a>
+        </nav>
+        <div class="rail-card">
+          <p class="eyebrow">North star</p>
+          <p>Their file in. Their labels matched as closely as the config allows. Residual differences named, not hidden.</p>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
+        <p class="eyebrow">Managed client · Live intake</p>
+        <h1 id="hero-title">Validation call console</h1>
+        <p class="lede">
+          The client brings a fresh validation CSV. We show exactly how it becomes row-level
+          <strong>Exact</strong> / <strong>Incorrect</strong> verdicts, then calibrate the matching profile
+          to their expected labels.
+        </p>
+        <div class="chip-row">
+          <span class="chip">Their CSV in</span>
+          <span class="chip">Baseline run</span>
+          <span class="chip">Diff vs expected</span>
+          <span class="chip">Lock profile</span>
+          <span class="chip danger">No pricing talk</span>
+        </div>
+      </section>
+
+      <section id="glance" class="section">
+        <div class="section-head">
+          <p class="eyebrow">01 · Frame</p>
+          <h2>Call at a glance</h2>
+          <p class="section-lede">Keep the call anchored on one outcome: a file they recognize, processed in front of them, with a measured agreement rate.</p>
+        </div>
+
+        <div class="grid grid-4">
+          <article class="card">
+            <p class="card-kicker">Goal</p>
+            <h3>Process their new file end-to-end</h3>
+            <p>Upload, register, configure, run, and read the result together. Do not hand-wave the middle.</p>
+          </article>
+          <article class="card">
+            <p class="card-kicker">Client brings</p>
+            <h3>Validation CSV</h3>
+            <p>Walmart URL + comparison URL. If they have expected <code>Match_Type</code> / <code>Notes</code>, we use them as the calibration target.</p>
+          </article>
+          <article class="card">
+            <p class="card-kicker">We show</p>
+            <h3>The real dashboard path</h3>
+            <p>Storage upload → dataset scan → recipe wizard → run → merged CSV. No hardcoded pilot walkthrough.</p>
+          </article>
+          <article class="card accent">
+            <p class="card-kicker">Success looks like</p>
+            <h3>Baseline + residual list</h3>
+            <p>An agreement number against their labels, a tuned profile, and every remaining difference classified with an owner.</p>
+          </article>
+        </div>
+
+        <div class="callout note">
+          <strong>Set the expectation early:</strong> this is a calibration run, not a promise of 100% agreement.
+          Two-sided attribute conflicts and delisted pages are hard limits in the current compare plugin; we will name them.
+        </div>
+
+        <div class="grid grid-2 align-start">
+          <div class="card">
+            <h3>Opening script</h3>
+            <blockquote>
+              “Thanks for sending the file. Today I’ll show you exactly how it moves through the pipeline,
+              and then we’ll compare our verdicts to your expected labels so we can calibrate the matching profile.”
+            </blockquote>
+          </div>
+          <div class="card">
+            <h3>Closing script</h3>
+            <blockquote>
+              “We’ll save this profile, re-run your file, and send a recap with the agreement rate and the residual differences.
+              If a difference is a policy call rather than a config call, we’ll list it separately.”
+            </blockquote>
+          </div>
+        </div>
+      </section>
+
+      <section id="checklist" class="section">
+        <div class="section-head">
+          <p class="eyebrow">02 · 30 minutes before</p>
+          <h2>Pre-call checklist</h2>
+          <p class="section-lede">Checkboxes persist in this browser. Reset them after the call.</p>
+        </div>
+
+        <div class="card">
+          <div class="check-head">
+            <h3>Environment &amp; access</h3>
+            <button class="btn subtle print-hide" id="resetChecklist" type="button">Reset</button>
+          </div>
+          <div class="check-grid">
+            <label class="check"><input type="checkbox" data-persist="signin"><span>Sign in as <code>test@riseotb.com</code>; confirm org <strong>Rise OTB</strong> and role <strong>owner</strong>.</span></label>
+            <label class="check"><input type="checkbox" data-persist="agent"><span>Devices: <code>vcnsentra</code> heartbeat under 10 minutes. <code>sentra</code> / <code>sentrazero</code> may be offline.</span></label>
+            <label class="check"><input type="checkbox" data-persist="dataset"><span>Dataset <code>validation_9rows_csv</code> is visible and not mid-scan.</span></label>
+            <label class="check"><input type="checkbox" data-persist="execution"><span>No stuck execution on the pipeline; no run currently in progress.</span></label>
+            <label class="check"><input type="checkbox" data-persist="template"><span>Open <strong>Walmart Scrape &amp; Compare v2</strong>; confirm Balanced compare step config.</span></label>
+            <label class="check"><input type="checkbox" data-persist="fallback"><span>Local fallback ready: <code>validation_original_client_merged_2026-10-30.csv</code>.</span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Meeting setup</h3>
+          <div class="check-grid">
+            <label class="check"><input type="checkbox" data-persist="csv"><span>Ask for the CSV 15–30 minutes before the call, or ask them to paste the headers in chat.</span></label>
+            <label class="check"><input type="checkbox" data-persist="expected"><span>Confirm whether their CSV includes expected <code>Match_Type</code> / <code>Notes</code>.</span></label>
+            <label class="check"><input type="checkbox" data-persist="screen"><span>Second screen: this console. Primary screen: dashboard.</span></label>
+            <label class="check"><input type="checkbox" data-persist="notifications"><span>Notifications off; unrelated tabs closed.</span></label>
+            <label class="check"><input type="checkbox" data-persist="reviews"><span>Do <strong>not</strong> open <code>/dashboard/reviews</code>; the review queue is not live.</span></label>
+            <label class="check"><input type="checkbox" data-persist="pricing"><span>Do <strong>not</strong> quote pricing; Segment A USD and ₹30–35K/mo are still unreconciled.</span></label>
+          </div>
+        </div>
+      </section>
+
+      <section id="run-of-show" class="section">
+        <div class="section-head">
+          <p class="eyebrow">03 · 45 minutes</p>
+          <h2>Run of show</h2>
+          <p class="section-lede">Protect the demo window. If intake runs long, cut the live run, not the calibration conversation.</p>
+        </div>
+
+        <ol class="timeline">
+          <li>
+            <span class="time">0–3</span>
+            <div>
+              <h3>Frame the outcome</h3>
+              <p>Their file, their labels, our measured agreement. Say the hard limits out loud once, early.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">3–8</span>
+            <div>
+              <h3>Intake and inspect</h3>
+              <p>Column names, row count, quote artifacts, blank rows, URL sanity, expected columns.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">8–12</span>
+            <div>
+              <h3>Pick the right pipeline</h3>
+              <p>Compare vs Coverage vs Duplicates. Do not run dedupe: the ScraperAPI quota is exhausted.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">12–18</span>
+            <div>
+              <h3>Upload + register dataset</h3>
+              <p>Storage upload, new dataset, correct prefix, wait for scan. Show the detected columns.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">18–22</span>
+            <div>
+              <h3>Configure the recipe</h3>
+              <p>URL columns, marketplaces, Balanced compare. Read the plain-English summary back to them.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">22–30</span>
+            <div>
+              <h3>Run and narrate</h3>
+              <p>~16 s per row of processing. 9 rows ≈ 2.5 min, but agent polling can add several minutes; allow up to ~9 min end to end. Set the ETA, then stop talking and let it run.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">30–38</span>
+            <div>
+              <h3>Results + calibration</h3>
+              <p>Diff <code>Match_Type</code> first, then <code>Notes</code>. Apply Strict/Balanced/Lenient only where the diff justifies it.</p>
+            </div>
+          </li>
+          <li>
+            <span class="time">38–45</span>
+            <div>
+              <h3>Residuals + next step</h3>
+              <p>Name each remaining difference, classify it, and agree on the profile lock and follow-up date.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section id="intake" class="section">
+        <div class="section-head">
+          <p class="eyebrow">04 · Route the file</p>
+          <h2>Intake decision tree</h2>
+          <p class="section-lede">The CSV columns decide the pipeline. Do not force a compare run on a coverage or dedupe file.</p>
+        </div>
+
+        <div class="grid grid-3">
+          <article class="card decision ok">
+            <span class="tag">Compare</span>
+            <h3>Walmart URL + comparison URL</h3>
+            <p>Has <code>Walmart_Url</code> and <code>Comp_Url</code> (Amazon).</p>
+            <p class="decision-action">Run <strong>Walmart Scrape &amp; Compare v2</strong>. Live run is safe; validation does not use ScraperAPI.</p>
+          </article>
+          <article class="card decision warn">
+            <span class="tag">Coverage</span>
+            <h3>Walmart URL only</h3>
+            <p>Has <code>Walmart_Url</code> but no comparison URL.</p>
+            <p class="decision-action">Run <strong>Walmart Coverage v1</strong>. It searches for the Amazon equivalent.</p>
+          </article>
+          <article class="card decision danger">
+            <span class="tag">Dedupe</span>
+            <h3>Feed columns</h3>
+            <p><code>product_id</code>, <code>pt</code>, <code>brand</code>, <code>upc</code>, <code>title</code> and similar.</p>
+            <p class="decision-action"><strong>Do not run live.</strong> ScraperAPI quota is exhausted. Capture as a follow-up.</p>
+          </article>
+        </div>
+
+        <div class="callout warn">
+          <strong>If the columns are mixed or unclear:</strong> stop and map them before uploading. A wrong column choice looks like a product-quality problem, not a configuration problem.
+        </div>
+      </section>
+
+      <section id="preflight" class="section">
+        <div class="section-head">
+          <p class="eyebrow">05 · Before upload</p>
+          <h2>CSV preflight</h2>
+          <p class="section-lede">Thirty seconds of hygiene saves a three-minute re-run.</p>
+        </div>
+
+        <div class="grid grid-2 align-start">
+          <div class="card">
+            <h3>Required shape</h3>
+            <ul class="ticks">
+              <li>Four core columns: <code>prmry_sku_id</code>, <code>Walmart_Url</code>, <code>comp_item_id__1</code>, <code>Comp_Url</code>.</li>
+              <li>Expected columns, if present: <code>Match_Type</code>, <code>Notes</code>, optionally <code>Match_Type_Comments</code>.</li>
+              <li>UTF-8, ideally without a BOM.</li>
+              <li>No blank rows; no duplicate <code>prmry_sku_id</code> values.</li>
+            </ul>
+            <pre class="sample" aria-label="Sample CSV header"><code>prmry_sku_id,Walmart_Url,comp_item_id__1,Comp_Url,Match_Type,Notes
+194305312,https://www.walmart.com/ip/194305312,B0012OG95S,https://www.amazon.com/dp/B0012OG95S,Incorrect Match,Color</code></pre>
+          </div>
+          <div class="card">
+            <h3>Red flags</h3>
+            <ul class="crosses">
+              <li>Triple-quote artifacts: <code>&quot;&quot;&quot;194305312&quot;&quot;&quot;</code> → normalize to <code>194305312</code>.</li>
+              <li>URLs without <code>http</code>, or Walmart URLs without <code>/ip/</code>.</li>
+              <li>Amazon URLs without <code>/dp/</code> or <code>/gp/product/</code>.</li>
+              <li>Expected labels other than <code>Exact Match</code> / <code>Incorrect Match</code>.</li>
+              <li>Notes containing multiple attributes; the plugin returns one primary note.</li>
+            </ul>
+            <p class="small muted">If the file is over 100 rows, run a 10-row sample first and queue the full file after the call.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="click-path" class="section">
+        <div class="section-head">
+          <p class="eyebrow">06 · Share the screen</p>
+          <h2>Live click path</h2>
+          <p class="section-lede">Say the action, do the action, then say what changed. No silent clicking.</p>
+        </div>
+
+        <div class="card">
+          <ol class="steps">
+            <li><strong>Storage → Upload files.</strong> Choose the dataset backend, drop the CSV, upload.</li>
+            <li><strong>Datasets → New dataset.</strong> Name it, select the storage config, set the object prefix. Create and wait for the scan.</li>
+            <li><strong>Pipelines → New pipeline.</strong> Pick the recipe <strong>Walmart vs Amazon Compare</strong>.</li>
+            <li><strong>Step 1 — scrape.</strong> URL columns <code>Walmart_Url</code> + <code>Comp_Url</code>; platforms walmart + amazon; keep technical defaults.</li>
+            <li><strong>Step 2 — compare.</strong> Attributes columns auto-derived; strictness <strong>Balanced</strong>; toggles as below.</li>
+            <li><strong>Save, open the pipeline, Run.</strong> Select the dataset and confirm.</li>
+            <li><strong>Watch the execution.</strong> Process ~2.5 min for 9 rows; allow up to ~9 min with agent polling; merge ~3 s. Then <strong>Storage → datasets → <code>validation9rowscsv_merged.csv</code></strong> → download.</li>
+            <li><strong>Read the result.</strong> Label first, notes second, residuals last.</li>
+          </ol>
+        </div>
+
+        <div class="callout note">
+          <strong>Two things not to show today:</strong> the hardcoded <code>/pilots/rise-otb</code> walkthrough (it is a 19-product scripted demo)
+          and the review queue (flag off, migration absent).
+        </div>
+      </section>
+
+      <section id="wizard" class="section">
+        <div class="section-head">
+          <p class="eyebrow">07 · Recipe answers</p>
+          <h2>Wizard answers</h2>
+          <p class="section-lede">These are the values to read back before saving. Balanced is the baseline; switch only after a diff.</p>
+        </div>
+
+        <div class="table-wrap card">
+          <table>
+            <thead>
+              <tr><th>Question</th><th>Answer</th><th>Why</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Which column holds the first product URL?</td><td><code>Walmart_Url</code></td><td>Primary listing side.</td></tr>
+              <tr><td>Which column holds the second product URL?</td><td><code>Comp_Url</code></td><td>Amazon comparison side.</td></tr>
+              <tr><td>How strict should the comparison be?</td><td><strong>Balanced</strong></td><td>0.6 exact / 0.8 brand / 0.8 title. Strict if we over-call Exact.</td></tr>
+              <tr><td>Treat missing values as a match?</td><td><strong>Yes</strong></td><td>One-sided scraper gaps should not create a false difference.</td></tr>
+              <tr><td>Allow title-only matching?</td><td><strong>Yes</strong> (Balanced)</td><td>Biggest false-Exact lever. Turn off in Strict.</td></tr>
+              <tr><td>Trust UPC match as proof?</td><td><strong>Yes</strong> (Balanced)</td><td>Bypasses attribute checks. Turn off in Strict.</td></tr>
+              <tr><td>Include comparison debug columns?</td><td><strong>No</strong></td><td>Deployed v1.4.2 does not implement this flag.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout danger">
+          <strong>Do not use the wizard’s “attribute weighting strength” slider.</strong> The field exists in the schema, but deployed
+          <code>compare.py</code> v1.4.2 only reads a raw <code>weights</code> object. The slider is inert.
+        </div>
+      </section>
+
+      <section id="calibration" class="section">
+        <div class="section-head">
+          <p class="eyebrow">08 · Match their labels</p>
+          <h2>Calibration console</h2>
+          <p class="section-lede">Use per-run overrides on step 1. Do not mutate the client’s saved template until the profile is agreed.</p>
+        </div>
+
+        <div class="callout note">
+          <strong>How to apply:</strong> pass <code>config_overrides</code> as <code>[null, { ...profile }]</code> in the run request.
+          The backend merges the override over the step config for that run only.
+        </div>
+
+        <div class="grid grid-3">
+          <article class="profile-card">
+            <div class="profile-head">
+              <span class="tag danger">Strict</span>
+              <h3>Fewer false Exact</h3>
+            </div>
+            <p class="small muted">Use when our output says Exact but the client says Incorrect.</p>
+            <div class="code-wrap">
+              <button class="btn copy print-hide" data-copy="strict-json" type="button">Copy</button>
+              <pre id="strict-json"><code>{
+  "enable_title_only_match": false,
+  "enable_upc_match_bypass": false,
+  "exact_match_threshold": 0.8,
+  "brand_similarity_threshold": 1.0,
+  "title_similarity_threshold": 0.9,
+  "color_empty_means_match": true,
+  "note_priority": ["Color", "Size", "Ounce", "Volume"],
+  "note_labels": {"Color": "Color", "Size": "Size", "Ounce": "Ounce", "Volume": "Volume"},
+  "not_found_note": "Product page not found (404)"
+}</code></pre>
+            </div>
+          </article>
+
+          <article class="profile-card">
+            <div class="profile-head">
+              <span class="tag ok">Balanced</span>
+              <h3>Current baseline</h3>
+            </div>
+            <p class="small muted">The live template values. Start here, then switch if the diff justifies it.</p>
+            <div class="code-wrap">
+              <button class="btn copy print-hide" data-copy="balanced-json" type="button">Copy</button>
+              <pre id="balanced-json"><code>{
+  "enable_title_only_match": true,
+  "enable_upc_match_bypass": true,
+  "exact_match_threshold": 0.6,
+  "brand_similarity_threshold": 0.8,
+  "title_similarity_threshold": 0.8,
+  "color_empty_means_match": true,
+  "note_priority": ["Color", "Size", "Ounce", "Volume"],
+  "note_labels": {"Color": "Color", "Size": "Size", "Ounce": "Ounce", "Volume": "Volume"},
+  "not_found_note": "Product page not found (404)"
+}</code></pre>
+            </div>
+          </article>
+
+          <article class="profile-card">
+            <div class="profile-head">
+              <span class="tag warn">Lenient</span>
+              <h3>Fewer false Incorrect</h3>
+            </div>
+            <p class="small muted">Use only when there is no two-sided attribute conflict. Otherwise it cannot help.</p>
+            <div class="code-wrap">
+              <button class="btn copy print-hide" data-copy="lenient-json" type="button">Copy</button>
+              <pre id="lenient-json"><code>{
+  "enable_title_only_match": true,
+  "enable_upc_match_bypass": true,
+  "exact_match_threshold": 0.5,
+  "brand_similarity_threshold": 0.7,
+  "title_similarity_threshold": 0.7,
+  "color_empty_means_match": true,
+  "note_priority": ["Color", "Size", "Ounce", "Volume"],
+  "note_labels": {"Color": "Color", "Size": "Size", "Ounce": "Ounce", "Volume": "Volume"},
+  "not_found_note": "Product page not found (404)"
+}</code></pre>
+            </div>
+          </article>
+        </div>
+
+        <div class="grid grid-2 align-start">
+          <div class="card">
+            <h3>Advanced keys</h3>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Key</th><th>Use it for</th></tr></thead>
+                <tbody>
+                  <tr><td><code>note_priority</code></td><td>Which attribute becomes the single primary note when several differ. Default: Color → Size → Ounce → Volume.</td></tr>
+                  <tr><td><code>note_labels</code></td><td>Rename a token to the client’s wording, e.g. <code>{"Ounce": "Weight"}</code> or <code>{"Color": "Colour"}</code>.</td></tr>
+                  <tr><td><code>not_found_note</code></td><td>Customize the 404 text. It cannot be blanked through config.</td></tr>
+                  <tr><td><code>weights</code></td><td>Confidence only: UPC 0.50, brand 0.20, title 0.15, size 0.10, color 0.05. Partial overrides are normalized. It does not suppress a two-sided conflict.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Diff protocol</h3>
+            <ol class="steps compact">
+              <li>Join on <code>prmry_sku_id</code>; strip quote artifacts.</li>
+              <li>Normalize labels to Exact / Incorrect.</li>
+              <li>Compare <code>Match_Type</code> first, <code>Notes</code> second.</li>
+              <li>Bucket: FALSE_EXACT, FALSE_INCORRECT, NOTE_ONLY, DELISTED, MISSING_DATA.</li>
+              <li>FALSE_EXACT → Strict. FALSE_INCORRECT → Lenient only if no two-sided conflict.</li>
+              <li>Record label agreement and label + notes agreement separately.</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Hard limits — config cannot fix these</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Symptom</th><th>Why</th><th>What to do</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td>We say Incorrect; they say Exact; note is Color / Size / Ounce.</td>
+                  <td>A two-sided attribute conflict hard-blocks Exact. A weight of <code>0</code> does not ignore it.</td>
+                  <td>Explain the difference. Offer a code-level ignore/canonicalization change if it is a policy call.</td>
+                </tr>
+                <tr>
+                  <td>We say Incorrect; they say Exact; note is 404.</td>
+                  <td>Delisted page. The plugin flags the scrape failure.</td>
+                  <td>Show the HTTP 404. Do not fake a match.</td>
+                </tr>
+                <tr>
+                  <td>Their note is Brand / Title / other.</td>
+                  <td>Notes are limited to Color, Size, Ounce, Volume.</td>
+                  <td>Map to the closest token or scope a code change.</td>
+                </tr>
+                <tr>
+                  <td>Their <code>Match_Type_Comments</code> wording differs.</td>
+                  <td>The output wording is fixed.</td>
+                  <td>Confirm whether the wording is contractual; if so, scope a change.</td>
+                </tr>
+                <tr>
+                  <td>We say Exact; they say Incorrect; note is blank.</td>
+                  <td>Title-only matching or UPC bypass over-called it.</td>
+                  <td>Switch to Strict; disable title-only and UPC bypass.</td>
+                </tr>
+                <tr>
+                  <td>One side is missing attributes.</td>
+                  <td>One-sided gaps do not block Exact; they can still distort confidence.</td>
+                  <td>Re-run the row or route it to review; do not hand-edit the verdict.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Run-time estimate</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Rows</th><th>Process</th><th>Merge</th><th>Total</th></tr></thead>
+              <tbody>
+                <tr><td>9</td><td>~2.5 min</td><td>~3 s</td><td>~6–9 min</td></tr>
+                <tr><td>25</td><td>~7 min</td><td>~3 s</td><td>~12–18 min</td></tr>
+                <tr><td>50</td><td>~14 min</td><td>~3 s</td><td>~20–28 min</td></tr>
+                <tr><td>100</td><td>~28 min</td><td>~3 s</td><td>~35–45 min</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="small muted">Assumes one online agent at ~16 s per row; total includes agent poll latency. Observed 29 Oct: 9 rows took 8m45s trigger-to-merge. Split larger files into a sample plus an async full run.</p>
+        </div>
+      </section>
+
+      <section id="say-avoid" class="section">
+        <div class="section-head">
+          <p class="eyebrow">09 · Language</p>
+          <h2>Say / avoid</h2>
+          <p class="section-lede">Precise language protects trust and avoids promising product behavior that is not shipped.</p>
+        </div>
+
+        <div class="grid grid-2 align-start">
+          <div class="card say">
+            <h3>Say</h3>
+            <ul class="ticks">
+              <li>“Today we’ll process your file and calibrate to your labels.”</li>
+              <li>“Two rows are delisted; we flag 404 rather than fake a match.”</li>
+              <li>“This is a calibration run; we’ll lock the profile after we see your expected output.”</li>
+              <li>“The comparison runs at about 25 seconds per row on one agent.”</li>
+              <li>“We keep the residual differences visible.”</li>
+            </ul>
+          </div>
+          <div class="card avoid">
+            <h3>Avoid</h3>
+            <ul class="crosses">
+              <li>“100% match” before calibration.</li>
+              <li>“Real-time” or “instant.”</li>
+              <li>“The review queue is ready.”</li>
+              <li>Any pricing number, discount, or currency comparison.</li>
+              <li>“Unlimited rows” or “no rate limits.”</li>
+              <li>Blaming Amazon/Walmart for every diff without showing the evidence.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="fallbacks" class="section">
+        <div class="section-head">
+          <p class="eyebrow">10 · If it goes sideways</p>
+          <h2>Fallbacks</h2>
+          <p class="section-lede">Have the next sentence ready before the failure happens.</p>
+        </div>
+
+        <div class="table-wrap card">
+          <table>
+            <thead><tr><th>Situation</th><th>Response</th></tr></thead>
+            <tbody>
+              <tr><td>Client CSV is not ready.</td><td>Walk through the existing 9-row file; capture their file for a post-call calibration run.</td></tr>
+              <tr><td>Agent is offline.</td><td>Show the local fallback merged CSV, explain the queue, and schedule the live run.</td></tr>
+              <tr><td>Run stalls past 8 minutes.</td><td>Check Devices heartbeat; capture the execution ID; do not restart blindly.</td></tr>
+              <tr><td>No merged output appears.</td><td>Check dataset merge status; use the local fallback; log the execution.</td></tr>
+              <tr><td>CSV is large.</td><td>Run a 10-row sample now; queue the full file after the call.</td></tr>
+              <tr><td>They ask for dedupe.</td><td>Explain the ScraperAPI quota; capture as a follow-up with a date.</td></tr>
+              <tr><td>Columns are wrong.</td><td>Stop; map or normalize; do not run until the shape is clean.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="after" class="section">
+        <div class="section-head">
+          <p class="eyebrow">11 · Close the loop</p>
+          <h2>After the call</h2>
+          <p class="section-lede">The recap is part of the deliverable. Send it while the screen share is still fresh.</p>
+        </div>
+
+        <div class="card">
+          <div class="check-grid">
+            <label class="check"><input type="checkbox" data-persist="save-csv"><span>Save their CSV and expected output against the dataset.</span></label>
+            <label class="check"><input type="checkbox" data-persist="rerun"><span>Run baseline + chosen profile; record both agreement numbers.</span></label>
+            <label class="check"><input type="checkbox" data-persist="recap"><span>Send recap: what ran, agreement %, residuals, next step, date.</span></label>
+            <label class="check"><input type="checkbox" data-persist="lock"><span>Lock the profile in the template or save a named recipe variant.</span></label>
+            <label class="check"><input type="checkbox" data-persist="log"><span>Update the session log and anchored summary.</span></label>
+            <label class="check"><input type="checkbox" data-persist="followups"><span>Log follow-ups: ScraperAPI renewal, review-queue flag, pricing decision.</span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Recap template</h3>
+          <p class="small muted">Fill the brackets, delete what does not apply, send the same day.</p>
+          <div class="code-wrap">
+            <button class="btn copy print-hide" data-copy="recap-text" type="button">Copy</button>
+            <pre id="recap-text"><code>Subject: RISE OTB validation — results and next step
+
+Hi [Name],
+
+We processed [file name] ([n] rows) on [date].
+
+Baseline profile: [x/y] label agreement, [x/y] label + notes agreement.
+Calibrated profile ([Strict/Balanced/Lenient]): [x/y] and [x/y].
+Correctly flagged as delisted / 404: [n] rows.
+
+Residual differences:
+- [SKU] — [what differs] — [config or policy call]
+- [SKU] — [what differs] — [config or policy call]
+
+Next step: [lock profile / re-run full file / code change] by [date].
+We will keep the residual list visible rather than forcing a match.
+
+Thanks,
+[Your name]</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="reference" class="section">
+        <div class="section-head">
+          <p class="eyebrow">12 · Facts</p>
+          <h2>Reference IDs</h2>
+          <p class="section-lede">For copy/paste during the call. Verify state live; this page is a snapshot.</p>
+        </div>
+
+        <details class="card details" open>
+          <summary>Account, org, dataset, pipeline</summary>
+          <div class="kv">
+            <div><span>Client login</span><code>test@riseotb.com</code></div>
+            <div><span>Org</span><code>Rise OTB · 5236b19e-6a2b-4cd9-a2b7-14441b7b7d07</code></div>
+            <div><span>Dataset</span><code>validation_9rows_csv · 72e32858-a004-45bd-9fe1-7ebcf09f185d</code></div>
+            <div><span>Template</span><code>Walmart Scrape &amp; Compare v2 · 36b0c68e-081f-48a3-8730-8d15ffe1d183</code></div>
+            <div><span>Recipe</span><code>Walmart vs Amazon Compare · a1000000-0000-4000-8000-000000000002</code></div>
+            <div><span>Compare plugin</span><code>compare.py v1.4.6</code></div>
+            <div><span>Agents</span><code>vcnsentra</code> + <code>sentra</code> — 2 online (checked 07:31 UTC)</div>
+            <div><span>Last execution</span><code>f9b4cb8b-9c62-42d5-a0f9-66b6ee9a16de · 30 Oct 07:29 UTC</code></div>
+            <div><span>New-links dataset</span><code>validation_new_links · 69495d3f-e15f-4364-8445-3215cf907c0d</code></div>
+            <div><span>New-links execution</span><code>1e236ae1-571c-44fe-ba9b-6ecf92ba980d · 30 Oct 07:31 UTC</code></div>
+            <div><span>Rehearsal dataset</span><code>validation_live_2026_10_29 · 92659198-ce3b-4889-afce-4f524ebd1064</code></div>
+            <div><span>Rehearsal execution</span><code>52d12d37-3ea1-45d0-9a62-7368746a9d03 · 29 Oct 08:06 UTC</code></div>
+            <div><span>Clean rehearsal</span><code>validation_live_clean_2026_10_29 · 3fe83ebb-ddeb-47ca-a3c9-f6df18ada533</code></div>
+            <div><span>Clean execution</span><code>05797b37-69a5-4447-b566-f4b85a3c10f3 · 29 Oct 09:05 UTC</code></div>
+            <div><span>Clean rerun</span><code>800b8161-734d-4dc2-b85d-3c3e77bd95f7 · 29 Oct 09:15 UTC</code></div>
+            <div><span>365 dataset / run</span><code>validation_365298585_2026_10_29 · a9e819e0-7723-479e-b18c-38f018e1d25b / 94a8a75c-380e-4df0-b3f0-5034c2e36c0a</code></div>
+            <div><span>Local fallback</span><code>validation_original_client_merged_2026-10-30.csv</code></div>
+            <div><span>Diff artifact</span><code>validation-compare-2026-10-29.csv</code></div>
+          </div>
+        </details>
+
+        <details class="card details">
+          <summary>Known state and caveats</summary>
+          <ul class="ticks">
+            <li>Validation pipeline (<code>scrape.py</code> → <code>compare.py</code>) does <strong>not</strong> use ScraperAPI.</li>
+            <li>Duplicate detection is blocked by the exhausted ScraperAPI quota.</li>
+            <li><strong>Latest runs 30 Oct 2026 (compare v1.4.6):</strong> original 9-row input returned <strong>2 Exact / 7 Incorrect</strong>, including two delisted 404s; new-links 13-row input returned <strong>3 Exact / 10 Incorrect</strong>.</li>
+            <li>Crayola <code>14927411</code> vs <code>B00004YO15</code> now returns <strong>Exact Match</strong> with <code>Everything matched all attributes</code>; both datasets are marked <code>merged_output_verified=true</code>.</li>
+            <li>Notes drift: 3 non-delisted rows differ from 12 Sep notes because notes are derived from live attributes; <code>Match_Type</code> still matched 9/9.</li>
+            <li>Dataset detail’s “Merged Output Location” text is legacy and wrong. Use <strong>Storage → datasets → <code>validation9rowscsv_merged.csv</code></strong>; signed download verified 29 Oct (HTTP 200, 1,730 B).</li>
+            <li>Fleet now has <strong>2 online agents</strong>: <code>vcnsentra</code> and <code>sentra</code>. <code>sentra</code> had been stuck offline; status reset + service restart restored heartbeat. <code>sentrazero</code> and <code>Unnamed Device</code> remain offline.</li>
+            <li><code>compare.py v1.4.6</code> normalizes multicolor/assorted wording and tolerates packaging dimensions vs pack count when pack counts agree, preventing the Crayola false negative.</li>
+            <li>Final local outputs: <code>validation_original_client_merged_2026-10-30.csv</code> (9 rows) and <code>validation_new_links_merged_2026-10-30.csv</code> (13 rows). Both match the client’s 7-column format.</li>
+            <li>Notes still drift on live re-scrapes because attribute extraction can vary; <code>Match_Type</code> remains the stable field. Two original rows are delisted and now return <code>Product page not found (404)</code>.</li>
+            <li>Review queue is not live: flag off and migration absent.</li>
+            <li>Pricing conflict: Segment A USD vs ₹30–35K/mo. Do not quote until reconciled.</li>
+          </ul>
+        </details>
+
+        <details class="card details">
+          <summary>Why the earlier pilot page is not the demo</summary>
+          <p>
+            The marketing <code>/pilots/rise-otb</code> walkthrough is a scripted 19-product experience.
+            For a new validation CSV, use the real dashboard path on this page so the client sees their own file,
+            their own row count, and their own result.
+          </p>
+        </details>
+      </section>
+
+      <footer class="footer">
+        <p>RISE OTB · Validation call console · Prepared for 30 Oct 2026.</p>
+        <p class="small muted">Snapshot only. Verify account, agent, and dataset state live before the call.</p>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      var storageKey = "riseotb-call-2026-10-29";
+
+      function safeGet(key) {
+        try { return localStorage.getItem(key); } catch (err) { return null; }
+      }
+
+      function safeSet(key, value) {
+        try { localStorage.setItem(key, value); } catch (err) { /* ignore */ }
+      }
+
+      document.querySelectorAll("input[type=checkbox][data-persist]").forEach(function (box) {
+        var key = storageKey + ":" + box.dataset.persist;
+        box.checked = safeGet(key) === "1";
+        box.addEventListener("change", function () {
+          safeSet(key, box.checked ? "1" : "0");
+        });
+      });
+
+      var reset = document.getElementById("resetChecklist");
+      if (reset) {
+        reset.addEventListener("click", function () {
+          document.querySelectorAll("input[type=checkbox][data-persist]").forEach(function (box) {
+            box.checked = false;
+            safeSet(storageKey + ":" + box.dataset.persist, "0");
+          });
+        });
+      }
+
+      document.querySelectorAll("[data-copy]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var target = document.getElementById(button.dataset.copy);
+          if (!target) return;
+          var text = target.innerText;
+          var done = function () {
+            var old = button.textContent;
+            button.textContent = "Copied";
+            window.setTimeout(function () { button.textContent = old; }, 1400);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
+          } else {
+            fallbackCopy(text, done);
+          }
+        });
+      });
+
+      function fallbackCopy(text, done) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.top = "-1000px";
+        document.body.appendChild(area);
+        area.select();
+        try { document.execCommand("copy"); } catch (err) { /* ignore */ }
+        document.body.removeChild(area);
+        done();
+      }
+
+      var print = document.getElementById("printBtn");
+      if (print) {
+        print.addEventListener("click", function () { window.print(); });
+      }
+
+      window.addEventListener("beforeprint", function () {
+        document.querySelectorAll("details").forEach(function (item) { item.open = true; });
+      });
+
+      if ("IntersectionObserver" in window) {
+        var links = Array.prototype.slice.call(document.querySelectorAll(".rail nav a"));
+        var sections = links.map(function (link) {
+          return document.querySelector(link.getAttribute("href"));
+        }).filter(Boolean);
+
+        var observer = new IntersectionObserver(function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting) return;
+            links.forEach(function (link) {
+              link.classList.toggle("active", link.getAttribute("href") === "#" + entry.target.id);
+            });
+          });
+        }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
+
+        sections.forEach(function (section) { observer.observe(section); });
+      }
+    }());
+  </script>
+</body>
+</html>

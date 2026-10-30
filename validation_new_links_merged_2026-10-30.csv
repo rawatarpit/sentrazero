@@ -1,0 +1,14 @@
+prmry_sku_id,Walmart_Url,comp_item_id__1,Comp_Url,Match_Type,Match_Type_Comments,Notes
+14927411,https://www.walmart.com/ip/14927411?selected=true,B00004YO15,https://www.amazon.com/dp/B00004YO15?psc=1&th=1&vs=1,Exact Match,Product and its attributes are matching,Everything matched all attributes
+17782635,https://www.walmart.com/ip/17782635?selected=true,B01BYGPT4K,https://www.amazon.com/dp/B01BYGPT4K?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Product details did not match; Needs human review
+221339772,https://www.walmart.com/ip/221339772?selected=true,B0876WKS8Q,https://www.amazon.com/dp/B0876WKS8Q?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Ounce did not match; Needs human review
+756351933,https://www.walmart.com/ip/756351933?selected=true,B0747ZC625,https://www.amazon.com/dp/B0747ZC625?psc=1&th=1&vs=1,Exact Match,Product and its attributes are matching,Everything matched all attributes
+3636759965,https://www.walmart.com/ip/3636759965?selected=true,B07PPJGGJ2,https://www.amazon.com/dp/B07PPJGGJ2?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size did not match; Needs human review
+14711712,https://www.walmart.com/ip/14711712?selected=true,B0033BCYOS,https://www.amazon.com/dp/B0033BCYOS?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Color did not match; Needs human review
+407826318,https://www.walmart.com/ip/407826318?selected=true,B000SRMDFA,https://www.amazon.com/dp/B000SRMDFA?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size did not match; Needs human review
+15610707,https://www.walmart.com/ip/15610707?selected=true,B000Q65224,https://www.amazon.com/dp/B000Q65224?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size did not match; Needs human review
+417378032,https://www.walmart.com/ip/417378032?selected=true,B08HVXZW8X,https://www.amazon.com/dp/B08HVXZW8X?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Color did not match; Needs human review
+5395277557,https://www.walmart.com/ip/5395277557?selected=true,B0932QJ2JZ,https://www.amazon.com/dp/B0932QJ2JZ?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Size did not match; Needs human review
+258144696,https://www.walmart.com/ip/258144696?selected=true,B00006IFHD,https://www.amazon.com/dp/B00006IFHD?psc=1&th=1&vs=1,Exact Match,Product and its attributes are matching,Everything matched all attributes
+703412326,https://www.walmart.com/ip/703412326?selected=true,0735211299,https://www.amazon.com/dp/0735211299?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Product details did not match; Needs human review
+701429755,https://www.walmart.com/ip/701429755?selected=true,0857197681,https://www.amazon.com/dp/0857197681?psc=1&th=1&vs=1,Incorrect Match,Product attributes are different,Product details did not match; Needs human review
